@@ -168,7 +168,9 @@ cython_debug/
 .vscode/
 
 # Misc folders
+.DS_Store
 data/
+docs/task/
 *ckpt.pt
 *.zip
 templates/*/run_0/
