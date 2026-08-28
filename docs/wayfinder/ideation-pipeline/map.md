@@ -36,6 +36,7 @@ A Robert-approved, decision-complete specification and implementation ticket map
 - [Establish the DeepSeek-V4-Pro-0813 provider contract](tickets/015-establish-the-deepseek-provider-contract.md): DeepSeek direct exposes the requested version only through a floating alias, leaving provider and pinning decisions open.
 - [Audit metadata gaps and enrichment sources](tickets/016-audit-metadata-gaps-and-enrichment-sources.md): exact identifiers cover all papers; three abstracts and provenance/completeness gaps require explicit corpus policy.
 - [Understand dataset routing metadata](tickets/033-understand-dataset-routing-metadata.md): routing is the target-reference pair; auxiliary edge/category fields stay outside model-visible retrieval.
+- [Audit the minimal ideation runtime](tickets/017-audit-the-minimal-ideation-runtime.md): today's ideation entry runs CPU-only on Python 3.11 plus five packages (one undeclared, one unused); the dependency contract and DeepSeek-V4-Pro-0813 support remain open.
 
 ## Not yet specified
 
