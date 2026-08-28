@@ -29,7 +29,7 @@ Add deterministic `tests/test_*.py`; run `python -m pytest -q` after adding `pyt
 
 ## Coding Style & Naming
 
-Target Python 3.11, four-space indentation, and Black. Use `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants. Keep external services behind small boundaries; make provenance and validation explicit.
+Target Python 3.11, four-space indentation, and Black. Use `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants. Keep external services behind small boundaries; make provenance and validation explicit. Write Robert-facing documents (research reports, tracker bodies, work logs) in Chinese; code, identifiers, paths, commands, and commit messages stay English.
 
 ## Reproducibility, Commits & Pull Requests
 
