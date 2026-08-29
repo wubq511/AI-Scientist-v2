@@ -45,6 +45,7 @@ status: open
 - [Choose the DeepSeek provider and version contract](tickets/031-choose-the-deepseek-provider-and-version-contract.md): 采用 DeepSeek direct 的浮动 V4 Pro alias；credential 保持本地，每次真实运行逐次估价审批，thinking 参数由后续 canary 实证选择。
 - [Define the Scoped Literature Retriever contract](tickets/020-define-the-scoped-retriever-contract.md): 模型只提交 query；本地 retriever 在唯一 approved corpus 内返回最小 source-faithful paper evidence，并以 deterministic ranking、private audit release gate 与 fail-closed errors 阻止越界或降级。
 - [Define the DeepSeek adapter contract](tickets/022-define-the-deepseek-adapter-contract.md): 采用 DeepSeek-only non-streaming Chat Completions adapter，以严格 allowlist、typed attempts、bounded retry、fail-closed validation、私有原始证据和官方人民币价格快照隔离 provider transport 与 ideation controller。
+- [Define run identity and evidence layout](tickets/023-define-run-identity-and-evidence-layout.md): 每次 run 以最小 opaque identity、固定 raw/sanitized roots、immutable event hash chain、terminal seal 与 fail-closed cross-run guards 隔离状态并保留完整 Evidence Chain。
 
 ## Not yet specified
 

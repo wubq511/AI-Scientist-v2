@@ -61,12 +61,28 @@ The permitted process from preparing target-scoped inputs through producing and 
 _Avoid_: AI Scientist pipeline, experiment pipeline
 
 **Ideation Run**:
-One execution of the Ideation Pipeline for a specific Target Paper.
+One isolated attempt to execute the Ideation Pipeline for one Ideation Case under a fixed run specification. It owns one Evidence Chain, may continue across an approved resume after interruption, and ends when it reaches a sealed terminal outcome; a replay or rerun is a new Ideation Run.
 _Avoid_: Experiment, downstream run
 
+**Run Specification**:
+The immutable declaration of the exact case, approved inputs, code, model, policies, configuration, and budgets under which an Ideation Run seeks admission. Changing it requires a new Ideation Run.
+_Avoid_: Current config, latest inputs
+
 **Run Isolation**:
-The guarantee that one Ideation Run cannot read or influence another run's ideas, prompts, reflections, or mutable state unless that input is explicitly declared.
+The guarantee that an Ideation Run cannot read or influence another run's ideas, prompts, reflections, artifacts, or mutable state. Runtime input from a prior run is prohibited unless a future contract explicitly introduces a narrower declared-import mechanism.
 _Avoid_: Shared archive, implicit resume
+
+**Run Admission**:
+The immutable evidence that preflight bound one Ideation Run to an exact approved input and policy set and permitted ideation work to begin. A rejected run has no Run Admission.
+_Avoid_: Latest config, implicit preflight
+
+**Run Seal**:
+The immutable terminal evidence that closes an Ideation Run and fixes its outcome and final Evidence Chain boundary. A sealed run cannot resume or accept more evidence.
+_Avoid_: Final save, completed flag
+
+**Evidence Event**:
+An immutable, run-scoped record of one lifecycle, action, output, validation, or failure fact, ordered within its Ideation Run and linked to supporting artifacts where needed.
+_Avoid_: Console log, mutable status row
 
 **Evidence Chain**:
 The connected record of inputs, decisions, actions, outputs, validations, and failures that explains why an Ideation Run is trustworthy.
