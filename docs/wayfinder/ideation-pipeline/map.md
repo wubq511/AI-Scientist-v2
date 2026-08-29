@@ -40,6 +40,7 @@ status: open
 - [Audit metadata gaps and enrichment sources](tickets/016-audit-metadata-gaps-and-enrichment-sources.md): 精确标识符覆盖全部论文；三个 abstract 与 provenance/完整性缺口需要显式 corpus 策略。
 - [Understand dataset routing metadata](tickets/033-understand-dataset-routing-metadata.md): 路由即 target-reference 配对；辅助 edge/category 字段不进入模型可见的检索。
 - [Audit the minimal ideation runtime](tickets/017-audit-the-minimal-ideation-runtime.md): 现有 ideation 入口在 Python 3.11 CPU 下只需五个包（一个未声明、一个未使用）；依赖契约与 DeepSeek-V4-Pro-0813 支持仍待决策。
+- [Choose the DeepSeek provider and version contract](tickets/031-choose-the-deepseek-provider-and-version-contract.md): 采用 DeepSeek direct 的浮动 V4 Pro alias；credential 保持本地，每次真实运行逐次估价审批，thinking 参数由后续 canary 实证选择。
 
 ## Not yet specified
 
