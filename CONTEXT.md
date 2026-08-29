@@ -41,8 +41,20 @@ The private association of one Target Paper, one Approved Workshop, and one Targ
 _Avoid_: Dataset row, target ID
 
 **Scoped Literature Retriever**:
-A literature query capability whose results come exclusively from one Target Reference Corpus and fail when that boundary cannot be proven.
+A literature query capability bound by runtime preflight to exactly one Approved Target Reference Corpus. The model supplies query text but cannot choose or switch scope; retrieval fails when the boundary cannot be proven.
 _Avoid_: Semantic Scholar search, global retriever
+
+**Retrieval Segment**:
+A bounded, source-faithful portion of eligible Reference Content used as model-visible literature evidence, with an exact link to its source content and without becoming derived text.
+_Avoid_: Generated excerpt, fallback summary
+
+**Retrieval Result**:
+A paper-level, model-visible response from a Scoped Literature Retriever containing only stable paper identity, title, and eligible Retrieval Segments; array order expresses relevance.
+_Avoid_: Search dump, ranked metadata
+
+**Retrieval Audit Event**:
+A private, non-model-visible record that connects one retrieval invocation to its bound corpus, policy, candidates, ranking decisions, returned evidence, and outcome.
+_Avoid_: Tool response, model context
 
 **Ideation Pipeline**:
 The permitted process from preparing target-scoped inputs through producing and validating research ideas.
