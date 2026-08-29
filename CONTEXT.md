@@ -25,8 +25,20 @@ A private, non-model-visible provenance record that links one Workshop File to i
 _Avoid_: Prompt metadata, Workshop frontmatter
 
 **Target Reference Corpus**:
-The unique set of reference papers associated with one Target Paper and the sole literature boundary for that case.
+A self-contained, per-case literature artifact whose membership is the unique set of reference papers associated with one Target Paper and whose frozen form is the sole local literature boundary for that case. Retrieval readiness requires trustworthy identity, searchable-content status, membership proof, and provenance; citation completeness is not required.
 _Avoid_: Global corpus, reference pool
+
+**Reference Content**:
+Source-faithful paper text retained by a Target Reference Corpus for possible retrieval, labeled by its actual source type such as publisher abstract or official full text. Derived text never assumes the identity of a published abstract.
+_Avoid_: Fallback abstract, repaired abstract
+
+**Approved Target Reference Corpus**:
+A Target Reference Corpus whose exact bundle identity has passed deterministic validation, focused review of exceptional content, and the approved version and canary gates, and is permitted as an Ideation Run's sole local literature input.
+_Avoid_: Generated corpus, latest corpus
+
+**Ideation Case**:
+The private association of one Target Paper, one Approved Workshop, and one Target Reference Corpus, addressed at runtime by an opaque `case_id` that does not reveal the Target Paper's identity.
+_Avoid_: Dataset row, target ID
 
 **Scoped Literature Retriever**:
 A literature query capability whose results come exclusively from one Target Reference Corpus and fail when that boundary cannot be proven.

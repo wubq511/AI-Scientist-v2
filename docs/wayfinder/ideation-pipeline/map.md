@@ -41,13 +41,13 @@ status: open
 - [Understand dataset routing metadata](tickets/033-understand-dataset-routing-metadata.md): 路由即 target-reference 配对；辅助 edge/category 字段不进入模型可见的检索。
 - [Audit the minimal ideation runtime](tickets/017-audit-the-minimal-ideation-runtime.md): 现有 ideation 入口在 Python 3.11 CPU 下只需五个包（一个未声明、一个未使用）；依赖契约与 DeepSeek-V4-Pro-0813 支持仍待决策。
 - [Define the Workshop File contract](tickets/018-define-the-workshop-file-contract.md): 以 target `title + raw abstract` 私下派生严格四段、identity-free 的英文 Workshop；通过确定性与独立语义验证后才准入 ideation，身份和审计证据留在 private manifest。
+- [Define the frozen corpus contract](tickets/019-define-the-frozen-corpus-contract.md): 每个 case 使用可确定性复现、field-level 可追溯且分层验证通过的 self-contained corpus bundle，runtime 只接受显式 pin 的 Approved Target Reference Corpus。
 - [Choose the DeepSeek provider and version contract](tickets/031-choose-the-deepseek-provider-and-version-contract.md): 采用 DeepSeek direct 的浮动 V4 Pro alias；credential 保持本地，每次真实运行逐次估价审批，thinking 参数由后续 canary 实证选择。
 
 ## Not yet specified
 
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
 
-- 是否有 target 领域需要超出已提供 metadata 和 abstract 的文献内容。
 - 最终面试叙事应如何优先呈现失败或降级 run 中浮现的发现。
 - `DeepSeek-V4-Pro-0813` 是否 memorize 了 2024 年的 Target Paper；Workshop 去污染无法消除参数化污染。
 

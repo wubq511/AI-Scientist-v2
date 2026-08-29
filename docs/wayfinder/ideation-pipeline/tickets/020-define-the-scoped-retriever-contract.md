@@ -10,4 +10,4 @@ blocked_by:
 
 ## Question
 
-What inputs, outputs, invariants, audit proof, empty-result behavior, ranking controls, and fail-closed errors must replace `SearchSemanticScholar` without any global or remote fallback?
+What frozen-corpus inputs, Reference Content eligibility rules, outputs, invariants, audit proof, empty-result behavior, ranking controls, and fail-closed errors must replace `SearchSemanticScholar` without any global or remote fallback?
