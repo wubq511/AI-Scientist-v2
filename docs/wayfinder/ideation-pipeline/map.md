@@ -44,6 +44,7 @@ status: open
 - [Define the frozen corpus contract](tickets/019-define-the-frozen-corpus-contract.md): 每个 case 使用可确定性复现、field-level 可追溯且分层验证通过的 self-contained corpus bundle，runtime 只接受显式 pin 的 Approved Target Reference Corpus。
 - [Choose the DeepSeek provider and version contract](tickets/031-choose-the-deepseek-provider-and-version-contract.md): 采用 DeepSeek direct 的浮动 V4 Pro alias；credential 保持本地，每次真实运行逐次估价审批，thinking 参数由后续 canary 实证选择。
 - [Define the Scoped Literature Retriever contract](tickets/020-define-the-scoped-retriever-contract.md): 模型只提交 query；本地 retriever 在唯一 approved corpus 内返回最小 source-faithful paper evidence，并以 deterministic ranking、private audit release gate 与 fail-closed errors 阻止越界或降级。
+- [Define the DeepSeek adapter contract](tickets/022-define-the-deepseek-adapter-contract.md): 采用 DeepSeek-only non-streaming Chat Completions adapter，以严格 allowlist、typed attempts、bounded retry、fail-closed validation、私有原始证据和官方人民币价格快照隔离 provider transport 与 ideation controller。
 
 ## Not yet specified
 
