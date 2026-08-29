@@ -1,0 +1,63 @@
+{
+  "cases": [
+    {
+      "case_id": "fixture-case",
+      "corpus_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "papers": [
+        {
+          "paper_id": "p-bm25",
+          "segments": [
+            {
+              "content_item_order": 0,
+              "content_type": "publisher_abstract",
+              "segment_id": "seg-bm25",
+              "source_start": 0,
+              "text": "BM25 ranks exact scientific terms with term frequency saturation and document length normalization."
+            }
+          ],
+          "title": "Probabilistic lexical ranking for local literature"
+        },
+        {
+          "paper_id": "p-citation",
+          "segments": [
+            {
+              "content_item_order": 0,
+              "content_type": "publisher_abstract",
+              "segment_id": "seg-citation",
+              "source_start": 0,
+              "text": "PageRank and citation counts prioritize graph importance rather than evidence for a query."
+            }
+          ],
+          "title": "Citation graph ranking"
+        },
+        {
+          "paper_id": "p-dense",
+          "segments": [
+            {
+              "content_item_order": 0,
+              "content_type": "official_full_text",
+              "segment_id": "seg-dense",
+              "source_start": 120,
+              "text": "Dense passage embeddings bridge vocabulary mismatch in local document retrieval."
+            }
+          ],
+          "title": "Semantic retrieval with passage embeddings"
+        }
+      ],
+      "queries": [
+        {
+          "kind": "broad",
+          "query_id": "fixture-broad",
+          "text": "local literature retrieval"
+        },
+        {
+          "kind": "focused",
+          "query_id": "fixture-focused",
+          "text": "exact scientific terms BM25"
+        }
+      ]
+    }
+  ],
+  "schema_version": "local-ranking-input-v1",
+  "split": "fixture"
+}

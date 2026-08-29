@@ -190,6 +190,9 @@ aisci_outputs/
 slurm_logs/
 .out
 
+# Throwaway local-ranking comparison raw evidence
+artifacts/local-ranking-prototype/
+
 # final papers
 final_papers/
 

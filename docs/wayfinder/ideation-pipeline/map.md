@@ -34,12 +34,12 @@ status: open
 - [Retain auditable run evidence](tickets/010-retain-auditable-run-evidence.md): 保留本地原始证据，提交脱敏的 manifest 与摘要。
 - [Trust layered validation and isolated runs](tickets/011-trust-layered-validation-and-isolated-runs.md): 确定性、replay 与定性证据共同支撑结果。
 - [Govern evidence-driven optimization](tickets/012-govern-evidence-driven-optimization.md): 用证据比较可行备选，再选最简有效设计。
-- [Keep the runtime ideation-only](tickets/013-keep-the-runtime-ideation-only.md): 最小 CPU 环境，不含 downstream 依赖。
+- [Keep the runtime ideation-only](tickets/013-keep-the-runtime-ideation-only.md): 保留可移植 CPU FP32 reference path；推理加速只能通过独立证据门槛后作为可选 backend，不含 downstream 依赖。
 - [Understand target-to-workshop semantics](tickets/014-understand-target-to-workshop-semantics.md): IdeaBench 让 target 内容不参与生成；recruiter 特有的 Workshop transform 需要显式泄漏策略。
 - [Establish the DeepSeek-V4-Pro-0813 provider contract](tickets/015-establish-the-deepseek-provider-contract.md): DeepSeek 直连仅以浮动 alias 提供目标版本，provider 与版本锁定决策仍开放。
 - [Audit metadata gaps and enrichment sources](tickets/016-audit-metadata-gaps-and-enrichment-sources.md): 精确标识符覆盖全部论文；三个 abstract 与 provenance/完整性缺口需要显式 corpus 策略。
 - [Understand dataset routing metadata](tickets/033-understand-dataset-routing-metadata.md): 路由即 target-reference 配对；辅助 edge/category 字段不进入模型可见的检索。
-- [Audit the minimal ideation runtime](tickets/017-audit-the-minimal-ideation-runtime.md): 现有 ideation 入口在 Python 3.11 CPU 下只需五个包（一个未声明、一个未使用）；依赖契约与 DeepSeek-V4-Pro-0813 支持仍待决策。
+- [Audit the minimal ideation runtime](tickets/017-audit-the-minimal-ideation-runtime.md): 历史 Python 3.11 CPU test cell 证明现有 ideation 入口只需五个包（一个未声明、一个未使用）；这证明兼容性而非继续锁定 runtime minor，依赖契约仍待决策。
 - [Define the Workshop File contract](tickets/018-define-the-workshop-file-contract.md): 以 target `title + raw abstract` 私下派生严格四段、identity-free 的英文 Workshop；通过确定性与独立语义验证后才准入 ideation，身份和审计证据留在 private manifest。
 - [Define the frozen corpus contract](tickets/019-define-the-frozen-corpus-contract.md): 每个 case 使用可确定性复现、field-level 可追溯且分层验证通过的 self-contained corpus bundle，runtime 只接受显式 pin 的 Approved Target Reference Corpus。
 - [Choose the DeepSeek provider and version contract](tickets/031-choose-the-deepseek-provider-and-version-contract.md): 采用 DeepSeek direct 的浮动 V4 Pro alias；credential 保持本地，每次真实运行逐次估价审批，thinking 参数由后续 canary 实证选择。
@@ -59,7 +59,7 @@ status: open
 <!-- see "Out of scope": work ruled beyond the destination; closed, never graduates -->
 
 - BFTS、代码实验、绘图、LaTeX write-up、自动 review、`launch_scientist_bfts.py`。
-- CUDA、GPU、PyTorch 训练，以及仅 downstream 阶段使用的依赖。
+- GPU/accelerator 训练、把任何 accelerator 设为必需，以及仅 downstream 阶段使用的依赖；未通过独立证据 gate 的推理 backend 同样排除。
 - Ideation Run 期间的全局或远程文献检索。
 - 直接修改即可满足时，另建独立 ideation 子系统或框架。
 - 未经 Robert 单独批准，发布 tracker 内容或仓库变更。

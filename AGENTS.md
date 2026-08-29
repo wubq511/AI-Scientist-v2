@@ -29,7 +29,9 @@ Add deterministic `tests/test_*.py`; run `python -m pytest -q` after adding `pyt
 
 ## Coding Style & Naming
 
-Target Python 3.11, four-space indentation, and Black. Use `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants. Keep external services behind small boundaries; make provenance and validation explicit. Write Robert-facing documents (research reports, tracker bodies, work logs) in Chinese; code, identifiers, paths, commands, and commit messages stay English.
+Target Python 3.13 as the reference minor, four-space indentation, and Black. Record the exact patch and per-platform dependency lock for evidence runs; treat 3.12/3.14 as compatibility candidates and 3.11 results as historical evidence unless a later approved contract changes this policy. Use `snake_case` for modules/functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants. Keep external services behind small boundaries; make provenance and validation explicit. Write Robert-facing documents (research reports, tracker bodies, work logs) in Chinese; code, identifiers, paths, commands, and commit messages stay English.
+
+The ideation-only runtime must retain a portable CPU FP32 reference path. Optional inference acceleration may be added only after a scoped comparison proves a material end-to-end benefit, no observable payload drift or operator fallback, and acceptable dependency cost; no accelerator is required. Exclude accelerator-dependent runtime assumptions, GPU training, and downstream-only stacks. The root `README.md` retains upstream full-pipeline CUDA/Python 3.11 instructions and is not the runtime contract for this fork.
 
 ## Reproducibility, Commits & Pull Requests
 

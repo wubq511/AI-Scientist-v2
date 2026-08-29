@@ -19,6 +19,8 @@ We are excited to introduce The AI Scientist-v2, a generalized end-to-end agenti
 
 This system autonomously generates hypotheses, runs experiments, analyzes data, and writes scientific manuscripts. Unlike [its predecessor (AI Scientist-v1)](https://github.com/SakanaAI/AI-Scientist), the AI Scientist-v2 removes reliance on human-authored templates, generalizes across Machine Learning (ML) domains, and employs a progressive agentic tree search, guided by an experiment manager agent.
 
+> **Fork scope:** The instructions below document the upstream end-to-end pipeline. This fork's active scope is ideation-only; `AGENTS.md` and the local Wayfinder decisions are authoritative. Do not use the CUDA/BFTS/experiment instructions for ideation work.
+
 > **Note:**
 > The AI Scientist-v2 doesn’t necessarily produce better papers than v1, especially when a strong starting template is available. v1 follows well-defined templates, leading to high success rates, while v2 takes a broader, more exploratory approach with lower success rates. v1 works best for tasks with clear objectives and a solid foundation, whereas v2 is designed for open-ended scientific exploration.
 

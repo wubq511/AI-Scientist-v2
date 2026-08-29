@@ -1,12 +1,14 @@
 # 最小 Ideation Runtime 审计
 
+> Policy note（2026-08-30）：本文记录的 Python 3.11.15/CPU-only 环境是一次历史兼容性 test cell，用来证明现有 import path 不需要 downstream/GPU stack；它不构成当前 reference minor 或永久 accelerator ban。当前治理 policy 是 Python 3.13 reference minor + mandatory CPU FP32 reference path + evidence-gated optional inference acceleration，详见 [local ranking runtime 调研](local-ranking-runtime-and-dense-model.md)。
+
 对应 Wayfinder ticket `Audit the minimal ideation runtime`：在不安装、不导入 downstream 依赖的前提下，实际运行 preprocessing、ideation 和 validation 需要哪些 import、包、命令和平台假设。
 
 方法：从 ideation 入口静态追踪完整 import 图，与 `requirements.txt` 交叉核对，再用隔离的 uv venv（Python 3.11.15，只装 5 个候选包）做实证导入验证。验证后 venv 已删除。
 
 ## 结论
 
-当前 ideation 路径（`ai_scientist/perform_ideation_temp_free.py`）在 CPU-only 机器上只需要 Python 3.11 标准库加五个第三方包——`anthropic`、`backoff`、`openai`、`requests`、`tiktoken`。任何 downstream 模块（`treesearch/`、write-up、plotting、review、`vlm.py`、`ideas/*.py`）都不会被传递导入。但 `requirements.txt` 并不描述这个最小集合：它漏掉了 `requests`，强制装了几十个 downstream-only 的包，且没有任何版本锁定。
+当前 ideation 路径（`ai_scientist/perform_ideation_temp_free.py`）已在 CPU-only Python 3.11 test cell 中证明只需要标准库加五个第三方包——`anthropic`、`backoff`、`openai`、`requests`、`tiktoken`。任何 downstream 模块（`treesearch/`、write-up、plotting、review、`vlm.py`、`ideas/*.py`）都不会被传递导入。但 `requirements.txt` 并不描述这个最小集合：它漏掉了 `requests`，强制装了几十个 downstream-only 的包，且没有任何版本锁定。
 
 ## 已验证的最小 runtime
 
@@ -48,7 +50,7 @@ python ai_scientist/perform_ideation_temp_free.py \
 
 ## ideation 路径上的平台假设
 
-- **Python**：README 和 `AGENTS.md` 约定 3.11；本机 ambient 默认解释器是 3.14.6，且仓库没有 `.python-version`/`pyproject.toml` 标记，版本约定目前只存在于文档。
+- **Python（审计时事实）**：当时 README 和 `AGENTS.md` 约定 3.11；本机 ambient 默认解释器是 3.14.6，且仓库没有 `.python-version`/`pyproject.toml` 标记。`AGENTS.md` 已于 2026-08-30 将新 reference minor 改为 3.13；本条保留原始审计语境。
 - **CPU/OS**：ideation 路径是纯 Python；不涉及 CUDA、`subprocess`、`signal`、`multiprocessing`（那些都在 treesearch 和 write-up 里）。与 OS 无关。
 - **运行时网络**：LLM API endpoint 和 Semantic Scholar API。这与已决策的 frozen-corpus 边界（`Freeze literature before ideation`）冲突：入口路径上的 `SearchSemanticScholar` 工具必须替换为 Scoped Literature Retriever（见 `Define the scoped retriever contract`）。
 - **环境变量**：按 `--model` 选择 provider key（`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` 由默认 client 构造器隐式读取，另有 `DEEPSEEK_API_KEY`、`GEMINI_API_KEY`、`OPENROUTER_API_KEY`、`HUGGINGFACE_API_KEY`、`OLLAMA_API_KEY`、Bedrock 的 AWS 变量），外加可选的 `S2_API_KEY`。
