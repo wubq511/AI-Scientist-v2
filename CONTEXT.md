@@ -156,6 +156,14 @@ _Avoid_: Judge prompt, evaluation report
 The versioned contract (`docs/agents/validation-matrix.md`) cataloging every check across nine layers (unit, contract, integration, replay, leakage, isolation, fault-injection, minimal-environment, qualitative), defining what must pass and what evidence proves each gate; it indexes runtime gates decided elsewhere and defines the development-time tests that prove them.
 _Avoid_: Test plan, test suite
 
+**Canary**:
+A fixed, Robert-approved set of representative Ideation Cases, selected by documented stratified rules and deliberately including a minority of known edge cases, that serves both first real-run validation and the model-parameter and Workshop-variant comparisons before any scale-out toward the interview-sized final wave.
+_Avoid_: Test subset, pilot batch
+
+**Scale Gate**:
+The explicit checkpoint of isolation, quality, cost, and recovery conditions plus Robert's approval that must hold before model execution expands beyond the Canary toward an interview-sized final wave; its conditions cite Validation Matrix rows rather than restating them.
+_Avoid_: Milestone, sign-off
+
 **Downstream Experiment**:
 Any AI Scientist phase after idea generation, including BFTS, code experiments, plotting, write-up, and review; it is outside this project’s scope.
 _Avoid_: Ideation Run

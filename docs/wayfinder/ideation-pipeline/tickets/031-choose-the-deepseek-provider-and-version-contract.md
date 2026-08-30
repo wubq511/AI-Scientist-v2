@@ -24,3 +24,5 @@ Robert 批准以下 provider/version 合同：
 - 禁止 DeepSeek provider 自带的 `web_search`；模型只能使用项目的 Scoped Literature Retriever，以维持 Target Reference Corpus 边界。
 
 本 ticket 未调用 DeepSeek、未使用 credential、未产生费用，也未决定 Chat Completions 与 Responses API 的 adapter 形状；后者仍属于 [Define the DeepSeek adapter contract](022-define-the-deepseek-adapter-contract.md)。
+
+**2026-08-30 修订指针**：[Define canaries and scale gates](028-define-canaries-and-scale-gates.md) 将本票「逐 run 批准」修订为：**终波按批批准**（批内逐 run 列估价行，一次批准覆盖该批，批间检查点可中止）；smoke 与 canary 阶段的逐 run 估价批准维持不变。
