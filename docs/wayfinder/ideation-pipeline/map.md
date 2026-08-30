@@ -52,6 +52,7 @@ status: open
 - [Choose IdeaBench evaluation fidelity](tickets/032-choose-ideabench-evaluation-fidelity.md): Target Paper 仅作 sealed qualitative comparator——Robert 判分的结构化 post-seal Evaluation Artifact，canary 阶段逐 run 强制——不复现任何官方指标；报告以术语纪律与 "Evaluation fidelity" 专节区分本适配与官方复现，并主动披露 DeepSeek 参数化污染 caveat。
 - [Define the idea quality rubric](tickets/026-define-the-idea-quality-rubric.md): 两层 rubric——runtime 收 declared grounding 说谎检测、payload hygiene 扫描（命中即 terminal）与 run 内去重，post-seal 为 032 六项加 grounding 综合质量；feasible/novelty 仅定性，跨 run 重复归 Run Isolation。
 - [Define the declared grounding contract](tickets/038-define-the-declared-grounding-contract.md): FinalizeIdea 封闭两键加扁平 `grounding` id 数组，per-generation eligibility（收紧 026 措辞）、三码 model-fixable 回灌、gate 固定优先级 hygiene 最先；prompt diff 围栏扩大至 ARGUMENTS/示例块（024 留指针）。
+- [Define the post-seal evaluation artifact contract](tickets/037-define-the-post-seal-evaluation-artifact-contract.md): 每 finalized idea 一份 private canonical JSON artifact——七项 enum+rationale（无数值分）、run/seal/idea/target 全 hash 链接、assemble→validate 两阶段、自含审计、线性 supersedes、fail-closed 校验；无 sanitized stub，覆盖率由只读 list-coverage 核算。
 
 ## Not yet specified
 

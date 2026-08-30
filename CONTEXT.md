@@ -121,8 +121,12 @@ The repeated use of an Evidence Chain to find weaknesses, propose a design impro
 _Avoid_: Ad hoc optimization, prompt tweaking
 
 **Evaluation Artifact**:
-A private, non-model-visible record produced after a Run Seal that stores Robert's structured qualitative comparison of one sealed run's final idea against its unsealed Target Paper, kept outside that run's Evidence Chain.
+A private, non-model-visible record produced after a Run Seal that stores Robert's structured qualitative comparison of one finalized idea from that sealed run against its unsealed Target Paper — exactly one artifact per finalized idea, regardless of the run's Terminal Outcome — kept outside that run's Evidence Chain.
 _Avoid_: Benchmark score, official metric
+
+**Evaluation Brief**:
+The private, tool-assembled side-by-side comparison material — a finalized idea payload with its Declared Grounding and the relevant Retrieval Segments set against the Target Paper's `abstract_summary` and full abstract — that Robert reads to author an Evaluation Artifact. It is reading material, not evidence, and may be regenerated.
+_Avoid_: Judge prompt, evaluation report
 
 **Downstream Experiment**:
 Any AI Scientist phase after idea generation, including BFTS, code experiments, plotting, write-up, and review; it is outside this project’s scope.
