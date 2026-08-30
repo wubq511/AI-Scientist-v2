@@ -16,6 +16,8 @@ blocked_by:
 - [Local ranking 是否需要论文全文](../../../prototypes/local-ranking-full-text-decision.md)
 - [Local ranking 正式输入就绪检查](../../../prototypes/local-ranking-input-readiness.md)
 - [Local ranking 正式输入准备证据](../../../prototypes/local-ranking-input-preparation.md)
+- [E5 512-token 边界与摘要长度政策研究](../../../prototypes/e5-length-policy-research.md)
+- [Local ranking 长度政策最小比较](../../../prototypes/local-ranking-length-policy-comparison.md)
 - [Local ranking Windows dense smoke](../../../prototypes/local-ranking-windows-dense-smoke.md)
 
 ## Question
@@ -36,4 +38,4 @@ Windows/macOS Python 3.13 locks 已用 `uv 0.12.4`、binary-only resolution 和 
 
 Input preparation 已形成 12-case proposal、12 个 zero-error corpus bundles 与 12 份 deterministic-validation-passed Workshop drafts，并由第二 attempt 对 52 个 selection/corpus artifacts 完成 byte-identical replay。Robert 随后授权 Codex 从第一性原理研究并决定 input/full-text policy；逐案语义审计、全部 reference-title inspection、结构化 abstract audit 与一手资料调研支持批准全部 12 cases。`input-approval-001` 已用 immutable sidecars 绑定 selection、Workshop、corpus、validator 与 v1.1 protocol hashes，approved cases 现为 12。
 
-v1.1 正式 relevance comparison 明确采用题名 + `publisher_abstract`，不混入覆盖不均的全文；结论只支持 abstract-level local paper ranking。168 篇摘要中有 4 篇超过 450 whitespace-delimited words，因此在 qrels 前必须用 pinned E5 tokenizer 做 exact 512-token preflight；若超限，先冻结一个所有 arms 共用、source-faithful、可回链的 abstract segmentation policy。下一步由隔离的新会话只读取 Approved Workshop query-author packet 起草 24 queries，再进入 blind qrels。Finalists 冻结后再做 Windows 10 次 fresh-process replay，且只有 dense 成为 finalist 时才在 Mac 安装 neural stack 做 cross-platform replay。在 Robert 审阅真实 development/holdout 结果并选择 winner 前，本 ticket 保持 open，不能写 Resolution 或更新 map 为最终 ranking 决策。
+v1.1 正式 relevance comparison 明确采用题名 + `publisher_abstract`，不混入覆盖不均的全文；结论只支持 abstract-level local paper ranking。Pinned E5 exact tokenizer preflight 已完成：11/168 篇（5 cases）完整 `passage: ` inputs 超过 512，最大 1101；统一前截断会丢 8,458 source characters。已批准 512 仅作为 E5 单 segment hard boundary，并冻结只分割这 11 篇、所有 arms 共用、sentence-aware、zero-overlap、full-coverage、可精确回链的 segmentation；两个 fresh-process probes byte-identical，180/180 outputs 均 `<=512`。下一步由隔离的新会话只读取 Approved Workshop query-author packet 起草 24 queries，再由 controller materialize formal segments 并进入 blind qrels。Finalists 冻结后再做 Windows 10 次 fresh-process replay，且只有 dense 成为 finalist 时才在 Mac 安装 neural stack 做 cross-platform replay。在 Robert 审阅真实 development/holdout 结果并选择 winner 前，本 ticket 保持 open，不能写 Resolution 或更新 map 为最终 ranking 决策。

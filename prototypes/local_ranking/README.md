@@ -49,6 +49,19 @@ python -m prototypes.local_ranking.prepare_model \
 
 The preparation command downloads only the six allowlisted files from the approved E5 commit, verifies the frozen weight size/SHA-256 and model-size gate, writes a closed manifest, and never overwrites an earlier attempt. A failed partial directory is evidence and must not be reused.
 
+The approved abstract length policy can be replayed without loading model weights or running a ranker:
+
+```bash
+uv run --no-project --with 'tokenizers==0.23.1' \
+  python -m prototypes.local_ranking.length_policy_probe \
+  --approval-root <private-input-approval> \
+  --corpora-root <approved-preparation-corpora> \
+  --tokenizer-json <pinned-e5-tokenizer.json> \
+  --output <new-private-attempt>/result.json
+```
+
+The probe counts `passage: ` and special tokens inside the 512-token E5 input limit. It preserves every approved abstract and emits deterministic source offsets/hashes for sentence-first, zero-overlap segmentation only where the full input exceeds the model boundary. It does not create queries/qrels, score candidates, or make the formal input adapter optional.
+
 `fixtures/protocol.json` is a lexical/RRF diagnostic example. An attempt is immutable: running the same `comparison_id + attempt_id` twice fails instead of overwriting evidence. Copy the frozen protocol with a new `attempt_id` to perform another replay; do not edit an already-run attempt.
 
 The harness:

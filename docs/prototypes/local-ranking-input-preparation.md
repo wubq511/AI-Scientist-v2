@@ -11,7 +11,7 @@ Status: **Approved inputs / queries and qrels pending**
 - 已形成 12 个 private case proposals：development/holdout 各 6 个，每个 split 都有 `small=2`、`medium=2`、`large=2`，reference 数覆盖 3–36，整体覆盖 8 个 broad clusters，包含 4 个 `strategy=2` targets。
 - 已机械构建 12 个 private corpus bundles，共 168 条 reference records；12 份 `validation-report.json` 均为 zero-error，且 quarantined `contexts`、`intents`、`isInfluential`、dynamic ranking fields 和 Target identity 未进入 `corpus.json`。
 - 已起草 12 份 canonical Workshop Markdown。Derivation author 只读取 private `title + raw abstract` authoring packet，没有打开任何 selected corpus 或 reference evidence；12 份 draft 的 schema/identity/URL/DOI/8-token n-gram deterministic checks 全部通过。
-- `input-approval-001` 已批准全部 12 个 cases、Workshop drafts、corpus policy versions 与本轮使用；pending source artifacts 没有被覆盖，而是由新 sidecars 按 hash 标记为 Approved。正式 development/holdout 仍须等待 queries、pinned-tokenizer length preflight 和 blind qrels。
+- `input-approval-001` 已批准全部 12 个 cases、Workshop drafts、corpus policy versions 与本轮使用；pending source artifacts 没有被覆盖，而是由新 sidecars 按 hash 标记为 Approved。Exact pinned-tokenizer preflight 与共同长度政策随后也已完成；正式 development/holdout 仍须等待隔离起草的 queries、formal segment materialization 和 blind qrels。
 
 ## 选择与输入边界
 
@@ -21,7 +21,7 @@ Status: **Approved inputs / queries and qrels pending**
 
 当前 12 个 bundles 全部只包含 validated raw abstract content，每篇一个 source content item。现有 approved source artifacts 中没有 coverage 一致、许可/provenance 已冻结的 official-full-text snapshot；对 PubMed、SPECTER/SPECTER2、Google Scholar、Europe PMC、OpenAlex 和全文检索对照研究的调查支持将 v1.1 明确限定为 abstract-level local paper ranking。没有用 citation contexts、生成摘要或未批准网络内容填补，也不把部分 papers 的全文混入本轮。全文路线的重新打开条件见 [Local ranking 是否需要论文全文](local-ranking-full-text-decision.md)。
 
-结构审计覆盖全部 168 条 records：paper IDs、titles 和 abstracts 均唯一；无空内容、placeholder abstract 或少于 200 characters 的异常短摘要；全部 content type 都是 `publisher_abstract`。按每个 case 最短/最长 abstract 的确定性分层抽查未发现冒充 abstract 的内容。4 篇摘要超过 450 whitespace-delimited words，最长约 865 words；因此 qrels 前必须用 pinned E5 tokenizer 做 exact 512-token preflight，必要时先冻结所有 arms 共用的 source-faithful abstract segmentation。
+结构审计覆盖全部 168 条 records：paper IDs、titles 和 abstracts 均唯一；无空内容、placeholder abstract 或少于 200 characters 的异常短摘要；全部 content type 都是 `publisher_abstract`。按每个 case 最短/最长 abstract 的确定性分层抽查未发现冒充 abstract 的内容。早期 word-count audit 只发现 4 篇超过 450 whitespace words；exact pinned tokenizer preflight 则确认 11 篇 `passage: ` inputs 超过 512 tokens，证明 word count 不能替代模型长度检查。获批政策完整保留 abstract，只把这 11 篇分为共同、可回链的 source spans；详见 [Local ranking 长度政策最小比较](local-ranking-length-policy-comparison.md)。
 
 ## Immutable attempts
 
@@ -60,6 +60,17 @@ Robert 明确委托 Codex 从第一性原理研究并决定 input 与全文政�
 | `query-author-packet/manifest.json` | `aca55098a6167840fe7b36bfec3d128f07f4d15477c4869617a5d338ebf51ef8` |
 
 Approval CLI 在写入前重新验证 exact protocol/selection/preparation/Workshop/corpus/report hashes、12 个 semantic approvals、zero-error validators、policy versions 与 168 条 `publisher_abstract` records。再次使用同一 `approval_id` 会返回 `ARTIFACT_EXISTS`；query-author packet 的 12 份 Workshop 与获批 draft bytes 完全一致，且不含 Target authoring input、reference content、qrels 或 ranker output。
+
+## Exact tokenizer length decision
+
+`length_policy_probe` 只读取 hash-approved corpora 和 pinned revision 的 exact `tokenizer.json`，不读取 query/qrels/ranker output。Harness 冻结并验证 tokenizer SHA-256 与 `tokenizers==0.23.1`；两个 fresh processes 产生 byte-identical private `result.json`（SHA-256 `fedd7fc747f587903d1c4f5329ec59c0242e9ac57a7c48f72cee70a97ea79083`）：
+
+- 168 篇中 157 篇 full abstract input 合法，11 篇分布在 5 cases 中超限；token min/p50/p95/max 为 67/323/567/1101；
+- 统一前截断会删除 1,931 input tokens、8,458 source characters，违反完整 source evidence invariant；
+- 只分割 11 篇后共 180 segments：157 篇 1 段、10 篇 2 段、1 篇 3 段；maximum exact input length 为 512；
+- reconstruction、coverage、overlap、empty 和 two-run repeatability gates 全部通过。
+
+因此 `512` 只批准为 E5 单 segment 输入边界，不是 corpus/abstract 上限。共同 segmentation 已冻结为 sentence boundary first、whitespace fallback、极端情况下 source-character fallback，全部 `[source_start, source_end)` spans 无重叠、无遗漏、可精确重建。正式 input adapter 仍须把这份政策 materialize 为 harness schema；probe result 本身不是 qrels 或 ranking evidence。
 
 ## Replay 与验证
 
@@ -102,4 +113,4 @@ python -m prototypes.local_ranking.input_preparation approve \
 
 ## 下一 gate
 
-输入审批已经完成。下一步必须由一个没有读取 Target authoring packet 或 corpus/reference content 的新会话，只读取 `input-approval-001/query-author-packet/` 起草 24 条 broad/focused queries。随后在 qrels 前完成 pinned-tokenizer length preflight，并按需冻结共同 abstract segmentation；再生成 Robert blind qrels form。当前会话已经见过 Target 与 references，不能兼任 query author。
+输入审批与 pinned-tokenizer length decision 已完成。下一步必须由一个没有读取 Target authoring packet 或 corpus/reference content 的新会话，只读取 `input-approval-001/query-author-packet/` 起草 24 条 broad/focused queries。随后 controller 按已批准政策 materialize 180 个 formal Retrieval Segments、验证 query exact token length，再生成 Robert blind qrels form。当前会话已经见过 Target 与 references，不能兼任 query author。
