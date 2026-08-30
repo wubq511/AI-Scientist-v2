@@ -120,6 +120,30 @@ _Avoid_: Console log, final result
 The repeated use of an Evidence Chain to find weaknesses, propose a design improvement, validate it, and retain what was learned.
 _Avoid_: Ad hoc optimization, prompt tweaking
 
+**Optimization Promotion**:
+The governed mechanism that turns an Evidence Feedback Loop finding into an accepted design change: a Promotion Proposal takes effect only after passing a Plan Gate and a Promotion Gate, and the pinned design stays unchanged otherwise.
+_Avoid_: Ad hoc tuning, silent update
+
+**Promotion Proposal**:
+The sanitized, sequentially numbered record of one proposed evidence-motivated design change, carrying the falsifiable hypothesis, one-major-variable declaration, comparison plan, pre-registered pass/fail criteria and Regression Budgets, evidence summary, and both gate decisions.
+_Avoid_: Optimization ticket, tweak request
+
+**Plan Gate**:
+Robert's approval of a Promotion Proposal's hypothesis, comparison plan, Regression Budgets, and cost estimate, required before any comparison run may begin.
+_Avoid_: Informal go-ahead, post-hoc sign-off
+
+**Promotion Gate**:
+Robert's final decision on a Promotion Proposal, judged solely against the criteria pre-registered at its Plan Gate without introducing new discretion.
+_Avoid_: Merge approval, rubber stamp
+
+**Regression Budget**:
+The per-dimension tolerance — deterministic, cost, and quality — pre-registered in a Promotion Proposal; exceeding it, or regressing on an unbudgeted dimension, automatically rejects the proposal.
+_Avoid_: Error bar, informal tolerance
+
+**Design Epoch**:
+The span of Ideation Runs and their evidence produced under one pinned design state; canary and scale evidence is comparable only within an epoch, and each Optimization Promotion opens a new one.
+_Avoid_: Phase, config version
+
 **Evaluation Artifact**:
 A private, non-model-visible record produced after a Run Seal that stores Robert's structured qualitative comparison of one finalized idea from that sealed run against its unsealed Target Paper — exactly one artifact per finalized idea, regardless of the run's Terminal Outcome — kept outside that run's Evidence Chain.
 _Avoid_: Benchmark score, official metric

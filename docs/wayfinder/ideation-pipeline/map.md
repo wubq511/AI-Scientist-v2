@@ -54,6 +54,7 @@ status: open
 - [Define the declared grounding contract](tickets/038-define-the-declared-grounding-contract.md): FinalizeIdea 封闭两键加扁平 `grounding` id 数组，per-generation eligibility（收紧 026 措辞）、三码 model-fixable 回灌、gate 固定优先级 hygiene 最先；prompt diff 围栏扩大至 ARGUMENTS/示例块（024 留指针）。
 - [Define the post-seal evaluation artifact contract](tickets/037-define-the-post-seal-evaluation-artifact-contract.md): 每 finalized idea 一份 private canonical JSON artifact——七项 enum+rationale（无数值分）、run/seal/idea/target 全 hash 链接、assemble→validate 两阶段、自含审计、线性 supersedes、fail-closed 校验；无 sanitized stub，覆盖率由只读 list-coverage 核算。
 - [Define the validation and test matrix](tickets/027-define-the-validation-and-test-matrix.md): 九层验证矩阵落为独立契约文档 `docs/agents/validation-matrix.md`——索引既有 runtime gate、新定义开发期测试层；委托阈值走版本化规则集 + 契约可推导值 + calibration-pending 三类；证据沿用 010；028/029/030 以行 ID 消费。
+- [Define the optimization promotion gate](tickets/029-define-the-optimization-promotion-gate.md): 确立 Optimization Promotion 机制——证据驱动的设计变更过双 gate（Plan/Promotion）+ pre-registered 判据与 Regression Budget，bugfix 与未定设计豁免；Design Epoch 证据可比性规则供 028 引用；契约落 `docs/agents/promotion-gate.md` v1.0。
 
 ## Not yet specified
 
