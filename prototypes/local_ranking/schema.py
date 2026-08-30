@@ -183,6 +183,7 @@ class ProtocolSpec:
     artifact_root: str
     input_ref: ArtifactRef
     qrels_ref: ArtifactRef | None
+    environment_lock_ref: ArtifactRef | None
     evaluation_mode: str
     runtime: RuntimeSpec
     dense_model: DenseModelSpec | None
@@ -390,6 +391,7 @@ def parse_protocol(value: Any) -> ProtocolSpec:
             "artifact_root",
             "input",
             "qrels",
+            "environment_lock",
             "evaluation_mode",
             "runtime",
             "normalization_version",
@@ -419,6 +421,13 @@ def parse_protocol(value: Any) -> ProtocolSpec:
         fail("INVALID_SCHEMA", "with_qrels mode requires a frozen qrels artifact")
     if evaluation_mode == "scoring_only" and qrels_ref is not None:
         fail("INVALID_SCHEMA", "scoring_only mode must not expose qrels")
+    environment_lock_ref = None
+    if root["environment_lock"] is not None:
+        environment_lock_ref = _parse_artifact_ref(
+            root["environment_lock"], label="protocol.environment_lock"
+        )
+    if split != "fixture" and environment_lock_ref is None:
+        fail("PROTOCOL_DEVIATION", "Formal splits require a frozen environment lock")
     runtime_obj = _object(
         root["runtime"],
         label="protocol.runtime",
@@ -677,6 +686,7 @@ def parse_protocol(value: Any) -> ProtocolSpec:
         artifact_root=root["artifact_root"],
         input_ref=input_ref,
         qrels_ref=qrels_ref,
+        environment_lock_ref=environment_lock_ref,
         evaluation_mode=evaluation_mode,
         runtime=runtime,
         dense_model=dense_model,

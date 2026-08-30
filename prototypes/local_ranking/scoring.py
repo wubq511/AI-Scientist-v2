@@ -250,7 +250,7 @@ ALLOWED_MODEL_FILES = {
 }
 
 
-def _validate_model_artifacts(repo_root: Path, model: DenseModelSpec) -> Path:
+def validate_model_artifacts(repo_root: Path, model: DenseModelSpec) -> Path:
     artifact_dir = resolve_repo_relative(
         repo_root, model.artifact_dir, label="dense artifact_dir"
     )
@@ -320,7 +320,7 @@ class DenseEncoder:
         model_spec = protocol.dense_model
         if model_spec is None:
             fail("MISSING_MODEL", "Dense candidate has no pinned model specification")
-        artifact_dir = _validate_model_artifacts(repo_root, model_spec)
+        artifact_dir = validate_model_artifacts(repo_root, model_spec)
         os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"

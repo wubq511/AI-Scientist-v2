@@ -12,6 +12,7 @@ from typing import Any
 
 from .canonical import parse_json_bytes, read_exact_bytes, resolve_repo_relative
 from .errors import HarnessError, fail
+from .network_guard import install_network_guard
 from .normalization import normalize_query
 from .ranking import QueryRanking, rank_scored_query, ranking_as_dict
 from .schema import CandidateSpec, parse_protocol, parse_ranking_input
@@ -78,6 +79,14 @@ def execute_worker(
     repo_root: Path, protocol_path: str, candidate_id: str, mode: str
 ) -> dict[str, Any]:
     protocol, ranking_input, _ = _load(repo_root, protocol_path)
+    network_policy = os.environ.get("LOCAL_RANKING_NETWORK_POLICY")
+    if protocol.runtime.measure_resources:
+        if network_policy != "deny":
+            fail(
+                "NETWORK_POLICY_MISSING",
+                "Measured workers require the local network-denial guard",
+            )
+        install_network_guard()
     candidate = _candidate(protocol, candidate_id)
     os.environ["PYTHONHASHSEED"] = "0"
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -111,6 +120,7 @@ def execute_worker(
                 "implementation": platform.python_implementation(),
                 "system": platform.system(),
                 "machine": platform.machine(),
+                "network_policy": network_policy or "not_enforced",
             },
         }
     results: list[dict[str, Any]] = []
@@ -179,6 +189,7 @@ def execute_worker(
             "implementation": platform.python_implementation(),
             "system": platform.system(),
             "machine": platform.machine(),
+            "network_policy": network_policy or "not_enforced",
         },
         "queries": results,
     }

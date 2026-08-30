@@ -86,6 +86,7 @@
   ],
   "comparison_id": "diagnostic-v1",
   "dense_model": null,
+  "environment_lock": null,
   "evaluation_mode": "with_qrels",
   "input": {
     "path": "prototypes/local_ranking/fixtures/input.json",
