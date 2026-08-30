@@ -56,7 +56,6 @@ status: open
 <!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
 
 - 最终面试叙事应如何优先呈现失败或降级 run 中浮现的发现。
-- `DeepSeek-V4-Pro-0813` 是否 memorize 了 2024 年的 Target Paper；Workshop 去污染无法消除参数化污染。
 
 ## Out of scope
 
