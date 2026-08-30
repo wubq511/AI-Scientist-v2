@@ -18,6 +18,7 @@ blocked_by:
 - [Local ranking 正式输入准备证据](../../../prototypes/local-ranking-input-preparation.md)
 - [E5 512-token 边界与摘要长度政策研究](../../../prototypes/e5-length-policy-research.md)
 - [Local ranking 长度政策最小比较](../../../prototypes/local-ranking-length-policy-comparison.md)
+- [Local ranking 正式输入与盲评表](../../../prototypes/local-ranking-formal-input-and-blind-qrels.md)
 - [Local ranking Windows dense smoke](../../../prototypes/local-ranking-windows-dense-smoke.md)
 
 ## Question
@@ -38,4 +39,6 @@ Windows/macOS Python 3.13 locks 已用 `uv 0.12.4`、binary-only resolution 和 
 
 Input preparation 已形成 12-case proposal、12 个 zero-error corpus bundles 与 12 份 deterministic-validation-passed Workshop drafts，并由第二 attempt 对 52 个 selection/corpus artifacts 完成 byte-identical replay。Robert 随后授权 Codex 从第一性原理研究并决定 input/full-text policy；逐案语义审计、全部 reference-title inspection、结构化 abstract audit 与一手资料调研支持批准全部 12 cases。`input-approval-001` 已用 immutable sidecars 绑定 selection、Workshop、corpus、validator 与 v1.1 protocol hashes，approved cases 现为 12。
 
-v1.1 正式 relevance comparison 明确采用题名 + `publisher_abstract`，不混入覆盖不均的全文；结论只支持 abstract-level local paper ranking。Pinned E5 exact tokenizer preflight 已完成：11/168 篇（5 cases）完整 `passage: ` inputs 超过 512，最大 1101；统一前截断会丢 8,458 source characters。已批准 512 仅作为 E5 单 segment hard boundary，并冻结只分割这 11 篇、所有 arms 共用、sentence-aware、zero-overlap、full-coverage、可精确回链的 segmentation；两个 fresh-process probes byte-identical，180/180 outputs 均 `<=512`。下一步由隔离的新会话只读取 Approved Workshop query-author packet 起草 24 queries，再由 controller materialize formal segments 并进入 blind qrels。Finalists 冻结后再做 Windows 10 次 fresh-process replay，且只有 dense 成为 finalist 时才在 Mac 安装 neural stack 做 cross-platform replay。在 Robert 审阅真实 development/holdout 结果并选择 winner 前，本 ticket 保持 open，不能写 Resolution 或更新 map 为最终 ranking 决策。
+v1.1 正式 relevance comparison 明确采用题名 + `publisher_abstract`，不混入覆盖不均的全文；结论只支持 abstract-level local paper ranking。Pinned E5 exact tokenizer preflight 已完成：11/168 篇（5 cases）完整 `passage: ` inputs 超过 512，最大 1101；统一前截断会丢 8,458 source characters。已批准 512 仅作为 E5 单 segment hard boundary，并冻结只分割这 11 篇、所有 arms 共用、sentence-aware、zero-overlap、full-coverage、可精确回链的 segmentation。
+
+隔离 query-author session 已只基于 Approved Workshop packet 冻结 24 条 queries；controller 在 Robert 的 delegated authority 下原样批准、未改写 query bytes。Formal adapter 随后物化 168 papers / 180 shared segments，max query/title/segment exact inputs 为 44/53/512 tokens；两个 hardened fresh-process attempts byte-identical，并生成了中文规则、本地离线的 development/holdout blind qrels HTML。当前唯一数据 blocker 是 Robert 的 176 条 development + 160 条 holdout query-paper judgments 以及至少 24 小时后的 stability reassessment；holdout 导出在 finalists/参数冻结前由 Robert 封存。Finalists 冻结后再做 Windows 10 次 fresh-process replay，且只有 dense 成为 finalist 时才在 Mac 安装 neural stack 做 cross-platform replay。在 Robert 审阅真实 development/holdout 结果并选择 winner 前，本 ticket 保持 open，不能写 Resolution 或更新 map 为最终 ranking 决策。

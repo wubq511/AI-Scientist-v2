@@ -72,6 +72,8 @@ Approval CLI 在写入前重新验证 exact protocol/selection/preparation/Works
 
 因此 `512` 只批准为 E5 单 segment 输入边界，不是 corpus/abstract 上限。共同 segmentation 已冻结为 sentence boundary first、whitespace fallback、极端情况下 source-character fallback，全部 `[source_start, source_end)` spans 无重叠、无遗漏、可精确重建。正式 input adapter 仍须把这份政策 materialize 为 harness schema；probe result 本身不是 qrels 或 ranking evidence。
 
+后续隔离 query-author session 已冻结 24 条 queries；controller 根据 Robert 的 delegated approval 原样批准，未改写 query bytes。`formal_input` adapter 将 exact approved corpora + queries materialize 为 development/holdout `local-ranking-input-v1`，并复核 query/title/segment exact lengths。两个 hardened fresh-process attempts byte-identical：168 papers / 180 segments，max query/title/segment 为 44/53/512 tokens，且全部 segment offsets/token counts/text hashes 与 approved length probe 的 168 条 private records 精确一致。详细见 [Local ranking 正式输入与盲评表](local-ranking-formal-input-and-blind-qrels.md)。
+
 ## Replay 与验证
 
 准备入口：
@@ -113,4 +115,4 @@ python -m prototypes.local_ranking.input_preparation approve \
 
 ## 下一 gate
 
-输入审批与 pinned-tokenizer length decision 已完成。下一步必须由一个没有读取 Target authoring packet 或 corpus/reference content 的新会话，只读取 `input-approval-001/query-author-packet/` 起草 24 条 broad/focused queries。随后 controller 按已批准政策 materialize 180 个 formal Retrieval Segments、验证 query exact token length，再生成 Robert blind qrels form。当前会话已经见过 Target 与 references，不能兼任 query author。
+输入、query、pinned-tokenizer length decision、formal Retrieval Segments 与 blind qrels form 已完成。下一步由 Robert 完成 development/holdout blind judgments；development 导出可交给 controller 校验，holdout 导出在 finalists 与参数冻结前由 Robert 封存。初次 judgment 至少 24 小时后还需按冻结 seed 重标每个 split 的 15%（至少 30 条）并通过 stability gate。

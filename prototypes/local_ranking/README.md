@@ -62,6 +62,36 @@ uv run --no-project --with 'tokenizers==0.23.1' \
 
 The probe counts `passage: ` and special tokens inside the 512-token E5 input limit. It preserves every approved abstract and emits deterministic source offsets/hashes for sentence-first, zero-overlap segmentation only where the full input exceeds the model boundary. It does not create queries/qrels, score candidates, or make the formal input adapter optional.
 
+After an isolated author freezes the query manifest, record the delegated or human approval without rewriting those bytes:
+
+```bash
+python -m prototypes.local_ranking.formal_input approve-queries \
+  --query-manifest <private-query-manifest.json> \
+  --packet-manifest <approved-query-author-packet/manifest.json> \
+  --protocol <approved-v1.1-protocol.md> \
+  --output <new-private-query-approval.json> \
+  --approved-on <YYYY-MM-DD> \
+  --decision-actor <actor> \
+  --delegated-by <authority> \
+  --delegation-text <exact-authority-text>
+```
+
+Materialize the formal development/holdout inputs and blind qrels pages with:
+
+```bash
+uv run --no-project --with 'tokenizers==0.23.1' \
+  python -m prototypes.local_ranking.formal_input materialize \
+  --approval-root <private-input-approval> \
+  --corpora-root <approved-preparation-corpora> \
+  --query-manifest <private-query-manifest.json> \
+  --query-approval <private-query-approval.json> \
+  --protocol <approved-v1.1-protocol.md> \
+  --tokenizer-json <pinned-e5-tokenizer.json> \
+  --output-root <new-private-formal-input-attempt>
+```
+
+This fail-closed adapter validates every bound hash, uses one shared source-complete segmentation for all arms, checks exact E5 query/title/segment lengths, and emits canonical harness inputs. Its self-contained HTML pages have no external resources and export qrels only after the review form is complete; they never generate relevance labels themselves.
+
 `fixtures/protocol.json` is a lexical/RRF diagnostic example. An attempt is immutable: running the same `comparison_id + attempt_id` twice fails instead of overwriting evidence. Copy the frozen protocol with a new `attempt_id` to perform another replay; do not edit an already-run attempt.
 
 The harness:
