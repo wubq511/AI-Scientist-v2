@@ -22,6 +22,23 @@ not create queries/qrels or label any artifact approved. Workshop drafts are val
 second immutable step with `validate-workshops`; the query author must use a fresh context
 that can read Approved Workshops but cannot read the authoring packet or corpus content.
 
+An explicit, hash-bound review decision becomes immutable approval sidecars with:
+
+```bash
+python -m prototypes.local_ranking.input_preparation approve \
+  --preparation-root <private-preparation-attempt> \
+  --draft-set <validated-draft-set> \
+  --decision-record <private-review-decision.json> \
+  --protocol <approved-v1.1-protocol.md> \
+  --approval-id <new-approval-id>
+```
+
+The command revalidates the exact selection, preparation, Workshop, corpus, validator,
+policy, and protocol hashes before writing. It never overwrites pending inputs. Its
+`query-author-packet/` contains only byte-identical Approved Workshops plus a closed
+manifest; Target authoring input, corpus/reference content, qrels, and ranker outputs stay
+outside that packet.
+
 Prepare the pinned dense model in previously unused repository-relative paths before entering offline mode:
 
 ```bash

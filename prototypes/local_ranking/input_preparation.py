@@ -32,6 +32,8 @@ ENRICHMENT_POLICY_VERSION = "raw-ideabench-reference-v1"
 CORPUS_VALIDATOR_VERSION = "prototype-corpus-validator-v1.0.1"
 WORKSHOP_VALIDATOR_VERSION = "prototype-workshop-validator-v1.0.1"
 WORKSHOP_CONTRACT_VERSION = "workshop-contract-v1.0"
+INPUT_REVIEW_SCHEMA_VERSION = "prototype-input-review-v1.0"
+INPUT_APPROVAL_SCHEMA_VERSION = "prototype-input-approval-v1.0"
 WORKSHOP_NGRAM_TOKENS = 8
 SPLITS = ("development", "holdout")
 STRATA = ("small", "medium", "large")
@@ -61,6 +63,7 @@ WORKSHOP_PATTERN = re.compile(
 URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
 DOI_PATTERN = re.compile(r"\b10\.\d{4,9}/[-._;()/:a-z0-9]+", re.IGNORECASE)
 PAPER_ID_PATTERN = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
+APPROVAL_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1034,6 +1037,473 @@ def validate_workshops(
     }
 
 
+def _read_json_object(path: Path, *, label: str) -> tuple[dict[str, Any], bytes]:
+    if not path.is_file():
+        fail("MISSING_ARTIFACT", f"{label} is missing", path=str(path))
+    data = path.read_bytes()
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except UnicodeDecodeError as exc:
+        fail("INVALID_UTF8", f"{label} is not valid UTF-8", offset=exc.start)
+    except json.JSONDecodeError as exc:
+        fail(
+            "INVALID_JSON",
+            f"{label} is not valid JSON",
+            line=exc.lineno,
+            column=exc.colno,
+        )
+    if not isinstance(value, dict):
+        fail("INVALID_REVIEW", f"{label} must be a JSON object")
+    return value, data
+
+
+def _require_exact_keys(
+    value: dict[str, Any], expected: set[str], *, label: str
+) -> None:
+    actual = set(value)
+    if actual != expected:
+        fail(
+            "INVALID_REVIEW",
+            f"{label} has unexpected keys",
+            missing=sorted(expected - actual),
+            unknown=sorted(actual - expected),
+        )
+
+
+def _repo_relative(path: Path, repo_root: Path, *, label: str) -> str:
+    resolved = path.resolve()
+    if not resolved.is_relative_to(repo_root):
+        fail("PATH_ESCAPE", f"{label} must stay inside the repository")
+    return resolved.relative_to(repo_root).as_posix()
+
+
+def _validate_review_decision(
+    decision: dict[str, Any],
+    *,
+    approval_id: str,
+    case_ids: list[str],
+    protocol_path: str,
+    protocol_sha256: str,
+    selection_sha256: str,
+) -> dict[str, dict[str, Any]]:
+    _require_exact_keys(
+        decision,
+        {
+            "approval_id",
+            "approved_on",
+            "authority",
+            "case_reviews",
+            "corpus_policy",
+            "protocol",
+            "schema_version",
+            "selection",
+        },
+        label="decision record",
+    )
+    if decision["schema_version"] != INPUT_REVIEW_SCHEMA_VERSION:
+        fail("UNSUPPORTED_SCHEMA", "Decision record schema version does not match")
+    if decision["approval_id"] != approval_id:
+        fail("INVALID_REVIEW", "Decision approval_id does not match the command")
+    if not isinstance(decision["approved_on"], str) or not decision["approved_on"]:
+        fail("INVALID_REVIEW", "approved_on must be a non-empty string")
+
+    authority = decision["authority"]
+    if not isinstance(authority, dict):
+        fail("INVALID_REVIEW", "authority must be an object")
+    _require_exact_keys(
+        authority,
+        {"decision_actor", "delegated_by", "delegation_text", "review_method"},
+        label="authority",
+    )
+    if any(not isinstance(value, str) or not value for value in authority.values()):
+        fail("INVALID_REVIEW", "authority values must be non-empty strings")
+
+    protocol = decision["protocol"]
+    if not isinstance(protocol, dict):
+        fail("INVALID_REVIEW", "protocol must be an object")
+    _require_exact_keys(protocol, {"path", "sha256", "version"}, label="protocol")
+    if (
+        protocol["path"] != protocol_path
+        or protocol["sha256"] != protocol_sha256
+        or protocol["version"] != "v1.1"
+    ):
+        fail("HASH_MISMATCH", "Decision does not approve the exact v1.1 protocol")
+
+    selection = decision["selection"]
+    if not isinstance(selection, dict):
+        fail("INVALID_REVIEW", "selection must be an object")
+    _require_exact_keys(
+        selection,
+        {"rationale", "selection_manifest_sha256", "status"},
+        label="selection",
+    )
+    if (
+        selection["status"] != "approved"
+        or selection["selection_manifest_sha256"] != selection_sha256
+        or not isinstance(selection["rationale"], str)
+        or not selection["rationale"]
+    ):
+        fail("APPROVAL_REQUIRED", "Case selection has not been approved exactly")
+
+    corpus_policy = decision["corpus_policy"]
+    if not isinstance(corpus_policy, dict):
+        fail("INVALID_REVIEW", "corpus_policy must be an object")
+    _require_exact_keys(
+        corpus_policy,
+        {
+            "allowed_content_types",
+            "conclusion_scope",
+            "limitations",
+            "rationale",
+            "status",
+            "versions",
+        },
+        label="corpus_policy",
+    )
+    expected_versions = {
+        "enrichment_policy": ENRICHMENT_POLICY_VERSION,
+        "normalization": CORPUS_NORMALIZATION_VERSION,
+        "schema": CORPUS_SCHEMA_VERSION,
+        "validator": CORPUS_VALIDATOR_VERSION,
+    }
+    if (
+        corpus_policy["status"] != "approved"
+        or corpus_policy["allowed_content_types"] != ["publisher_abstract"]
+        or corpus_policy["conclusion_scope"] != "abstract_level_local_paper_ranking"
+        or corpus_policy["versions"] != expected_versions
+        or not isinstance(corpus_policy["rationale"], str)
+        or not corpus_policy["rationale"]
+        or not isinstance(corpus_policy["limitations"], list)
+        or not corpus_policy["limitations"]
+        or any(
+            not isinstance(item, str) or not item
+            for item in corpus_policy["limitations"]
+        )
+    ):
+        fail("APPROVAL_REQUIRED", "Abstract-only corpus policy is not fully approved")
+
+    reviews = decision["case_reviews"]
+    if not isinstance(reviews, list):
+        fail("INVALID_REVIEW", "case_reviews must be an array")
+    by_case: dict[str, dict[str, Any]] = {}
+    expected_checks = {
+        "multiple_method_families",
+        "no_answer_leakage",
+        "no_identity_leakage",
+        "target_relevance",
+    }
+    for index, review in enumerate(reviews):
+        if not isinstance(review, dict):
+            fail("INVALID_REVIEW", "A case review must be an object", index=index)
+        _require_exact_keys(
+            review,
+            {"case_id", "checks", "rationale", "status"},
+            label=f"case_reviews[{index}]",
+        )
+        case_id = review["case_id"]
+        checks = review["checks"]
+        if not isinstance(case_id, str) or case_id in by_case:
+            fail("INVALID_REVIEW", "Case review identities must be unique")
+        if not isinstance(checks, dict):
+            fail("INVALID_REVIEW", "Case review checks must be an object")
+        _require_exact_keys(checks, expected_checks, label=f"{case_id}.checks")
+        if (
+            review["status"] != "approved"
+            or any(checks[key] is not True for key in expected_checks)
+            or not isinstance(review["rationale"], str)
+            or not review["rationale"]
+        ):
+            fail(
+                "APPROVAL_REQUIRED", "A Workshop case is not approved", case_id=case_id
+            )
+        by_case[case_id] = review
+    if sorted(by_case) != case_ids:
+        fail(
+            "APPROVAL_REQUIRED",
+            "Case reviews do not match the frozen selection",
+            expected=case_ids,
+            actual=sorted(by_case),
+        )
+    return by_case
+
+
+def approve_inputs(
+    repo_root: Path,
+    preparation_root: Path,
+    draft_set: str,
+    decision_path: Path,
+    protocol_path: Path,
+    approval_id: str,
+) -> dict[str, Any]:
+    if APPROVAL_ID_PATTERN.fullmatch(approval_id) is None:
+        fail("INVALID_REVIEW", "approval_id has an invalid format")
+
+    selection, selection_bytes = _read_json_object(
+        preparation_root / "selection-manifest.json", label="selection manifest"
+    )
+    preparation, preparation_bytes = _read_json_object(
+        preparation_root / "preparation-manifest.json", label="preparation manifest"
+    )
+    workshop_root = preparation_root / "workshops" / draft_set
+    validation_root = preparation_root / "workshop-validations" / draft_set
+    workshop_manifest, workshop_manifest_bytes = _read_json_object(
+        validation_root / "workshop-manifest.json", label="Workshop manifest"
+    )
+    decision, decision_bytes = _read_json_object(
+        decision_path, label="input review decision"
+    )
+    if not protocol_path.is_file():
+        fail("MISSING_ARTIFACT", "Approved protocol is missing")
+    protocol_bytes = protocol_path.read_bytes()
+    protocol_sha256 = sha256_bytes(protocol_bytes)
+    protocol_relative = _repo_relative(
+        protocol_path, repo_root, label="approved protocol"
+    )
+
+    if selection.get("selection_version") != SELECTION_VERSION:
+        fail("UNSUPPORTED_SCHEMA", "Selection manifest version does not match")
+    selection_cases = selection.get("cases")
+    if not isinstance(selection_cases, list) or not selection_cases:
+        fail("INVALID_REVIEW", "Selection manifest contains no cases")
+    case_ids = sorted(case["case_id"] for case in selection_cases)
+    if len(case_ids) != len(set(case_ids)):
+        fail("INVALID_REVIEW", "Selection case IDs are not unique")
+    selection_sha256 = sha256_bytes(selection_bytes)
+    if preparation.get("selection_manifest_sha256") != selection_sha256:
+        fail("HASH_MISMATCH", "Preparation does not reference this selection")
+    if preparation.get("case_count") != len(case_ids):
+        fail("HASH_MISMATCH", "Preparation case count does not match selection")
+
+    if (
+        workshop_manifest.get("approval_status")
+        != "pending_independent_semantic_review"
+        or workshop_manifest.get("deterministic_failure_count") != 0
+        or workshop_manifest.get("case_count") != len(case_ids)
+        or workshop_manifest.get("draft_set") != draft_set
+        or workshop_manifest.get("validator_version") != WORKSHOP_VALIDATOR_VERSION
+    ):
+        fail("APPROVAL_REQUIRED", "Workshop deterministic gate has not passed")
+    workshop_reports = workshop_manifest.get("reports")
+    if not isinstance(workshop_reports, list):
+        fail("INVALID_REVIEW", "Workshop reports must be an array")
+    reports_by_case = {report.get("case_id"): report for report in workshop_reports}
+    if sorted(reports_by_case) != case_ids:
+        fail("HASH_MISMATCH", "Workshop reports do not match selected cases")
+
+    _validate_review_decision(
+        decision,
+        approval_id=approval_id,
+        case_ids=case_ids,
+        protocol_path=protocol_relative,
+        protocol_sha256=protocol_sha256,
+        selection_sha256=selection_sha256,
+    )
+
+    preparation_bundles = preparation.get("corpus_bundles")
+    if not isinstance(preparation_bundles, list):
+        fail("INVALID_REVIEW", "Preparation corpus_bundles must be an array")
+    bundles_by_case = {bundle.get("case_id"): bundle for bundle in preparation_bundles}
+    if sorted(bundles_by_case) != case_ids:
+        fail("HASH_MISMATCH", "Corpus bundles do not match selected cases")
+
+    approved_workshops: list[dict[str, Any]] = []
+    workshop_copies: list[tuple[Path, bytes]] = []
+    approved_corpora: list[dict[str, Any]] = []
+    expected_versions = decision["corpus_policy"]["versions"]
+    for case_id in case_ids:
+        report_entry = reports_by_case[case_id]
+        if report_entry.get("status") != "pass":
+            fail("APPROVAL_REQUIRED", "A Workshop report did not pass", case_id=case_id)
+        workshop_path = workshop_root / f"{case_id}.md"
+        if not workshop_path.is_file():
+            fail(
+                "MISSING_ARTIFACT",
+                "Approved Workshop draft is missing",
+                case_id=case_id,
+            )
+        workshop_bytes = workshop_path.read_bytes()
+        workshop_sha256 = sha256_bytes(workshop_bytes)
+        if workshop_sha256 != report_entry.get("draft_sha256"):
+            fail("HASH_MISMATCH", "Workshop draft hash changed", case_id=case_id)
+        validation_report_path = validation_root / f"{case_id}.json"
+        validation_report_bytes = validation_report_path.read_bytes()
+        if sha256_bytes(validation_report_bytes) != report_entry.get(
+            "validation_report_sha256"
+        ):
+            fail("HASH_MISMATCH", "Workshop validation hash changed", case_id=case_id)
+        approved_workshops.append(
+            {
+                "case_id": case_id,
+                "draft_sha256": workshop_sha256,
+                "source_validation_report_sha256": sha256_bytes(
+                    validation_report_bytes
+                ),
+            }
+        )
+        workshop_copies.append((Path("workshops") / f"{case_id}.md", workshop_bytes))
+
+        bundle_entry = bundles_by_case[case_id]
+        bundle_root = preparation_root / "corpora" / case_id
+        bundle_manifest, bundle_manifest_bytes = _read_json_object(
+            bundle_root / "bundle-manifest.json", label=f"{case_id} bundle manifest"
+        )
+        corpus, corpus_bytes = _read_json_object(
+            bundle_root / "corpus.json", label=f"{case_id} corpus"
+        )
+        corpus_report, corpus_report_bytes = _read_json_object(
+            bundle_root / "validation-report.json", label=f"{case_id} corpus report"
+        )
+        if (
+            sha256_bytes(bundle_manifest_bytes) != bundle_entry.get("manifest_sha256")
+            or sha256_bytes(corpus_bytes) != bundle_entry.get("corpus_sha256")
+            or sha256_bytes(corpus_report_bytes)
+            != bundle_entry.get("validation_report_sha256")
+        ):
+            fail("HASH_MISMATCH", "A corpus bundle hash changed", case_id=case_id)
+        if (
+            bundle_manifest.get("approval_status") != "pending_robert_approval"
+            or bundle_manifest.get("versions") != expected_versions
+            or corpus_report.get("status") != "pass"
+            or corpus_report.get("error_count") != 0
+            or corpus_report.get("validator_version") != CORPUS_VALIDATOR_VERSION
+        ):
+            fail(
+                "APPROVAL_REQUIRED",
+                "A corpus bundle is not approvable",
+                case_id=case_id,
+            )
+        records = corpus.get("records")
+        if not isinstance(records, list) or not records:
+            fail(
+                "INVALID_REVIEW", "Approved corpus contains no records", case_id=case_id
+            )
+        for record in records:
+            content_items = (
+                record.get("content_items") if isinstance(record, dict) else None
+            )
+            if (
+                not isinstance(content_items, list)
+                or len(content_items) != 1
+                or not isinstance(content_items[0], dict)
+                or content_items[0].get("type") != "publisher_abstract"
+                or content_items[0].get("status") != "validated"
+                or not isinstance(content_items[0].get("text"), str)
+                or not content_items[0]["text"]
+            ):
+                fail(
+                    "APPROVAL_REQUIRED",
+                    "v1.1 corpus must be publisher-abstract-only",
+                    case_id=case_id,
+                )
+        approved_corpora.append(
+            {
+                "bundle_content_sha256": bundle_entry["bundle_content_sha256"],
+                "bundle_manifest_sha256": sha256_bytes(bundle_manifest_bytes),
+                "case_id": case_id,
+                "corpus_sha256": sha256_bytes(corpus_bytes),
+                "record_count": len(records),
+                "validation_report_sha256": sha256_bytes(corpus_report_bytes),
+                "versions": expected_versions,
+            }
+        )
+
+    approval_root = preparation_root / "approvals" / approval_id
+    if approval_root.exists():
+        fail(
+            "ARTIFACT_EXISTS",
+            "Immutable input approval already exists",
+            path=str(approval_root),
+        )
+    query_packet_root = approval_root / "query-author-packet"
+    for relative_path, workshop_bytes in workshop_copies:
+        write_once(query_packet_root / relative_path, workshop_bytes)
+    query_packet_manifest = {
+        "approval_id": approval_id,
+        "case_count": len(case_ids),
+        "contract_version": WORKSHOP_CONTRACT_VERSION,
+        "draft_set": draft_set,
+        "notice": (
+            "Query author may read only this packet. Target authoring input, corpus/reference "
+            "content, qrels, and ranker output remain forbidden."
+        ),
+        "schema_version": INPUT_APPROVAL_SCHEMA_VERSION,
+        "workshops": [
+            {
+                "case_id": item["case_id"],
+                "path": f"workshops/{item['case_id']}.md",
+                "sha256": item["draft_sha256"],
+            }
+            for item in approved_workshops
+        ],
+    }
+    query_manifest_path = query_packet_root / "manifest.json"
+    write_json_once(query_manifest_path, query_packet_manifest)
+    query_manifest_sha256 = sha256_bytes(query_manifest_path.read_bytes())
+
+    approved_workshops_document = {
+        "approval_id": approval_id,
+        "case_count": len(case_ids),
+        "draft_set": draft_set,
+        "schema_version": INPUT_APPROVAL_SCHEMA_VERSION,
+        "source_workshop_manifest_sha256": sha256_bytes(workshop_manifest_bytes),
+        "workshops": approved_workshops,
+    }
+    approved_workshops_path = approval_root / "approved-workshops.json"
+    write_json_once(approved_workshops_path, approved_workshops_document)
+    approved_corpora_document = {
+        "approval_id": approval_id,
+        "case_count": len(case_ids),
+        "content_profile": "title-and-publisher-abstract-only",
+        "corpora": approved_corpora,
+        "schema_version": INPUT_APPROVAL_SCHEMA_VERSION,
+    }
+    approved_corpora_path = approval_root / "approved-corpora.json"
+    write_json_once(approved_corpora_path, approved_corpora_document)
+
+    approval_manifest = {
+        "approval_id": approval_id,
+        "approval_status": "approved",
+        "approved_on": decision["approved_on"],
+        "artifacts": {
+            "approved-corpora.json": sha256_bytes(approved_corpora_path.read_bytes()),
+            "approved-workshops.json": sha256_bytes(
+                approved_workshops_path.read_bytes()
+            ),
+            "query-author-packet/manifest.json": query_manifest_sha256,
+        },
+        "authority": decision["authority"],
+        "case_count": len(case_ids),
+        "case_ids": case_ids,
+        "content_profile": "title-and-publisher-abstract-only",
+        "decision_record": {
+            "path": _repo_relative(decision_path, repo_root, label="decision record"),
+            "sha256": sha256_bytes(decision_bytes),
+        },
+        "preparation": {
+            "preparation_manifest_sha256": sha256_bytes(preparation_bytes),
+            "selection_manifest_sha256": selection_sha256,
+            "workshop_manifest_sha256": sha256_bytes(workshop_manifest_bytes),
+        },
+        "protocol": decision["protocol"],
+        "schema_version": INPUT_APPROVAL_SCHEMA_VERSION,
+    }
+    approval_manifest_path = approval_root / "approval-manifest.json"
+    write_json_once(approval_manifest_path, approval_manifest)
+    return {
+        "approval_id": approval_id,
+        "approval_manifest": _repo_relative(
+            approval_manifest_path, repo_root, label="approval manifest"
+        ),
+        "approval_manifest_sha256": sha256_bytes(approval_manifest_path.read_bytes()),
+        "approval_status": "approved",
+        "case_count": len(case_ids),
+        "query_author_packet": _repo_relative(
+            query_packet_root, repo_root, label="query author packet"
+        ),
+        "query_author_packet_manifest_sha256": query_manifest_sha256,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Prepare private approved-input candidates for ranking comparison"
@@ -1046,6 +1516,12 @@ def _parser() -> argparse.ArgumentParser:
     validate.add_argument("--raw-root", default="data/raw")
     validate.add_argument("--preparation-root", required=True)
     validate.add_argument("--draft-set", required=True)
+    approve = subparsers.add_parser("approve")
+    approve.add_argument("--preparation-root", required=True)
+    approve.add_argument("--draft-set", required=True)
+    approve.add_argument("--decision-record", required=True)
+    approve.add_argument("--protocol", required=True)
+    approve.add_argument("--approval-id", required=True)
     return parser
 
 
@@ -1054,8 +1530,8 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path.cwd().resolve()
     failure_root: Path | None = None
     try:
-        raw_root = resolve_repo_relative(repo_root, args.raw_root, label="raw-root")
         if args.command == "prepare":
+            raw_root = resolve_repo_relative(repo_root, args.raw_root, label="raw-root")
             output_root = resolve_repo_relative(
                 repo_root, args.output_root, label="output-root"
             )
@@ -1067,12 +1543,37 @@ def main(argv: list[str] | None = None) -> int:
                     "Preparation output must stay under artifacts/local-ranking-prototype",
                 )
             result = prepare_inputs(repo_root, raw_root, output_root)
-        else:
+        elif args.command == "validate-workshops":
+            raw_root = resolve_repo_relative(repo_root, args.raw_root, label="raw-root")
             preparation_root = resolve_repo_relative(
                 repo_root, args.preparation_root, label="preparation-root"
             )
             result = validate_workshops(
                 repo_root, raw_root, preparation_root, args.draft_set
+            )
+        else:
+            preparation_root = resolve_repo_relative(
+                repo_root, args.preparation_root, label="preparation-root"
+            )
+            decision_path = resolve_repo_relative(
+                repo_root, args.decision_record, label="decision-record"
+            )
+            protocol_path = resolve_repo_relative(
+                repo_root, args.protocol, label="protocol"
+            )
+            allowed_root = (repo_root / "artifacts/local-ranking-prototype").resolve()
+            if not preparation_root.is_relative_to(allowed_root):
+                fail(
+                    "INVALID_PATH",
+                    "Preparation root must stay under artifacts/local-ranking-prototype",
+                )
+            result = approve_inputs(
+                repo_root,
+                preparation_root,
+                args.draft_set,
+                decision_path,
+                protocol_path,
+                args.approval_id,
             )
     except HarnessError as exc:
         if failure_root is not None:

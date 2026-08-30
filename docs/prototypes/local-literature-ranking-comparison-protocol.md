@@ -1,10 +1,10 @@
 # 本地文献排序最小公平比较协议
 
 Protocol date: 2026-08-30（Asia/Shanghai）
-Status: **Approved / pre-registered v1.0**
+Status: **Approved / pre-registered v1.1**
 Decision ticket: `Choose and calibrate local literature ranking`
 
-这是一个 throwaway comparative prototype 的预注册协议，不是 production implementation。Robert 已于 2026-08-30 批准协议方向，并授权从第一性原理解决未决项；下文已冻结 v1.0 的输入、候选、评价、runtime 与决策规则。Harness 已实现并通过 tracked fixture 的本地验证；这不等于已经准备 qrels、安装 dense 依赖、下载模型、运行正式 development/holdout，或选择最终 ranker。
+这是一个 throwaway comparative prototype 的预注册协议，不是 production implementation。Robert 已于 2026-08-30 批准协议方向，并授权 Codex 从第一性原理研究并决定本轮输入是否获批；v1.1 据此把正式 relevance comparison 明确限制为题名 + validated `publisher_abstract`。全文路线的依据和重新打开条件见 [Local ranking 是否需要论文全文](local-ranking-full-text-decision.md)。Harness 已实现并通过 tracked fixture 的本地验证；这不等于已经准备 qrels、运行正式 development/holdout，或选择最终 ranker。
 
 ## 1. 本协议要回答的唯一问题
 
@@ -16,7 +16,7 @@ Decision ticket: `Choose and calibrate local literature ranking`
 - 可接受的冷启动、warm-query latency、内存、磁盘与依赖成本；
 - 明确、可审计、fail-closed 的失败行为。
 
-本协议同时校准 scorer、title/segment field handling、paper aggregation 与 paper/segment cap。v1 不使用 raw-score relevance threshold：不同 scorer 的分数不可直接比较，而语料至多 36 篇，返回固定 top candidates 不会造成规模问题。它不比较 ANN/index architecture：所有 arms 都 exhaustive score-all，不允许 first-stage pruning 漏掉 eligible candidate。
+本协议校准 scorer、title field handling、phrase/fusion 和 paper cap。v1.1 固定使用共同的 source-faithful abstract segmentation、`max` paper aggregation 与每篇返回 1 个最佳 segment，不把没有全文证据支持的 multi-segment aggregation/cap 比较伪装成已校准结果。v1.1 不使用 raw-score relevance threshold：不同 scorer 的分数不可直接比较，而语料至多 36 篇，返回固定 top candidates 不会造成规模问题。它不比较 ANN/index architecture：所有 arms 都 exhaustive score-all，不允许 first-stage pruning 漏掉 eligible candidate。
 
 ## 2. 决策权与停止线
 
@@ -33,10 +33,10 @@ Decision ticket: `Choose and calibrate local literature ranking`
 1. 输入只来自同一 exact Approved Target Reference Corpus bundle：normalized query、title、eligible Reference Content/Retrieval Segments。
 2. 禁止读取 Target Paper、Workshop hidden text、citation count、venue、year、publication type、Target-derived metadata、previous queries/results、remote API 或 undeclared global resource。
 3. 所有 scorer 面对完全相同的 eligible papers、Retrieval Segments、query bytes、segmentation、result budget 与 evaluation procedure。
-4. Paper 是 ranking/output unit，同一 `paper_id` 最多一次；segment selection 与 paper aggregation 分开评价。
+4. Paper 是 ranking/output unit，同一 `paper_id` 最多一次；v1.1 的 paper aggregation 固定为 `max(segment_score)`。
 5. Paper 最终顺序是 approved score 降序，再按 stable `paper_id` 升序；segment 最终顺序是 segment score 降序，再按 canonical content-item order 与 source start position。
 6. 不允许 candidate failure 时改用另一 ranker、联网、读 alternate/stale corpus 或降低 validation。
-7. Dense/fusion arm 不能看到比 lexical arm 更多或更少的正文。无法公平处理 approved full-text segment 的模型不进入正式比较。
+7. Dense/fusion arm 不能看到比 lexical arm 更多或更少的摘要文本。v1.1 正式 relevance input 禁止混入 `official_full_text`；mixed abstract/full-text fixture 只验证合同兼容性，不进入 relevance aggregate。
 
 ## 4. 预注册假设
 
@@ -45,7 +45,7 @@ Decision ticket: `Choose and calibrate local literature ranking`
 | H1 | 在 N≤36 的限定语料中，透明 lexical ranker 已足够，复杂模型没有稳定净收益 | Dense 或 fusion 在 blind holdout 上跨 query 稳定提高 graded relevance/evidence hit，且通过全部成本与 determinism gates |
 | H2 | BM25 的 TF saturation/length normalization 比简单 IDF coverage/TF-IDF 有净收益 | 简单 baseline 在 holdout 上等效或更好，BM25 只增加参数而不修复 failure case |
 | H3 | DPH 这类不同概率假设能暴露 BM25 在极小 corpus statistics 下的缺陷 | DPH 在预注册 diagnostic 与 holdout 上没有独立 wins，或产生更严重的 small-N instability |
-| H4 | Title signal 与固定 top-m aggregation 能减少单个偶然 segment 支配 paper ranking | Field/top-m ablation 没有改善 evidence hit，或引入 title/segment-count bias |
+| H4 | Title signal 能补充摘要中缺失或弱化的核心术语 | Title-weight ablation 没有改善 evidence hit，或产生更严重的 title-only bias |
 | H5 | Lexical 与 dense 的错误具有互补性，RRF 可能胜过最佳单模型 | RRF 只复制最佳 arm 的结果、放大较弱 arm 的错误，或收益小于预注册 complexity margin |
 
 ## 5. 冻结 evaluation set
@@ -59,14 +59,13 @@ Decision ticket: `Choose and calibrate local literature ranking`
 | Development | 6 | 12 | 小网格校准、淘汰明显失败 candidate、选 finalist |
 | Blind holdout | 6 | 12 | 一次性最终比较；打开后不得调参 |
 
-每个 split 各覆盖三个 corpus-size strata，每层 2 个 case：`small=3–8`、`medium=9–18`、`large=19–36`。在可用数据允许时，每个 split 还必须覆盖：
+每个 split 各覆盖三个 corpus-size strata，每层 2 个 case：`small=3–8`、`medium=9–18`、`large=19–36`。v1.1 的 hard case-coverage gates 是：
 
 - 至少两个学科领域；
-- abstract-only corpus 与包含 approved official-full-text segments 的 corpus；
-- segment 数量较均匀与明显不均匀的 corpus；
-- title 与 content vocabulary 高重合、低重合的 corpus。
+- 全部 records 都有 validated title 与 `publisher_abstract`；
+- 每个 split 内存在不同的 title/content vocabulary overlap 和 reference-count 档位。
 
-若当前 approved bundles 不能满足这些 strata，协议停止；不得用未批准 raw/alternate content 填补。
+当前没有 coverage 一致、source/许可/provenance 已批准的 official-full-text snapshot，因此全文和 full-text segment-count imbalance 明确不属于 v1.1 strata。若 hard gates 不能满足，协议停止；不得用未批准 raw/alternate content 填补。未来全文比较必须升级 protocol version，并使用同一 paper membership 的 paired abstract/full-text inputs。
 
 ### 5.2 Query creation
 
@@ -102,7 +101,7 @@ Relevance reviewer 只看到 `query + eligible paper title + eligible Retrieval 
 - acronym、hyphen、Unicode、case variation 与 repeated terms；
 - title-only lexical hit、content-only hit、title/content 冲突；
 - 相同 score tie、near-tie、重复 segment 与 segment-count imbalance；
-- publisher abstract 与 official-full-text segment 混合；
+- publisher abstract 与 official-full-text segment 混合（仅验证 020 合同兼容性，不进入 v1.1 relevance aggregate）；
 - 非法 query、缺模型文件、corrupt model/hash、offline network denial；v1 无 threshold，eligible corpus 非空时不设置“合法 empty”fixture。
 
 Fixtures 只验证行为、边界和 metric direction，不进入 relevance aggregate，也不能替代真实 qrels。
@@ -121,7 +120,7 @@ Fixtures 只验证行为、边界和 metric direction，不进入 relevance aggr
 
 Harness 必须为 `COVID-19`、`C++`、`C#`、possessive/apostrophe、Unicode dash、组合字符、casefold expansion、数字和 emoji 边界保存 golden tokens。normalization version 与 normalized query 都进入 private audit。
 
-Dense arm 读取相同 normalized natural-language query 与相同 source-faithful segment text，但使用 pinned tokenizer。加上 `query: ` prefix 后不得超过 512 tokens；超过即 typed input error，不允许 silent truncation。Candidate segment 加上 `passage: ` 后也不得超过 512 tokens；若超限，必须由所有 arms 共用、已批准的 upstream segmentation 修复，不能由 dense arm 私自裁剪。
+Dense arm 读取相同 normalized natural-language query 与相同 source-faithful abstract segment text，但使用 pinned tokenizer。加上 `query: ` prefix 后不得超过 512 tokens；超过即 typed input error，不允许 silent truncation。Candidate segment 加上 `passage: ` 后也不得超过 512 tokens；若任一 approved abstract 超限，必须在 qrels 之前冻结一个所有 arms 共用、source-faithful、可精确回链的 abstract segmentation policy 并重建 formal input，不能由 dense arm 私自裁剪。该 length-safety segmentation 固定后不进入本轮参数 sweep。
 
 ### 7.2 Stage A：scorer screen
 
@@ -164,31 +163,29 @@ reference_device: cpu
 
 Reference dependency snapshot 固定为 `Python==3.13.7`、`torch==2.13.0`、`transformers==5.16.1`、`numpy==2.5.2`、`psutil==7.2.2`、`pytest==9.1.1`。选择 3.13.7 是因为 Windows 已有该 stable patch，Mac 可由 `uv` 安装相同 patch，能以最小设备改动得到同 ABI/patch 的跨平台证据；它不是永久项目 patch。Implementation 必须在 Windows/macOS 分别生成完整 transitive lock 与 wheel hashes，禁止 source build；snapshot 只有通过 fresh-environment preflight 才可用于正式 evidence。
 
-### 7.3 Stage B：field、aggregation 与 complementarity ablation
+### 7.3 Stage B：field 与 complementarity ablation
 
 Stage A 后只保留 development best lexical scorer；dense 仅在通过 dependency/determinism preflight 后保留。比较：
 
 - title weight：`0, 1, 2`；
-- paper aggregation：`max` 与 `mean(top-2)`，不足两个 eligible segments 时按实际数量求 mean；
-- `sum(all)` 只在 best lexical scorer 上作为 segment-count bias negative control；
 - fixed phrase/proximity bonus 只在 best lexical scorer 上做 `off/on` ablation；
 - dense 合格时，比较 best lexical 与 dense 的 RRF，`k ∈ {10, 60}`，不混合原始 scores。
 
-禁止完整笛卡尔积 sweep。顺序固定为：先 scorer，后 title/aggregation，再 phrase/fusion。前一阶段没有进入下一阶段的 arm 不得借后续参数复活。
+禁止完整笛卡尔积 sweep。顺序固定为：先 scorer，后 title，再 phrase/fusion。前一阶段没有进入下一阶段的 arm 不得借后续参数复活。
 
-Field/aggregation 定义固定为：title 由同一 scorer 独立打分（dense 使用 `passage: <title>`）；paper score 为 `content_aggregation + title_weight * title_score`。`max` 与 `mean(top-2)` 只聚合 eligible content segments。Phrase ablation 只用于 best lexical：先将同一 query 下所有 content/title base scores min-max 到 `[0,1]`（全相同则为 0），再计算 distinct adjacent query bigrams 的 contiguous-match coverage，最终 unit score 为 `0.9*normalized_base + 0.1*phrase_coverage`。RRF 在 paper rankings 上计算；同 rank contribution 为 `1/(k+rank)`，最终同分按 `paper_id`。为了产生与 paper fusion 一致且不混合原始分数的 evidence order，每篇 paper 内的 segment order 使用两个 source arms 各自的 per-paper segment rank、相同 `k` 做 RRF；segment 同分回到 canonical content-item order、source start position 和 `segment_id`。
+Field 定义固定为：title 由同一 scorer 独立打分（dense 使用 `passage: <title>`）；paper score 为 `max(content_segment_scores) + title_weight * title_score`。Phrase ablation 只用于 best lexical：先将同一 query 下所有 content/title base scores min-max 到 `[0,1]`（全相同则为 0），再计算 distinct adjacent query bigrams 的 contiguous-match coverage，最终 unit score 为 `0.9*normalized_base + 0.1*phrase_coverage`。RRF 在 paper rankings 上计算；同 rank contribution 为 `1/(k+rank)`，最终同分按 `paper_id`。为了产生与 paper fusion 一致且不混合原始分数的 evidence order，每篇 paper 内的 segment order 使用两个 source arms 各自的 per-paper segment rank、相同 `k` 做 RRF；segment 同分回到 canonical content-item order、source start position 和 `segment_id`。
 
 ### 7.4 Output budget calibration
 
-Scorer family、field handling 与 aggregation 冻结后，只在 development split 比较以下离散 payload policies：
+Scorer family 与 field handling 冻结后，只在 development split 比较以下离散 payload policies：
 
 - `paper_cap ∈ {3, 5}`；
-- `segments_per_paper ∈ {1, 2}`；
-- `total_segment_cap = 6`；
+- `segments_per_paper = 1`；
+- `total_segment_cap = paper_cap`；
 - segment 长度使用获批 upstream segmentation 的共同上限，不允许 scorer-specific truncation；
 - 不设 raw-score relevance threshold。
 
-先选择 mean `EvidenceHit@budget` 最高的 policy；差值不超过 0.02 时选择 mean canonical payload UTF-8 bytes 更少者，再同分选择更小 `paper_cap`、更小 `segments_per_paper`。冻结后只在 holdout 运行一次。若 development 中大量 top results 全为 grade 0，可在不解封 holdout 的前提下提出 v1.1 threshold protocol；v1.0 不临时校准不可比的 raw scores。
+先选择 mean `EvidenceHit@budget` 最高的 policy；差值不超过 0.02 时选择 mean canonical payload UTF-8 bytes 更少者，再同分选择更小 `paper_cap`。冻结后只在 holdout 运行一次。若 development 中大量 top results 全为 grade 0，可在不解封 holdout 的前提下提出 v1.2 threshold protocol；v1.1 不临时校准不可比的 raw scores。
 
 ### 7.5 明确不进入第一轮
 
@@ -207,7 +204,7 @@ Secondary metrics：
 - `EvidenceHit@budget`：model-visible returned segments 中是否至少有一个 grade=2 segment；
 - grade=3 paper catastrophic miss 数；
 - query-level win/tie/loss 和逐 query error analysis；
-- title bias、segment-count bias、abstract/full-text 分层结果。
+- title-only bias、reference-count strata 与 title/content-overlap strata 结果。
 
 不把单一平均分当成充分证据；必须同时展示每条 query 的 paired result 和 failure cases。
 
@@ -229,7 +226,7 @@ Secondary metrics：
 - Python/package lock、wheel availability、model artifact bytes、完整 isolated environment bytes；
 - 安装/离线重建步骤、license 与失败日志。
 
-v1.0 complexity gates：
+v1.1 complexity gates：
 
 - Normative runtime 是 Python 3.13.7 + CPU FP32；每次 run 记录 OS、CPU 与 lock hash。所有 relevance 横向比较必须走同一 Windows CPU environment。
 - warm p95 `<=1.0 s/query`；cold-start p95 `<=15 s`；最大 corpus representation build `<=60 s`；peak RSS `<=4 GiB`。
@@ -258,7 +255,7 @@ CPU reference path 是 portability 和 attribution 要求，不是永久禁止 a
 2. 在合格 candidates 中，如果更简单方案的 holdout `nDCG@5` 与最佳方案差值 ≤0.03，且 `Recall@5` 无下降、没有新增 grade=3 catastrophic miss，则选择更简单方案。
 3. 更复杂方案只有满足以下任一路径且不违反 complexity gate 时才获得推荐资格：a) mean `nDCG@5` 至少提高 0.05，并且按逐 query `nDCG@5`（绝对差 ≤0.01 记 tie）计算的 `wins-losses >= 3`；b) 修复至少 2 条 query 的 grade=3/grade≥2 catastrophic miss、不新增同类 miss，且 mean `nDCG@5` 不比简单方案低超过 0.03。
 4. 差值落在 `(0.03, 0.05)`、query-level wins 不稳定、qrels-stability gate 失败或 sample 不完整时，结果记为 `inconclusive`。
-5. Paper cap 与 segments-per-paper 只在 winner family 内按 7.4 使用 development qrels 校准；随后对 holdout 做一次 frozen evaluation，不得反复打开 holdout 调整。v1.0 没有 threshold。
+5. Paper cap 只在 winner family 内按 7.4 使用 development qrels 校准；随后对 holdout 做一次 frozen evaluation，不得反复打开 holdout 调整。v1.1 没有 threshold。
 
 这些 margins 是 prototype 的预注册 decision policy，不是通用 IR 行业标准；Robert 可在首次运行前修改，运行后不得追溯修改。
 
@@ -326,13 +323,14 @@ python -m prototypes.local_ranking.run --protocol <frozen-protocol.json>
 1. **Protocol approval — complete**：Robert 已批准由本协议冻结 case/query 数量、人工 judgment、candidate matrix、metrics、margins、resource gates 和 Windows/Mac 分工。
 2. **Harness implementation/review — implementation complete, review evidence recorded**：已实现 isolated throwaway harness、formula/golden fixtures、strict qrels ingestion 与 one-command replay；tracked tests 覆盖 input identity、metric direction、failure capture 和 immutable attempt。正式数据接入前仍需复核 protocol JSON 与 approved corpus adapter 的边界。
 3. **Environment smoke — Windows evidence-hardening replay complete**：Mac ambient/reference runtimes 均通过 26 项 harness tests；Windows fresh Python 3.13.7 venv 已从 hash-locked binary distributions 安装，pinned E5 artifacts 已校验。三个 Windows CPU FP32 diagnostic attempts 的 canonical payload hashes 完全一致。Evidence-hardening attempt 直接记录 frozen environment lock、environment/model bytes、direct E5 gate 与 conservative source-inclusive RRF gate，三 candidates 均为 `pass`；独立 Python socket probe 返回 typed `NETWORK_ACCESS_DENIED`。Finalist-only Windows 10-run/Mac 3-run determinism仍待 development promotion；不读取 holdout qrels。
-4. **Freeze inputs**：冻结 protocol/config、cases、queries、qrels、完整 dependency locks、model artifacts 与 hashes。
-5. **Development run**：只用 development split 校准并冻结最多三个 distinct finalists。
-6. **Blind holdout**：一次性运行、解封和比较；保留全部失败与偏差。
-7. **Decision gate**：把 side-by-side evidence 交给 Robert；只有 Robert 看过结果并批准 winner 后，才在 ticket 写 Resolution、关闭 ticket 并更新 Wayfinder map。Production implementation 需要单独 authorization。
+4. **Case/Workshop/corpus approval — complete under delegated review**：`inputs-007` 的 12-case proposal、12 份 Workshop 与 abstract-only corpus policy 已按 v1.1 研究和逐案审计；immutable approval sidecar 精确绑定 selection、draft、corpus、validator 与 protocol hashes。该审批不包含 queries 或 qrels。
+5. **Freeze remaining inputs**：在 fresh query-author context 中冻结 24 queries；用 pinned tokenizer 做 exact segment-length preflight，必要时先冻结共同 abstract segmentation；随后生成 blind qrels form 并完成 judgments。
+6. **Development run**：只用 development split 校准并冻结最多三个 distinct finalists。
+7. **Blind holdout**：一次性运行、解封和比较；保留全部失败与偏差。
+8. **Decision gate**：把 side-by-side evidence 交给 Robert；只有 Robert 看过结果并批准 winner 后，才在 ticket 写 Resolution、关闭 ticket 并更新 Wayfinder map。Production implementation 需要单独 authorization。
 
 ## 13. 已解决决策与剩余工作
 
-v1.0 已解决此前所有 protocol-level 未决项：12 cases / 24 queries、Robert 延时盲复核、`lexical_normalization_v1`、pinned E5、Python 3.13 + CPU reference-first policy、`0.03/0.05` margins、resource gates、离散 output budget，以及 no-threshold v1 policy。
+v1.1 已解决此前 protocol-level 未决项：12 cases / 24 queries、Robert 延时盲复核、abstract-only relevance scope、`lexical_normalization_v1`、pinned E5、Python 3.13 + CPU reference-first policy、`0.03/0.05` margins、resource gates、离散 paper budget，以及 no-threshold v1 policy。全文和 multi-segment aggregation 明确留给 paired full-text protocol，不从本轮结果外推。
 
-剩余的是执行证据，不是继续拍脑袋选参数：准备 approved cases/queries/qrels；运行 development；对 frozen finalists 做 Windows 10-run、按需 Mac 3-run replay；最后执行 blind holdout。Python socket deny guard 覆盖当前 transport surface，但不冒充 Windows Firewall 级隔离。任何实际 winner、可选 accelerator backend 或 production ranker 仍必须由这些结果决定；`Choose and calibrate local literature ranking` 因此保持 open。
+剩余的是执行证据，不是继续拍脑袋选参数：由隔离的新会话只读取 Approved Workshops 起草 queries；在 qrels 前完成 exact 512-token preflight 并按需冻结共同 abstract segmentation；生成 blind qrels；运行 development；对 frozen finalists 做 Windows 10-run、按需 Mac 3-run replay；最后执行 blind holdout。Python socket deny guard 覆盖当前 transport surface，但不冒充 Windows Firewall 级隔离。任何实际 winner、可选 accelerator backend 或 production ranker 仍必须由这些结果决定；`Choose and calibrate local literature ranking` 因此保持 open。
