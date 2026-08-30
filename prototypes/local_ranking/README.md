@@ -92,6 +92,58 @@ uv run --no-project --with 'tokenizers==0.23.1' \
 
 This fail-closed adapter validates every bound hash, uses one shared source-complete segmentation for all arms, checks exact E5 query/title/segment lengths, and emits canonical harness inputs. Its self-contained HTML pages have no external resources and export qrels only after the review form is complete; they never generate relevance labels themselves.
 
+The approved v1.2/v1.2.1 overlays replace Robert's exhaustive HTML labeling with isolated
+synthetic topical qrels. The actual A/B runs used Kimi Code sessions, so freeze their
+truthful provider/model profiles with:
+
+```bash
+python -m prototypes.local_ranking.ai_judge prepare \
+  --formal-root <immutable-formal-input-attempt> \
+  --base-protocol docs/prototypes/local-literature-ranking-comparison-protocol.md \
+  --revision-protocol docs/prototypes/local-literature-ranking-comparison-protocol-v1.2.1.md \
+  --judge-a-model kimi-k3 \
+  --judge-a-provider kimi-code-harness \
+  --judge-a-reasoning provider-managed-not-exposed \
+  --judge-b-model deepseek-v4-flash \
+  --judge-b-provider kimi-code-harness \
+  --judge-b-reasoning provider-managed-not-exposed \
+  --output-root <new-private-judge-bundle-attempt>
+```
+
+Each fresh projectless judge writes a draft against exactly one bundle. Convert it to a
+canonical trace and qrels only through the fail-closed validator:
+
+```bash
+python -m prototypes.local_ranking.ai_judge finalize \
+  --bundle <judge-bundle.json> \
+  --draft <judge-draft.json> \
+  --input <matching-formal-input.json> \
+  --output-root <new-private-judge-result-attempt>
+```
+
+`prepare-adjudication` emits only the original items on which A/B grades or exact support
+spans differ; it never exposes either prior label or rationale to judge C. The same
+`finalize` command binds every adjudication item back to the frozen input and emits a
+`local-ranking-adjudication-qrels-v1.0` partial evidence artifact. That artifact must never
+be passed to a ranker as complete qrels.
+`finalize-consensus` requires judge C to cover exactly that frozen dispute set and emits
+the consensus trace/qrels. Development artifacts may be unsealed immediately. Holdout
+drafts, traces, qrels, disagreement packet, and consensus remain in the projectless judge
+tasks until finalists and every parameter are frozen.
+
+`diagnose-agreement` emits deterministic A/B diagnostics: linear-weighted Cohen's kappa,
+exact paper-grade agreement, the relevance-boundary `1<->2` rate, grade gaps of at least
+two, grade distributions, and exact segment-support agreement when both judges call an
+item relevant. These are diagnostics only; promotion still depends on the same ranker
+direction under judge A, judge B, and consensus qrels.
+
+If a completed external judge copied the original Codex profile from an earlier bundle,
+`rebind` may correct provenance only under v1.2.1. It revalidates the source result, requires
+the old/new bundles to have byte-identical inputs/rubric/items, preserves the qrels and full
+judgment-semantic hash, records the attested execution-session hash, and never overwrites
+the superseded artifact. A missing raw draft may be reconstructed only from its canonical
+validated trace and is recorded as provenance degradation.
+
 `fixtures/protocol.json` is a lexical/RRF diagnostic example. An attempt is immutable: running the same `comparison_id + attempt_id` twice fails instead of overwriting evidence. Copy the frozen protocol with a new `attempt_id` to perform another replay; do not edit an already-run attempt.
 
 The harness:
@@ -104,6 +156,7 @@ The harness:
 - evaluates the approved resource gates directly, using a labeled conservative source-plus-fusion composition for RRF;
 - emits candidate-scoped scores, canonical model payloads, hashes, metrics, failures, and resource observations under `artifacts/local-ranking-prototype/`;
 - never downloads a model or falls back to another ranker;
-- leaves `winner` unset. Human approval after development and blind holdout remains mandatory.
+- leaves `winner` unset. Robert's approval after synthetic-qrels sensitivity checks,
+  blind holdout, and the 12-query anonymous utility check remains mandatory.
 
 Formal development/holdout protocols must use Python 3.13.7, enable runtime measurement, reference a clean commit, include complete blinded qrels, and reference a hashed `environment_lock`. The tracked fixture may use a null lock and run on another Python only to test harness behavior; its numbers are not decision evidence.

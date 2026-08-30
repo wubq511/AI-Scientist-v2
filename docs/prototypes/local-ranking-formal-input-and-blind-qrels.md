@@ -8,7 +8,12 @@ Date: 2026-08-30（Asia/Shanghai）
 
 Query 与 formal input 两个 blocker 已解除：12 个 cases 的 24 条 query 已原样批准，168 篇 approved papers 已物化为 180 个所有 arms 共用的 source-faithful segments。Development/holdout 输入都通过 harness schema 与 pinned E5 exact token-length checks；两次 fresh-process materialization byte-identical。
 
-当前唯一数据 blocker 是 Robert 的 blind qrels judgment。Development 共 176 个 query-paper judgments，holdout 共 160 个。两份本地离线 HTML 表已经生成，页面只展示 `query + paper title + Retrieval Segments`，不展示 scorer/candidate、分数、排名、Target Paper 或 previous result。
+本文记录的是 v1.1 时点的人工盲评表证据。Robert 已于 2026-08-30 批准
+[v1.2 AI qrels overlay](local-literature-ranking-comparison-protocol-v1.2.md)及其
+[v1.2.1 actual-judge provenance 修正](local-literature-ranking-comparison-protocol-v1.2.1.md)：不再要求 Robert
+完成 176 + 160 条绝对等级标注。现有 HTML 与 blind packet 仍证明 visible-input boundary，
+但 HTML 不再是正式 qrels 入口；正式入口改为两个隔离 AI judges、第三 judge 盲裁分歧与
+三套 qrels winner-sensitivity gate。
 
 ## Query 冻结与审批
 
@@ -89,12 +94,12 @@ Formal audit 的 raw segmentation identity 使用可运行 `paper_id/segment_id`
 
 真实浏览器验收通过：页面载入无 console error；paper grade 2 会展开 segment ratings；未完成 176 条 development judgments 时导出被拒绝；页面本身无外部网络依赖。
 
-## 下一步与封存边界
+## v1.2 后续与封存边界
 
-Robert 需要完成两份盲评：
+1. judge-A/B 在 fresh projectless tasks 中只读由本文 formal inputs 派生的最小 bundle；
+2. Development drafts 经 fail-closed validator 生成各自 qrels，分歧由不看 A/B labels 的 judge-C 裁决；
+3. Holdout 同样在任何 ranking run 前完成，但 plaintext 只留在三个 judge tasks 的 `sealed/`，controller 在 finalists/参数冻结前只收 hashes 与 pass/fail；
+4. A/B/consensus 三套 qrels 必须导出相同 finalist/winner direction，否则结果为 `inconclusive`；
+5. Robert 最终只做 12 条 anonymous A/B/tie/都无用/看不懂 utility choices。
 
-1. Development 表完成后，把导出的 `qrels-development.json` 交给 controller 做 schema/hash 校验；
-2. Holdout 表也应在看见任何 ranking result 前完成，但导出的 `qrels-holdout.json` 由 Robert 自行封存，finalists 与参数冻结前不得交给 controller；
-3. 初次 judgment 后至少 24 小时，再按冻结 seed 重标每个 split 的 15%（至少 30 条），通过 qrels-stability gate 后才允许把相应 qrels 用于正式比较。
-
-在这些 judgment 完成前，不创建 formal ranking protocol、不运行 development/holdout、不选择 winner。
+在 development A/B/consensus qrels 完成前，不创建 formal ranking protocol、不运行 development/holdout、不选择 winner。
