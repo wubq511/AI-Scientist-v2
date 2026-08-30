@@ -34,3 +34,5 @@ Which evidence-backed criteria distinguish a grounded, non-leaking, non-duplicat
 本 ticket 只锁定 rubric 决策；未实现 runtime code、未修改 prompt、未调用模型、未进入 downstream。
 
 > 后续修订（2026-08-30）：[Define the declared grounding contract](038-define-the-declared-grounding-contract.md) 收紧 Declared Grounding eligibility：声明 id 必须 ∈ 本 generation 已返回 Retrieval Results 的 paper_id 并集（本票「本 run 的 Retrieval Audit Events」措辞的子集），与 025 的 per-generation `msg_history` 作用域严格对齐。
+
+> 后续指针（2026-08-30）：[Define the validation and test matrix](027-define-the-validation-and-test-matrix.md) 已关闭；本票委托的 hygiene 模式列表与去重阈值落为 `docs/agents/validation-matrix.md` 的版本化规则集——hygiene 模式由 023/024 标识符格式推导（本版固化），去重阈值为 calibration-pending（VM-LEAKAGE-02、VM-CONTRACT-026-02）。

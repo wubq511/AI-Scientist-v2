@@ -87,3 +87,5 @@ Canonical `corpus.json` 是 typed deterministic JSON。Top-level 至少包含：
 Ideation Run preflight 必须显式 pin `case_id`、corpus hash、bundle manifest、validation report 和全部 policy versions；重新计算 corpus 与 membership hashes，确认 validation report 精确对应同一 bundle，并检查版本兼容性。Preflight 不得联网、enrich、repair、读取 alternate bundle 或自动 fallback；任一缺失、不一致、未批准或不兼容都 fail closed。
 
 本 ticket 只锁定 corpus contract；没有生成 corpus、修改 raw dataset、调用模型或进入 downstream。Retriever 的 Reference Content eligibility、query/output contract 与 ranking 行为仍由后续 tickets 通过证据决定。
+
+> 后续指针（2026-08-30）：[Define the validation and test matrix](027-define-the-validation-and-test-matrix.md) 已关闭；本票委托固化的 rule thresholds、fixtures 与 cross-platform test matrix 落为 `docs/agents/validation-matrix.md` 的 VM-CONTRACT-019 行、VM-ENV-04 与 calibration-pending 规则集。

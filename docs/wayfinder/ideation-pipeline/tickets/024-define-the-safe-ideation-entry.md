@@ -67,3 +67,5 @@ Robert 批准以下安全 ideation 入口合同（三轮 grilling，全部按推
 > 后续修订（2026-08-30）：[Define the idea quality rubric](026-define-the-idea-quality-rubric.md) 修订 FinalizeIdea 结构校验：参数在 idea 对象之外新增 `grounding: [paper_id, ...]`，七字段 idea payload 本身不变；Declared Grounding 校验失败按 025 作为 Model-Fixable Error 回灌。字段级合约与 prompt 呈现方式由 [Define the declared grounding contract](038-define-the-declared-grounding-contract.md) 决定。
 
 > 后续修订（2026-08-30）：[Define the declared grounding contract](038-define-the-declared-grounding-contract.md) 落定上述字段级合约，并扩大 prompt diff 围栏：工具描述段之外，系统 prompt 中 FinalizeIdea 相关的 ARGUMENTS 行与 IDEA JSON 示例块亦可修改，示例直接展示 `grounding` 键，保证描述与示例一致、避免模型照矛盾示例白烧付费轮次。
+
+> 后续指针（2026-08-30）：[Define the validation and test matrix](027-define-the-validation-and-test-matrix.md) 已关闭；本票委托的导入守卫 pytest 占位落为 `docs/agents/validation-matrix.md` 的 VM-CONTRACT-024-01，preflight 逐步 fail-closed 测试为 VM-CONTRACT-024-02。

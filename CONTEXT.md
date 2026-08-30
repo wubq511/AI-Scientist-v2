@@ -128,6 +128,10 @@ _Avoid_: Benchmark score, official metric
 The private, tool-assembled side-by-side comparison material — a finalized idea payload with its Declared Grounding and the relevant Retrieval Segments set against the Target Paper's `abstract_summary` and full abstract — that Robert reads to author an Evaluation Artifact. It is reading material, not evidence, and may be regenerated.
 _Avoid_: Judge prompt, evaluation report
 
+**Validation Matrix**:
+The versioned contract (`docs/agents/validation-matrix.md`) cataloging every check across nine layers (unit, contract, integration, replay, leakage, isolation, fault-injection, minimal-environment, qualitative), defining what must pass and what evidence proves each gate; it indexes runtime gates decided elsewhere and defines the development-time tests that prove them.
+_Avoid_: Test plan, test suite
+
 **Downstream Experiment**:
 Any AI Scientist phase after idea generation, including BFTS, code experiments, plotting, write-up, and review; it is outside this project’s scope.
 _Avoid_: Ideation Run

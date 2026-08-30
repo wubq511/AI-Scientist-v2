@@ -77,3 +77,5 @@ Canonical bytes 使用 Unicode NFC、LF 换行、图示的固定空行和文件�
 - README-compatible 四段格式是初始 baseline，不是永久最优结构。problem-envelope specificity、字段删改和 rendering 变体必须在 [Compare Workshop specificity and rendering](036-compare-workshop-specificity-and-rendering.md) 中经过冻结 canary 与 optimization promotion gate 的公平比较，并再次获得 Robert 批准后才能替换 baseline。
 
 本 ticket 未生成 Workshop、未调用模型，也未进入任何 downstream 阶段。
+
+> 后续指针（2026-08-30）：[Define the validation and test matrix](027-define-the-validation-and-test-matrix.md) 已关闭；本票委托固化的泄漏检测阈值与规则版本落为 `docs/agents/validation-matrix.md` 的 calibration-pending 规则集（VM-LEAKAGE-01），fixture 结构与版本治理见该文档「阈值与规则版本治理」。
