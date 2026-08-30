@@ -47,6 +47,7 @@ status: open
 - [Define the DeepSeek adapter contract](tickets/022-define-the-deepseek-adapter-contract.md): 采用 DeepSeek-only non-streaming Chat Completions adapter，以严格 allowlist、typed attempts、bounded retry、fail-closed validation、私有原始证据和官方人民币价格快照隔离 provider transport 与 ideation controller。
 - [Define run identity and evidence layout](tickets/023-define-run-identity-and-evidence-layout.md): 每次 run 以最小 opaque identity、固定 raw/sanitized roots、immutable event hash chain、terminal seal 与 fail-closed cross-run guards 隔离状态并保留完整 Evidence Chain。
 - [Define the safe ideation entry](tickets/024-define-the-safe-ideation-entry.md): 原地改造现有 CLI：准入清单式导入守卫、六参数 new-run CLI、九步 fail-closed preflight（末道为估价批准）、versioned 价格表按 attempt 开始时段计价、prompt diff 限于工具描述段、FinalizeIdea 结构校验、三注入缝。
+- [Define the minimal runtime dependency contract](tickets/034-define-the-minimal-runtime-dependency-contract.md): 三文件结构（runtime 最小集 / upstream 保留清单 / dev 工具）全部精确 pin；最小集 = 实际 import 闭包且随使用方同生同灭，确切清单由实现 ticket 落地。
 
 ## Not yet specified
 
