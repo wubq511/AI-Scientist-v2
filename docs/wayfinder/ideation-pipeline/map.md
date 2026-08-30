@@ -48,6 +48,8 @@ status: open
 - [Define run identity and evidence layout](tickets/023-define-run-identity-and-evidence-layout.md): 每次 run 以最小 opaque identity、固定 raw/sanitized roots、immutable event hash chain、terminal seal 与 fail-closed cross-run guards 隔离状态并保留完整 Evidence Chain。
 - [Define the safe ideation entry](tickets/024-define-the-safe-ideation-entry.md): 原地改造现有 CLI：准入清单式导入守卫、六参数 new-run CLI、九步 fail-closed preflight（末道为估价批准）、versioned 价格表按 attempt 开始时段计价、prompt diff 限于工具描述段、FinalizeIdea 结构校验、三注入缝。
 - [Define the minimal runtime dependency contract](tickets/034-define-the-minimal-runtime-dependency-contract.md): 三文件结构（runtime 最小集 / upstream 保留清单 / dev 工具）全部精确 pin；最小集 = 实际 import 闭包且随使用方同生同灭，确切清单由实现 ticket 落地。
+- [Define control flow, failures, and resume](tickets/025-define-control-flow-failures-and-resume.md): baseline 循环不变，模型可修复错误统一回灌、per-generation finalization gate，失败按 suspend/terminal 封闭二值分级，中断立即 abort 且 operation 原子，resume 重放重建加费用重估，orphan 规则修订为 quarantine（023 留指针）。
+- [Choose IdeaBench evaluation fidelity](tickets/032-choose-ideabench-evaluation-fidelity.md): Target Paper 仅作 sealed qualitative comparator——Robert 判分的结构化 post-seal Evaluation Artifact，canary 阶段逐 run 强制——不复现任何官方指标；报告以术语纪律与 "Evaluation fidelity" 专节区分本适配与官方复现，并主动披露 DeepSeek 参数化污染 caveat。
 
 ## Not yet specified
 

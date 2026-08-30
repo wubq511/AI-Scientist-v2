@@ -155,3 +155,5 @@ Sanitized evidence 禁止包含 Target Paper identity/title/DOI/URL/private mapp
 进入 Git 前必须通过 strict sanitized schema、canonical bytes、raw seal/event/artifact linkage、forbidden key/path/credential-pattern/target-identifier scans，并记录 exporter/validator version 与结果。Hash fields 使用 typed validation 避免 high-entropy false positive。新 schema/allowlist version 需 focused human review；同一批准版本下不要求逐 run 手工复核。任一 gate 失败时不得产生可提交 sanitized root，raw evidence 保持不变。
 
 本 ticket 只锁定 identity、persistence、integrity、privacy 与 isolation contract；没有实现 runtime、创建 run、调用模型或进入 downstream。Generation/tool/reflection/finalization/retry/interruption/resume state machine、atomic write 与 staging recovery 仍由 [Define control flow, failures, and resume](025-define-control-flow-failures-and-resume.md) 决定，但不能放宽本合同。
+
+> 后续修订（2026-08-30）：[Define control flow, failures, and resume](025-define-control-flow-failures-and-resume.md) 修订 orphan final artifact 规则：rename→event 落盘间存在微秒级崩溃窗口，该窗口产生的 orphan 不再直接判 run corrupt；resume 时隔离至 quarantine 区、记录 incident 后继续——event 从未引用这些 bytes，链完整性不受影响。staging cleanup 行为亦由该票固化。

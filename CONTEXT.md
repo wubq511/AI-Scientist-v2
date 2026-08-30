@@ -80,6 +80,22 @@ _Avoid_: Latest config, implicit preflight
 The immutable terminal evidence that closes an Ideation Run and fixes its outcome and final Evidence Chain boundary. A sealed run cannot resume or accept more evidence.
 _Avoid_: Final save, completed flag
 
+**Terminal Outcome**:
+The sealed end state of an Ideation Run, exactly one of `success`, `failed`, or `preflight_rejected`, fixed by its Run Seal. A suspended run has no terminal outcome.
+_Avoid_: Completed status, exit code
+
+**Run Suspension**:
+An unsealed, resumable stop of an Ideation Run caused by external interruption or an environment-class failure, preserving all committed evidence; an approved resume continues the same run under a new writer epoch.
+_Avoid_: Paused run, crashed run, implicit resume
+
+**Generation Disposition**:
+The recorded terminal result of one proposal generation inside an Ideation Run, exactly one of `finalized` or `budget_exhausted`; a non-finalizing generation is model-behavior evidence and does not by itself terminate the run.
+_Avoid_: Generation error, skipped generation
+
+**Model-Fixable Error**:
+An action-protocol or tool-input error the model can correct on a later round, fed back as that round's tool result at the cost of one reflection round; never a silent abort or an invisible print.
+_Avoid_: Validation error, parse failure
+
 **Evidence Event**:
 An immutable, run-scoped record of one lifecycle, action, output, validation, or failure fact, ordered within its Ideation Run and linked to supporting artifacts where needed.
 _Avoid_: Console log, mutable status row
@@ -91,6 +107,10 @@ _Avoid_: Console log, final result
 **Evidence Feedback Loop**:
 The repeated use of an Evidence Chain to find weaknesses, propose a design improvement, validate it, and retain what was learned.
 _Avoid_: Ad hoc optimization, prompt tweaking
+
+**Evaluation Artifact**:
+A private, non-model-visible record produced after a Run Seal that stores Robert's structured qualitative comparison of one sealed run's final idea against its unsealed Target Paper, kept outside that run's Evidence Chain.
+_Avoid_: Benchmark score, official metric
 
 **Downstream Experiment**:
 Any AI Scientist phase after idea generation, including BFTS, code experiments, plotting, write-up, and review; it is outside this project’s scope.
