@@ -8,6 +8,20 @@ The only public replay command is:
 python -m prototypes.local_ranking.run --protocol <repository-relative-frozen-protocol.json>
 ```
 
+Formal-input preparation is a separate private, immutable prototype step:
+
+```bash
+python -m prototypes.local_ranking.input_preparation prepare \
+  --output-root artifacts/local-ranking-prototype/input-preparation-v1/attempts/<attempt-id>
+```
+
+This command uses target identity, clusters, and reference text only inside the private
+preparation boundary. It emits a target `title + abstract`-only Workshop authoring packet,
+deterministically stratified 6+6 case proposal, and pending-approval corpus bundles. It does
+not create queries/qrels or label any artifact approved. Workshop drafts are validated in a
+second immutable step with `validate-workshops`; the query author must use a fresh context
+that can read Approved Workshops but cannot read the authoring packet or corpus content.
+
 Prepare the pinned dense model in previously unused repository-relative paths before entering offline mode:
 
 ```bash
