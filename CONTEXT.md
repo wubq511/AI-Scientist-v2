@@ -96,6 +96,18 @@ _Avoid_: Generation error, skipped generation
 An action-protocol or tool-input error the model can correct on a later round, fed back as that round's tool result at the cost of one reflection round; never a silent abort or an invisible print.
 _Avoid_: Validation error, parse failure
 
+**Idea Quality Rubric**:
+The versioned catalog of idea-quality criteria that assigns each criterion to exactly one enforcement layer: runtime evidence-backed checks at the finalization gate, or Robert's post-seal qualitative judgment.
+_Avoid_: Quality checklist, idea score
+
+**Declared Grounding**:
+The model's declaration, submitted with FinalizeIdea outside the seven-field idea payload, of which papers retrieved in the same Ideation Run the idea builds on; verified deterministically against the run's Retrieval Audit Events.
+_Avoid_: Citations, reference list
+
+**Idea Leakage**:
+The presence of private, non-model-visible information such as `case_id`, corpus paths or hashes, or internal identifiers in model-submitted FinalizeIdea content; detected by a deterministic payload hygiene scan and distinct from Workshop-side leakage, which is governed by Workshop File validation.
+_Avoid_: Payload contamination, target leakage
+
 **Evidence Event**:
 An immutable, run-scoped record of one lifecycle, action, output, validation, or failure fact, ordered within its Ideation Run and linked to supporting artifacts where needed.
 _Avoid_: Console log, mutable status row

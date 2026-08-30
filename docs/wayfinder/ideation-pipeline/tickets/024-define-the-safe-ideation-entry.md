@@ -63,3 +63,5 @@ Robert 批准以下安全 ideation 入口合同（三轮 grilling，全部按推
 重试/失败/resume 状态机 → 025;requirements 与版本锁定 → 034；完整测试矩阵 → 027（本票贡献导入守卫一条）;prompt 文本优化走 Evidence Feedback Loop;thinking 参数由获批 canary 实证（031)。
 
 本 ticket 只锁定入口设计决策；未修改 runtime code、未调用模型、未进入 downstream。
+
+> 后续修订（2026-08-30）：[Define the idea quality rubric](026-define-the-idea-quality-rubric.md) 修订 FinalizeIdea 结构校验：参数在 idea 对象之外新增 `grounding: [paper_id, ...]`，七字段 idea payload 本身不变；Declared Grounding 校验失败按 025 作为 Model-Fixable Error 回灌。字段级合约与 prompt 呈现方式由 [Define the declared grounding contract](038-define-the-declared-grounding-contract.md) 决定。
