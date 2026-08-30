@@ -32,3 +32,5 @@ Which evidence-backed criteria distinguish a grounded, non-leaking, non-duplicat
 衍生动作：新建 [Define the declared grounding contract](038-define-the-declared-grounding-contract.md)（blocked_by 本票）；024 追加修订指针；CONTEXT.md 新增 Idea Quality Rubric、Declared Grounding、Idea Leakage 三个术语。
 
 本 ticket 只锁定 rubric 决策；未实现 runtime code、未修改 prompt、未调用模型、未进入 downstream。
+
+> 后续修订（2026-08-30）：[Define the declared grounding contract](038-define-the-declared-grounding-contract.md) 收紧 Declared Grounding eligibility：声明 id 必须 ∈ 本 generation 已返回 Retrieval Results 的 paper_id 并集（本票「本 run 的 Retrieval Audit Events」措辞的子集），与 025 的 per-generation `msg_history` 作用域严格对齐。
