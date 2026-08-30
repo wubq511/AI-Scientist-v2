@@ -8,6 +8,16 @@ The only public replay command is:
 python -m prototypes.local_ranking.run --protocol <repository-relative-frozen-protocol.json>
 ```
 
+Prepare the pinned dense model in previously unused repository-relative paths before entering offline mode:
+
+```bash
+python -m prototypes.local_ranking.prepare_model \
+  --artifact-dir <model-files-directory> \
+  --manifest <sibling-model-manifest.json>
+```
+
+The preparation command downloads only the six allowlisted files from the approved E5 commit, verifies the frozen weight size/SHA-256 and model-size gate, writes a closed manifest, and never overwrites an earlier attempt. A failed partial directory is evidence and must not be reused.
+
 `fixtures/protocol.json` is a lexical/RRF diagnostic example. An attempt is immutable: running the same `comparison_id + attempt_id` twice fails instead of overwriting evidence. Copy the frozen protocol with a new `attempt_id` to perform another replay; do not edit an already-run attempt.
 
 The harness:
