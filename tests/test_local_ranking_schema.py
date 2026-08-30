@@ -83,3 +83,19 @@ def test_rrf_sources_must_precede_the_fusion_candidate() -> None:
         parse_protocol(value)
 
     assert raised.value.code == "INVALID_SCHEMA"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("segments_per_paper", 2), ("total_segment_cap", 6)),
+)
+def test_output_budget_must_match_the_approved_payload_policy(
+    field: str, value: int
+) -> None:
+    protocol = _json("protocol.json")
+    protocol["candidates"][0]["output_budget"][field] = value
+
+    with pytest.raises(HarnessError) as raised:
+        parse_protocol(protocol)
+
+    assert raised.value.code == "PROTOCOL_DEVIATION"

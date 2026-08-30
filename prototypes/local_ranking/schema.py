@@ -371,10 +371,13 @@ def _parse_budget(value: Any, *, label: str) -> OutputBudget:
     total_segment_cap = _int(
         obj["total_segment_cap"], label=f"{label}.total_segment_cap", minimum=1
     )
-    if paper_cap not in {3, 5} or segments_per_paper not in {1, 2}:
+    if paper_cap not in {3, 5} or segments_per_paper != 1:
         fail("PROTOCOL_DEVIATION", f"{label} is outside the approved v1 grid")
-    if total_segment_cap != 6:
-        fail("PROTOCOL_DEVIATION", f"{label}.total_segment_cap must equal 6")
+    if total_segment_cap != paper_cap:
+        fail(
+            "PROTOCOL_DEVIATION",
+            f"{label}.total_segment_cap must equal paper_cap",
+        )
     return OutputBudget(paper_cap, segments_per_paper, total_segment_cap)
 
 

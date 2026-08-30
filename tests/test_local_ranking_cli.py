@@ -120,7 +120,7 @@ def test_dense_candidate_fails_before_network_or_import_when_model_is_missing(
             "output_budget": {
                 "paper_cap": 3,
                 "segments_per_paper": 1,
-                "total_segment_cap": 6,
+                "total_segment_cap": 3,
             },
             "parameters": {},
             "phrase_bonus": False,
