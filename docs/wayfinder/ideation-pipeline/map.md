@@ -46,6 +46,7 @@ status: open
 - [Define the Scoped Literature Retriever contract](tickets/020-define-the-scoped-retriever-contract.md): 模型只提交 query；本地 retriever 在唯一 approved corpus 内返回最小 source-faithful paper evidence，并以 deterministic ranking、private audit release gate 与 fail-closed errors 阻止越界或降级。
 - [Define the DeepSeek adapter contract](tickets/022-define-the-deepseek-adapter-contract.md): 采用 DeepSeek-only non-streaming Chat Completions adapter，以严格 allowlist、typed attempts、bounded retry、fail-closed validation、私有原始证据和官方人民币价格快照隔离 provider transport 与 ideation controller。
 - [Define run identity and evidence layout](tickets/023-define-run-identity-and-evidence-layout.md): 每次 run 以最小 opaque identity、固定 raw/sanitized roots、immutable event hash chain、terminal seal 与 fail-closed cross-run guards 隔离状态并保留完整 Evidence Chain。
+- [Define the safe ideation entry](tickets/024-define-the-safe-ideation-entry.md): 原地改造现有 CLI：准入清单式导入守卫、六参数 new-run CLI、九步 fail-closed preflight（末道为估价批准）、versioned 价格表按 attempt 开始时段计价、prompt diff 限于工具描述段、FinalizeIdea 结构校验、三注入缝。
 
 ## Not yet specified
 

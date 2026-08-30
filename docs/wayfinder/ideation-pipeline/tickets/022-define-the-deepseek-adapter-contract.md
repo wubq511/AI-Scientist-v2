@@ -59,3 +59,5 @@ Robert 批准以下 DeepSeek-only adapter 合同。它服务新的 ideation runt
 - Adapter 只负责 provider transport、provider-contract validation、normalization、bounded retry 和 attempt diagnostics。Scoped Literature Retriever、controller action loop、reflection、finalization、idea schema、run identity 和 artifact persistence 均在 adapter 之外。
 
 本 ticket 只定义合同并形成研究与工作记录；未修改 runtime code、未读取 credential、未调用 DeepSeek、未产生费用。
+
+> 后续修订（2026-08-30):[Define the safe ideation entry](024-define-the-safe-ideation-entry.md) 将「每次真实运行前冻结 price snapshot」简化为一次性登记、Robert 批准的 versioned 价格表（费率 + 峰谷时段窗口 + source URL + 登记日期）,preflight 按当前时间查表、表 hash pin 进 `admission.json`；实际费用逐 attempt 按其开始时刻所在时段费率结算。费用可审计性与 fail-closed 语义不变。
