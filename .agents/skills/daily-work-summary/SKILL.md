@@ -1,4 +1,5 @@
 ---
+name: daily-work-summary
 description: 汇总当天所有 session 记录，生成结构化工作日报，并协助上传到 Notion。每天工作结束时调用。关键词：日报、日总结、每日总结、今日总结、工作总结、daily summary。
 ---
 

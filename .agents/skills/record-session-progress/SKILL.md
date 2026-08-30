@@ -1,4 +1,5 @@
 ---
+name: record-session-progress
 description: 记录当前 session 的工作进展。此 skill 应在每次完成实质性回答后由 assistant 自动调用，无需用户手动触发。关键词：记录进展、记录工作、session记录、工作记录、log progress。
 ---
 
