@@ -65,6 +65,25 @@ The probe counts `passage: ` and special tokens inside the 512-token E5 input li
 After an isolated author freezes the query manifest, record the delegated or human approval without rewriting those bytes:
 
 ```bash
+python -m prototypes.local_ranking.query_authoring \
+  --raw-response <kimi-raw-stdout.txt> \
+  --raw-stderr <kimi-raw-stderr.txt> \
+  --prompt <query-author-prompt.txt> \
+  --prompt-manifest <query-author-prompt-manifest.json> \
+  --agent-file <tool-less-query-author-agent.md> \
+  --packet-manifest <approved-query-author-packet/manifest.json> \
+  --input-approval <private-input-approval/approval-manifest.json> \
+  --protocol <approved-v1.4-protocol.md> \
+  --output <new-private-query-manifest.json> \
+  --manifest-id <new-manifest-id> \
+  --execution-id <fresh-execution-id> \
+  --created-at <UTC-timestamp> \
+  --cli-version <kimi-code-version> \
+  --model-alias <configured-model-alias> \
+  --model-name <model-display-name> \
+  --provider <configured-provider> \
+  --reasoning-mode <recorded-reasoning-mode>
+
 python -m prototypes.local_ranking.formal_input approve-queries \
   --query-manifest <private-query-manifest.json> \
   --packet-manifest <approved-query-author-packet/manifest.json> \
@@ -75,6 +94,11 @@ python -m prototypes.local_ranking.formal_input approve-queries \
   --delegated-by <authority> \
   --delegation-text <exact-authority-text>
 ```
+
+The finalizer accepts either bare JSON or the single `\u2022 ` prefix emitted by Kimi Code's
+text renderer. It preserves and hash-binds raw stdout/stderr; every other wrapper, unknown
+field, case/order drift, duplicate normalized query, forbidden evaluation identity, or
+query-shape violation fails closed.
 
 Materialize the formal development/holdout inputs and blind qrels pages with:
 

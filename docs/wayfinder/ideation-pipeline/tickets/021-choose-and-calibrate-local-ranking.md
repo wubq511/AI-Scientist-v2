@@ -29,6 +29,8 @@ blocked_by:
 - [Formal holdout inconclusive 后的补救设计研究](../../../prototypes/local-ranking-inconclusive-next-step-research.md)
 - [v1.4 fresh direct-payload evaluation 对抗性审查](../../../research/local-ranking-v1.4-adversarial-protocol-review.md)
 - [本地文献排序比较协议 v1.4（approved operational overlay）](../../../prototypes/local-literature-ranking-comparison-protocol-v1.4.md)
+- [DeepSeek V4 Flash 裁判适配研究](../../../research/deepseek-v4-flash-judge-fit.md)
+- [Local-ranking evaluator qualification protocol v1.0](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.md)
 
 ## Question
 
