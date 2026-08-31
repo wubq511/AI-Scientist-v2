@@ -230,8 +230,35 @@ protocol/attempt hash 并写入独立 root，没有以一次运行复制成十�
 
 ### 6.2 macOS 3-run
 
-Pending。只安装 pinned finalist neural environment、运行相同 scoring-only input 和两个 frozen
-candidates；不得扩大为完整 development matrix。完成前 holdout 继续 sealed。
+从 clean `91379fa8bf951c2e867f38f44f229372e2e6a270` 建立独立 checkout，并按 macOS
+Python 3.13.7 lock 安装只含 finalist 所需依赖的环境。安装后 63/63 tests passed；input、model
+manifest 与 lock SHA-256 分别为
+`a7bcc349275626d5babb87dced480791a88bb5749242ec3f4b58e706dccaabbb`、
+`a0459c80016d083d853c3c3d44c46754b793b005a8a84cca5e1fc2eb3f03bb04`、
+`d8d22f84ee831a5627550cc821a1178879bcd3908f9dea224645c56e94b42a3f`。
+
+首次 attempt 在 import 时为新环境生成约 `51.7 MB` `__pycache__`，导致 environment bytes/hash
+从安装态改变；该 run 保留为 warm-up deviation，不混入正式稳定集合。之后的 attempts 002/003/004
+环境均为 `669,956,676 B`、SHA-256
+`7ecf39c553a9343dc70548a5648b4d34cda5a5aec05a2d1a365927e172e5244d`，构成正式 3-run 集合：
+
+- 3/3 attempts success；6/6 candidate runs resource gate pass；
+- BM25 与 E5 各自的 12-query payload hash maps、`payloads.jsonl`、`scores.jsonl` 在 macOS 内部
+  均为 3/3 identical；
+- 两个 finalists 的 observable payload 与 Windows 10-run byte-identical；BM25 score bytes 也跨平台
+  identical；
+- E5 的 raw float score bytes 在 macOS 与 Windows 间不同，但排序与最终 payload 完全相同，符合
+  protocol 对跨平台确定性的定义；
+- BM25 cold p95 `0.052–0.054 s`、max case build `0.0056–0.0060 s`、warm p95
+  `0.396–0.411 ms`、peak RSS `30.9–31.1 MB`；
+- E5 cold p95 `1.636–2.286 s`、max case build `1.136–1.418 s`、warm p95
+  `7.089–7.767 ms`、peak RSS `896,991,232–1,178,353,664 B`；全部通过。
+
+macOS raw archive SHA-256 为
+`dbc69798438745b47fcdb81a1e13ad8515ecb48678f58d395a77e6eba6a7695d`；从 Windows 转移的
+private model/input archive SHA-256 为
+`a4a335e0c55a010a543de22589200a3efe538ba557c03c384a255289102672fa`。Windows 10-run 与
+macOS stable 3-run 共同完成 finalist determinism gate。
 
 ## 7. 保留的失败与下一步
 
@@ -242,5 +269,5 @@ candidates；不得扩大为完整 development matrix。完成前 holdout 继续
   可审计，resource rejection 不使用。
 - `stage-a-004-cold-boundary`：39/39 success，identity、relevance、resource gates 全部通过。
 
-下一步对两个 frozen finalists 做 scoring-only Mac 3-run determinism replay。通过后才解封
-holdout；此前 holdout 继续 sealed。
+下一步按 sealed receipts 验签并解封 judge-A、judge-B 与 consensus 三套 holdout qrels，然后只对
+两个 frozen finalists 做一次正式 holdout 评估。不得依据 holdout 调参、增加 candidate 或重跑择优。
