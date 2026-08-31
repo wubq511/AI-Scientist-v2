@@ -125,6 +125,31 @@ Stage B2 protocols SHA-256：judge-A
 `4734ec968b8d2885f634ee89f229287cb72c2f132700278c9c06b6e1abc92f6a`。Windows raw archive
 SHA-256 为 `bf1917a3eb5d7be53b4620c1cd51d2c9569eca4f8bab923c76af3b624ca98bbf`。
 
+### 3.5 Stage B3：RRF fusion
+
+| Candidate | judge-A nDCG@5 | judge-B nDCG@5 | consensus nDCG@5 |
+|---|---:|---:|---:|
+| BM25 | 0.752826 | 0.720736 | 0.711809 |
+| E5 | **0.847909** | **0.897539** | **0.883278** |
+| RRF k=10 | 0.829576 | 0.827341 | 0.811486 |
+| RRF k=60 | 0.810150 | 0.809488 | 0.785695 |
+
+三套共 12/12 arms success、resource gates pass；相同 candidate 的 payload hashes 跨 qrels
+完全一致。E5 相对 best RRF k=10 的 nDCG@5 高 `0.018333/0.070198/0.071793`，Recall@5
+高 `0.009127/0.032738/0.006944`，judge-A/consensus 各少 2 个 grade-3 catastrophic misses，
+judge-B miss 数相同。RRF k=60 更差。
+
+因此 RRF 虽然满足进入 ablation 的 complementarity 前提并通过 complexity gates，却没有把补漏
+转化为更好的整体 ranking；两档都拒绝。Development finalists 冻结为两个 distinct families：
+BM25 baseline 与 E5 best single scorer。
+
+Stage B3 protocols SHA-256：judge-A
+`80922c353271f599f94247cf774268dc1cb2f27fa75d3a8c6ebeb3b23ee5000e`、judge-B
+`1286931f1a2164fa51f4356c2d2c5fb4199b7a83e9aaf0d9218f88c152bd77dd`、consensus
+`c4ff7db34e5c9e7e30dff40be7489e6957cb7dc066bf4fec8d4ddad3771d14c7`。Environment SHA-256
+均为 `00c7887d1fe0b860e4d2b33a473b43f556782891c113a55a37d3a324d946d91a`，Windows raw archive
+SHA-256 为 `0cc73e376c07dc6b9282a2dcfdcd1cc9390bdeb9666b1d2205cd4b6ab337f3dd`。
+
 ## 4. Corrected resource evidence
 
 `stage-a-003-utf8` 曾把整个 preflight elapsed 记为 cold start，重复包含 corpus build，导致 E5
@@ -167,6 +192,5 @@ Probe protocol SHA-256 为 `78afd8d9c4bfd2a76601a231f41b4b21da4b2fe993bd555b99fe
   可审计，resource rejection 不使用。
 - `stage-a-004-cold-boundary`：39/39 success，identity、relevance、resource gates 全部通过。
 
-下一步用冻结 BM25 `k1=1.6,b=0.5,title_weight=1,phrase_bonus=false` 与 E5
-`title_weight=1` 比较 RRF `k∈{10,60}`，再校准 `paper_cap∈{3,5}`。Finalists、参数和
-budget 冻结前，holdout 继续 sealed。
+下一步对两个 development finalists 校准 `paper_cap∈{3,5}`。Budget 冻结后才进行 Windows
+10-run 与 Mac 3-run determinism replay，再解封 holdout；此前 holdout 继续 sealed。
