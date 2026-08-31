@@ -33,6 +33,7 @@ blocked_by:
 - [DeepSeek V4 Flash 裁判适配研究](../../../research/deepseek-v4-flash-judge-fit.md)
 - [Local-ranking evaluator qualification protocol v1.0](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.md)
 - [Local-ranking evaluator qualification protocol v1.0.1（quote contract correction）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.1.md)
+- [Local-ranking evaluator qualification protocol v1.1（segment-reference schema）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.1.md)
 
 ## Question
 
