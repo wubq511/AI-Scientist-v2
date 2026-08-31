@@ -162,11 +162,31 @@ count, and the one-whole-orientation retry ceiling have separate budget approval
 Validate each raw evaluator JSON without repair:
 
 ```bash
+python -m prototypes.local_ranking.kimi_output \
+  --raw-stdout <immutable-execution/stdout.txt> \
+  --raw-stderr <immutable-execution/stderr.txt> \
+  --prompt <exact-prompt.txt> \
+  --agent-file <tool-less-agent.md> \
+  --config-snapshot <redacted-config.json> \
+  --exit-code <immutable-execution/exit-code.txt> \
+  --started-at <immutable-execution/started-at.txt> \
+  --finished-at <immutable-execution/finished-at.txt> \
+  --output-root <new-immutable-extraction> \
+  --execution-id <fresh-execution-id> \
+  --cli-version <kimi-code-version> \
+  --model-alias <model-alias> \
+  --provider <provider-id> \
+  --reasoning-effort <effort>
+
 python -m prototypes.local_ranking.operational_judge finalize \
   --bundle <matching-public-bundle.json> \
-  --draft <raw-evaluator-draft.json> \
+  --draft <new-immutable-extraction/response.json> \
   --output-root <new-immutable-evaluator-result>
 ```
+
+The extraction step preserves and hashes every raw invocation input/output, accepts only bare
+JSON or Kimi Code's single text-renderer prefix, and canonicalizes no model semantics. The judge
+validator remains a separate closed-schema and byte-exact evidence gate.
 
 After all four orientations pass, reduce them with:
 
