@@ -29,9 +29,22 @@ QUERY_MANIFEST_SCHEMA_VERSION = "prototype-query-manifest-v1.0"
 QUERY_APPROVAL_SCHEMA_VERSION = "prototype-query-approval-v1.0"
 FORMALIZATION_SCHEMA_VERSION = "prototype-formal-input-v1.0"
 BLIND_PACKET_SCHEMA_VERSION = "prototype-blind-qrels-packet-v1.0"
-EXPECTED_CASE_IDS = tuple(
+LEGACY_EXPECTED_CASE_IDS = tuple(
     f"lr-{split}-{number:02d}" for split in ("dev", "hol") for number in range(1, 7)
 )
+OPERATIONAL_EXPECTED_CASE_IDS = tuple(f"lr-op-{number:02d}" for number in range(1, 13))
+
+
+def _case_split(case_id: str) -> str:
+    if case_id.startswith("lr-dev-"):
+        return "development"
+    if case_id.startswith("lr-hol-"):
+        return "holdout"
+    if case_id.startswith("lr-op-"):
+        return "operational"
+    fail(
+        "INVALID_QUERY_MANIFEST", "Query case_id has no approved split", case_id=case_id
+    )
 
 
 def _expect_keys(value: dict[str, Any], *, expected: set[str], label: str) -> None:
@@ -128,7 +141,11 @@ def _validate_query_manifest(
         for workshop in packet_workshops
         if isinstance(workshop, dict)
     }
-    if set(packet_by_case) != set(EXPECTED_CASE_IDS):
+    expected_case_ids = frozenset(packet_by_case)
+    if expected_case_ids not in {
+        frozenset(LEGACY_EXPECTED_CASE_IDS),
+        frozenset(OPERATIONAL_EXPECTED_CASE_IDS),
+    }:
         fail("INVALID_QUERY_MANIFEST", "Query packet case set is invalid")
 
     result: dict[str, dict[str, Any]] = {}
@@ -144,9 +161,9 @@ def _validate_query_manifest(
         case_id = _safe_id(case.get("case_id"), label="case_id")
         if case_id in result:
             fail("INVALID_QUERY_MANIFEST", "Duplicate query case", case_id=case_id)
-        if case_id not in EXPECTED_CASE_IDS:
+        if case_id not in expected_case_ids:
             fail("INVALID_QUERY_MANIFEST", "Query case_id is outside the frozen set")
-        expected_split = "development" if case_id.startswith("lr-dev-") else "holdout"
+        expected_split = _case_split(case_id)
         if case.get("split") != expected_split:
             fail(
                 "INVALID_QUERY_MANIFEST",
@@ -252,7 +269,12 @@ def _validate_query_manifest(
             all_query_ids.add(query_id)
             parsed_queries.append({"query_id": query_id, "kind": kind, "text": text})
         result[case_id] = {"split": expected_split, "queries": parsed_queries}
-    if tuple(result) != EXPECTED_CASE_IDS:
+    expected_order = (
+        OPERATIONAL_EXPECTED_CASE_IDS
+        if expected_case_ids == frozenset(OPERATIONAL_EXPECTED_CASE_IDS)
+        else LEGACY_EXPECTED_CASE_IDS
+    )
+    if tuple(result) != expected_order:
         fail("NON_CANONICAL_INPUT", "Query cases must match the frozen order")
     return result
 
@@ -379,17 +401,23 @@ def _build_formal_artifacts(
     entries = approved_corpora.get("corpora")
     if approved_corpora.get("case_count") != 12 or not isinstance(entries, list):
         fail("INVALID_APPROVAL", "Approved corpora must contain 12 cases")
+    query_splits = {item.get("split") for item in query_cases.values()}
+    if query_splits not in (
+        {"development", "holdout"},
+        {"operational"},
+    ):
+        fail(
+            "INVALID_QUERY_MANIFEST",
+            "Query cases do not form an approved formal split set",
+            splits=sorted(str(item) for item in query_splits),
+        )
     outputs = {
-        "development": {
+        split: {
             "schema_version": INPUT_SCHEMA_VERSION,
-            "split": "development",
+            "split": split,
             "cases": [],
-        },
-        "holdout": {
-            "schema_version": INPUT_SCHEMA_VERSION,
-            "split": "holdout",
-            "cases": [],
-        },
+        }
+        for split in sorted(query_splits)
     }
     query_lengths: list[dict[str, Any]] = []
     title_lengths: list[int] = []
@@ -607,7 +635,7 @@ def materialize(
     tokenizer_json: Path,
     output_root: Path,
 ) -> dict[str, Any]:
-    approval_manifest, _ = _read_json(
+    approval_manifest, approval_manifest_bytes = _read_json(
         approval_root / "approval-manifest.json", label="input approval"
     )
     approved_corpora, approved_corpora_bytes = _read_json(
@@ -633,6 +661,21 @@ def materialize(
     protocol_hash = sha256_bytes(protocol_bytes)
     packet_hash = sha256_bytes(packet_bytes)
     query_hash = sha256_bytes(query_bytes)
+    if approval_manifest.get("approval_status") != "approved":
+        fail("APPROVAL_REQUIRED", "Input approval manifest is not approved")
+    approval_protocol = approval_manifest.get("protocol")
+    if (
+        not isinstance(approval_protocol, dict)
+        or approval_protocol.get("sha256") != protocol_hash
+    ):
+        fail("INPUT_IDENTITY_MISMATCH", "Input approval does not bind the protocol")
+    if approval_artifacts.get("query-author-packet/manifest.json") != packet_hash:
+        fail("INPUT_IDENTITY_MISMATCH", "Input approval does not bind the query packet")
+    approval_preparation = approval_manifest.get("preparation")
+    if not isinstance(approval_preparation, dict) or not isinstance(
+        approval_preparation.get("selection_manifest_sha256"), str
+    ):
+        fail("INVALID_APPROVAL", "Input approval selection binding is missing")
     query_cases = _validate_query_manifest(
         query_manifest,
         packet_manifest=packet_manifest,
@@ -656,10 +699,11 @@ def materialize(
     files: dict[str, bytes] = {}
     for split, value in inputs.items():
         input_bytes = canonical_json_bytes(value)
-        packet = _build_blind_packet(value, input_sha256=sha256_bytes(input_bytes))
         files[f"{split}/input.json"] = input_bytes
-        files[f"{split}/blind-review-packet.json"] = canonical_json_bytes(packet)
-        files[f"{split}/blind-review.html"] = render_blind_review_html(packet)
+        if split != "operational":
+            packet = _build_blind_packet(value, input_sha256=sha256_bytes(input_bytes))
+            files[f"{split}/blind-review-packet.json"] = canonical_json_bytes(packet)
+            files[f"{split}/blind-review.html"] = render_blind_review_html(packet)
     files["audit.json"] = canonical_json_bytes(
         {
             **audit,
@@ -680,13 +724,21 @@ def materialize(
         "schema_version": FORMALIZATION_SCHEMA_VERSION,
         "source_binding": {
             "approved_corpora_sha256": sha256_bytes(approved_corpora_bytes),
+            "input_approval_manifest_sha256": sha256_bytes(approval_manifest_bytes),
             "protocol_sha256": protocol_hash,
             "query_approval_sha256": sha256_bytes(query_approval_bytes),
             "query_author_packet_manifest_sha256": packet_hash,
             "query_manifest_sha256": query_hash,
+            "selection_manifest_sha256": approval_preparation[
+                "selection_manifest_sha256"
+            ],
             "tokenizer_json_sha256": TOKENIZER_JSON_SHA256,
         },
-        "status": "formal_inputs_ready_qrels_pending",
+        "status": (
+            "formal_operational_input_ready"
+            if set(inputs) == {"operational"}
+            else "formal_inputs_ready_qrels_pending"
+        ),
     }
     files["manifest.json"] = canonical_json_bytes(manifest)
     for name, data in sorted(

@@ -92,6 +92,75 @@ uv run --no-project --with 'tokenizers==0.23.1' \
 
 This fail-closed adapter validates every bound hash, uses one shared source-complete segmentation for all arms, checks exact E5 query/title/segment lengths, and emits canonical harness inputs. Its self-contained HTML pages have no external resources and export qrels only after the review form is complete; they never generate relevance labels themselves.
 
+## v1.4 fresh operational evaluation
+
+The approved v1.4 overlay replaces another reuse of the spent holdout with one fresh,
+deterministically selected 12-case operational batch. Freeze the protocol and harness in a
+clean commit before running this command:
+
+```bash
+python -m prototypes.local_ranking.input_preparation prepare-operational \
+  --raw-root data/raw \
+  --spent-selection <old-12-case-selection-manifest.json> \
+  --output-root artifacts/local-ranking-prototype/operational-input-v1/attempts/<attempt-id>
+```
+
+This command excludes every old target, selects exactly four cases per corpus-size stratum,
+covers every eligible source cluster, and writes the same Workshop/corpus approval inputs as
+the legacy preparation path. It does not approve cases, author queries, run rankers, or call a
+model. Use the existing `validate-workshops`, `approve`, `approve-queries`, and `materialize`
+commands with the v1.4 protocol. Operational materialization emits one
+`operational/input.json`; it deliberately emits no qrels review page.
+
+After Windows has produced exact canonical BM25/E5 top-3 payloads for that operational input,
+prepare four blinded, mirrored evaluator prompts:
+
+```bash
+python -m prototypes.local_ranking.operational_judge prepare \
+  --input <formal-operational-input.json> \
+  --formal-manifest <formal-operational-manifest.json> \
+  --selection <operational-selection-manifest.json> \
+  --protocol docs/prototypes/local-literature-ranking-comparison-protocol-v1.4.md \
+  --comparison-summary <windows-comparison-summary.json> \
+  --baseline-candidate-id bm25-k16-b05-tw1-cap3 \
+  --baseline-payloads <windows-bm25-payloads.jsonl> \
+  --challenger-candidate-id e5-small-v2-tw1-cap3 \
+  --challenger-payloads <windows-e5-payloads.jsonl> \
+  --output-root <new-setwise-preparation-attempt>
+```
+
+The public bundles expose only query plus anonymous left/right evidence. The private mapping
+binds the exact formal manifest, input, selection, protocol, candidate payloads, resource
+gates, and side assignments. `tool-less-agent.md` disables tools and subagents. Do not start
+the four paid evaluator sessions until exact prompt sizes, model context support, invocation
+count, and the one-whole-orientation retry ceiling have separate budget approval.
+
+Validate each raw evaluator JSON without repair:
+
+```bash
+python -m prototypes.local_ranking.operational_judge finalize \
+  --bundle <matching-public-bundle.json> \
+  --draft <raw-evaluator-draft.json> \
+  --output-root <new-immutable-evaluator-result>
+```
+
+After all four orientations pass, reduce them with:
+
+```bash
+python -m prototypes.local_ranking.operational_stats \
+  --mapping <private-mapping.json> \
+  --preparation-manifest <setwise-preparation-manifest.json> \
+  --kimi-orientation-1 <validated-trace.json> \
+  --kimi-orientation-2 <validated-trace.json> \
+  --deepseek-orientation-1 <validated-trace.json> \
+  --deepseek-orientation-2 <validated-trace.json> \
+  --output <new-statistics-report.json>
+```
+
+The reducer uses 12 case-level paired observations, exact `2^12` sign-flip enumeration, a
+fixed-seed case-cluster bootstrap, pre-registered E5 promotion gates, and diagnostic-only
+fail-closed behavior for any non-operational or spent input.
+
 The approved v1.2/v1.2.1 overlays replace Robert's exhaustive HTML labeling with isolated
 synthetic topical qrels. The actual A/B runs used Kimi Code sessions, so freeze their
 truthful provider/model profiles with:
@@ -156,7 +225,7 @@ The harness:
 - evaluates the approved resource gates directly, using a labeled conservative source-plus-fusion composition for RRF;
 - emits candidate-scoped scores, canonical model payloads, hashes, metrics, failures, and resource observations under `artifacts/local-ranking-prototype/`;
 - never downloads a model or falls back to another ranker;
-- leaves `winner` unset. Robert's approval after synthetic-qrels sensitivity checks,
-  blind holdout, and the 12-query anonymous utility check remains mandatory.
+- leaves the original qrels `winner` unset. v1.4 makes only the narrower, pre-registered
+  setwise deployment decision after four validated tool-less evaluator orientations.
 
 Formal development/holdout protocols must use Python 3.13.7, enable runtime measurement, reference a clean commit, include complete blinded qrels, and reference a hashed `environment_lock`. The tracked fixture may use a null lock and run on another Python only to test harness behavior; its numbers are not decision evidence.

@@ -203,7 +203,7 @@ def parse_ranking_input(value: Any) -> RankingInput:
     if root["schema_version"] != INPUT_SCHEMA_VERSION:
         fail("UNSUPPORTED_SCHEMA", "Unsupported ranking input schema")
     split = _string(root["split"], label="input.split")
-    if split not in {"fixture", "development", "holdout"}:
+    if split not in {"fixture", "development", "holdout", "operational"}:
         fail("INVALID_SCHEMA", "input.split is invalid", value=split)
     if not isinstance(root["cases"], list) or not root["cases"]:
         fail("INVALID_SCHEMA", "input.cases must be a non-empty array")
@@ -345,8 +345,12 @@ def parse_ranking_input(value: Any) -> RankingInput:
     query_ids = [query.query_id for case in cases for query in case.queries]
     if len(query_ids) != len(set(query_ids)):
         fail("INVALID_SCHEMA", "query_id must be globally unique")
-    if split != "fixture" and len(cases) != 6:
-        fail("INVALID_SCHEMA", f"{split} split must contain exactly six cases")
+    expected_case_count = 12 if split == "operational" else 6
+    if split != "fixture" and len(cases) != expected_case_count:
+        fail(
+            "INVALID_SCHEMA",
+            f"{split} split must contain exactly {expected_case_count} cases",
+        )
     return RankingInput(split=split, cases=tuple(cases))
 
 
@@ -411,7 +415,7 @@ def parse_protocol(value: Any) -> ProtocolSpec:
     if root["normalization_version"] != NORMALIZATION_VERSION:
         fail("PROTOCOL_DEVIATION", "Unsupported normalization version")
     split = _string(root["split"], label="protocol.split")
-    if split not in {"fixture", "development", "holdout"}:
+    if split not in {"fixture", "development", "holdout", "operational"}:
         fail("INVALID_SCHEMA", "protocol.split is invalid")
     evaluation_mode = _string(root["evaluation_mode"], label="protocol.evaluation_mode")
     if evaluation_mode not in {"scoring_only", "with_qrels"}:

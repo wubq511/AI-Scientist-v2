@@ -22,6 +22,7 @@ from prototypes.local_ranking.input_preparation import (
     _optional_int,
     approve_inputs,
     select_cases,
+    select_operational_cases,
     validate_workshop_bytes,
 )
 
@@ -80,6 +81,67 @@ def test_case_selection_is_deterministic_and_stratified() -> None:
             "medium": 2,
             "large": 2,
         }
+
+
+def test_operational_selection_excludes_spent_and_covers_all_clusters() -> None:
+    clusters = [
+        "Environmental Sciences",
+        "Genetics & Molecular Biology",
+        "Health & Medicine",
+        "Materials Science",
+        "Neuroscience & Cognitive Sciences",
+        "Public Health & Policy",
+        "Social & Behavioral Sciences",
+        "Technology & Engineering",
+    ]
+    counts = {"small": 3, "medium": 9, "large": 19}
+    features = []
+    index = 0
+    for cluster in clusters:
+        for stratum, base_count in counts.items():
+            for offset in range(2):
+                features.append(
+                    CaseFeature(
+                        target_id=f"fresh-target-{index:03d}",
+                        cluster=cluster,
+                        strategy=(
+                            2
+                            if cluster == "Technology & Engineering"
+                            and stratum == "small"
+                            else 1
+                        ),
+                        reference_count=base_count + offset,
+                        stratum=stratum,
+                        overlap_ppm=10_000 + index * 1_000,
+                        split_bucket="development",
+                        selection_key=f"{index:064x}",
+                        target_row_number=index + 2,
+                        target_row_sha256=f"{index + 100:064x}",
+                    )
+                )
+                index += 1
+    spent = {features[0].target_id}
+    first = select_operational_cases(
+        tuple(features),
+        spent_target_ids=spent,
+        source_hashes={"source": "a" * 64},
+        spent_sha256="b" * 64,
+    )
+    second = select_operational_cases(
+        tuple(reversed(features)),
+        spent_target_ids=spent,
+        source_hashes={"source": "a" * 64},
+        spent_sha256="b" * 64,
+    )
+
+    assert first == second
+    assert len(first) == 12
+    assert not spent.intersection(item.target_id for item in first)
+    assert {item.cluster for item in first} == set(clusters)
+    assert {
+        stratum: sum(item.stratum == stratum for item in first)
+        for stratum in ("small", "medium", "large")
+    } == {"small": 4, "medium": 4, "large": 4}
 
 
 def test_integer_valued_raw_year_is_canonicalized() -> None:

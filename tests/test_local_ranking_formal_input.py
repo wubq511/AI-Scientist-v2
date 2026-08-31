@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from prototypes.local_ranking import formal_input as formal_input_module
 from prototypes.local_ranking.blind_review import render_blind_review_html
 from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
 from prototypes.local_ranking.errors import HarnessError
@@ -13,6 +14,7 @@ from prototypes.local_ranking.formal_input import (
     _build_formal_artifacts,
     _validate_query_manifest,
     approve_queries,
+    materialize,
 )
 from prototypes.local_ranking.normalization import normalize_query
 
@@ -93,6 +95,49 @@ def _packet_manifest() -> dict[str, object]:
             for number in range(1, 7)
         ],
     }
+
+
+def _operational_packet_manifest() -> dict[str, object]:
+    return {
+        "case_count": 12,
+        "workshops": [
+            {
+                "case_id": f"lr-op-{number:02d}",
+                "path": f"workshops/lr-op-{number:02d}.md",
+                "sha256": "a" * 64,
+            }
+            for number in range(1, 13)
+        ],
+    }
+
+
+def _operational_query_manifest(
+    packet_hash: str, protocol_hash: str
+) -> dict[str, object]:
+    manifest = _query_manifest(packet_hash, protocol_hash)
+    for number, case in enumerate(manifest["cases"], start=1):
+        case_id = f"lr-op-{number:02d}"
+        case["case_id"] = case_id
+        case["split"] = "operational"
+        case["workshop"] = {
+            "path": f"query-author-packet/workshops/{case_id}.md",
+            "sha256": "a" * 64,
+        }
+        for query in case["queries"]:
+            kind = query["kind"]
+            text = f"Which {kind} evidence should be found for case {case_id}?"
+            normalized = normalize_query(text)
+            query.update(
+                {
+                    "normalized_text": normalized.normalized,
+                    "normalized_tokens": list(normalized.tokens),
+                    "query_id": f"{case_id}-{kind}",
+                    "scalar_count": len(text),
+                    "text": text,
+                    "text_sha256": sha256_bytes(text.encode()),
+                }
+            )
+    return manifest
 
 
 def _approved_corpora(tmp_path: Path) -> tuple[dict[str, object], Path]:
@@ -185,6 +230,18 @@ def test_query_manifest_rejects_changed_frozen_text() -> None:
         )
 
 
+def test_operational_query_manifest_accepts_exact_fresh_case_order() -> None:
+    parsed = _validate_query_manifest(
+        _operational_query_manifest("a" * 64, "b" * 64),
+        packet_manifest=_operational_packet_manifest(),
+        packet_manifest_sha256="a" * 64,
+        protocol_sha256="b" * 64,
+    )
+
+    assert tuple(parsed) == tuple(f"lr-op-{number:02d}" for number in range(1, 13))
+    assert {case["split"] for case in parsed.values()} == {"operational"}
+
+
 def test_formal_materialization_is_source_complete_and_shared(tmp_path: Path) -> None:
     manifest = _query_manifest("a" * 64, "b" * 64)
     query_cases = _validate_query_manifest(
@@ -213,6 +270,71 @@ def test_formal_materialization_is_source_complete_and_shared(tmp_path: Path) ->
     assert "".join(segment["text"] for segment in first_paper["segments"]) == (
         "A" * 300 + ". " + "B" * 300 + "."
     )
+
+
+def test_materialize_hash_binds_input_approval_and_selection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    approved, corpora_root = _approved_corpora(tmp_path)
+    approval_root = tmp_path / "approval"
+    approved_bytes = _write_json(approval_root / "approved-corpora.json", approved)
+    packet_bytes = _write_json(
+        approval_root / "query-author-packet/manifest.json", _packet_manifest()
+    )
+    protocol_path = tmp_path / "protocol.md"
+    protocol_path.write_bytes(b"approved protocol\n")
+    protocol_sha256 = sha256_bytes(protocol_path.read_bytes())
+    selection_sha256 = "c" * 64
+    approval_manifest = {
+        "approval_status": "approved",
+        "artifacts": {
+            "approved-corpora.json": sha256_bytes(approved_bytes),
+            "query-author-packet/manifest.json": sha256_bytes(packet_bytes),
+        },
+        "preparation": {"selection_manifest_sha256": selection_sha256},
+        "protocol": {"sha256": protocol_sha256},
+    }
+    approval_manifest_bytes = _write_json(
+        approval_root / "approval-manifest.json", approval_manifest
+    )
+    query_manifest_path = tmp_path / "query-manifest.json"
+    query_manifest_bytes = _write_json(
+        query_manifest_path,
+        _query_manifest(sha256_bytes(packet_bytes), protocol_sha256),
+    )
+    query_approval_path = tmp_path / "query-approval.json"
+    _write_json(
+        query_approval_path,
+        {
+            "approval_status": "approved_as_is",
+            "schema_version": "prototype-query-approval-v1.0",
+            "source_binding": {
+                "protocol_sha256": protocol_sha256,
+                "query_author_packet_manifest_sha256": sha256_bytes(packet_bytes),
+                "query_manifest_sha256": sha256_bytes(query_manifest_bytes),
+            },
+        },
+    )
+    monkeypatch.setattr(
+        formal_input_module,
+        "_load_token_lengths",
+        lambda _: (lambda text: len(text), lambda text: len(text)),
+    )
+
+    manifest = materialize(
+        approval_root=approval_root,
+        corpora_root=corpora_root,
+        query_manifest_path=query_manifest_path,
+        query_approval_path=query_approval_path,
+        protocol_path=protocol_path,
+        tokenizer_json=tmp_path / "unused-tokenizer.json",
+        output_root=tmp_path / "formal-output",
+    )
+
+    assert manifest["source_binding"]["input_approval_manifest_sha256"] == sha256_bytes(
+        approval_manifest_bytes
+    )
+    assert manifest["source_binding"]["selection_manifest_sha256"] == selection_sha256
 
 
 def test_blind_packet_and_html_omit_comparison_results(tmp_path: Path) -> None:

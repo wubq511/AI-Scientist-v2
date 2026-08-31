@@ -10,7 +10,7 @@ import unicodedata
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from itertools import combinations
+from itertools import combinations, product
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ from .errors import HarnessError, fail
 from .normalization import normalize_text, tokenize_text
 
 SELECTION_VERSION = "local-ranking-case-selection-v1.1"
+OPERATIONAL_SELECTION_VERSION = "local-ranking-operational-case-selection-v1.0"
 SELECTION_SPLIT_SEED_VERSION = "local-ranking-case-selection-v1"
 CORPUS_SCHEMA_VERSION = "prototype-frozen-corpus-v1"
 CORPUS_NORMALIZATION_VERSION = "source-text-nfc-lf-trim-v1"
@@ -36,7 +37,9 @@ INPUT_REVIEW_SCHEMA_VERSION = "prototype-input-review-v1.0"
 INPUT_APPROVAL_SCHEMA_VERSION = "prototype-input-approval-v1.0"
 WORKSHOP_NGRAM_TOKENS = 8
 SPLITS = ("development", "holdout")
+OPERATIONAL_SPLIT = "operational"
 STRATA = ("small", "medium", "large")
+OPERATIONAL_CASES_PER_STRATUM = 4
 AUDITED_UNREADY_REFERENCE_ID_HASHES = {
     "c31acf1c711e32b3e56b3e2e3be3f0822b403b1f17c12010627814171a6f4c85",
     "d0456963cabaab0703cd04f1aa3258e5a034659fce2ee1229cce07a9287783c7",
@@ -413,6 +416,175 @@ def _case_assignments(
     return assignments
 
 
+def _operational_selection_key(
+    feature: CaseFeature, *, source_hashes: dict[str, str], spent_sha256: str
+) -> str:
+    seed = "|".join(
+        [
+            OPERATIONAL_SELECTION_VERSION,
+            spent_sha256,
+            *(source_hashes[name] for name in sorted(source_hashes)),
+        ]
+    )
+    return sha256_bytes(f"{seed}|{feature.target_id}".encode())
+
+
+def select_operational_cases(
+    features: tuple[CaseFeature, ...],
+    *,
+    spent_target_ids: set[str],
+    source_hashes: dict[str, str],
+    spent_sha256: str,
+) -> tuple[CaseFeature, ...]:
+    fresh = tuple(
+        feature for feature in features if feature.target_id not in spent_target_ids
+    )
+    expected_total = OPERATIONAL_CASES_PER_STRATUM * len(STRATA)
+    by_stratum = {
+        stratum: tuple(feature for feature in fresh if feature.stratum == stratum)
+        for stratum in STRATA
+    }
+    for stratum, candidates in by_stratum.items():
+        if len(candidates) < OPERATIONAL_CASES_PER_STRATUM:
+            fail(
+                "INSUFFICIENT_CASES",
+                "Fresh operational selection lacks a required stratum",
+                stratum=stratum,
+                count=len(candidates),
+            )
+
+    clusters = tuple(sorted({feature.cluster for feature in fresh}))
+    if len(clusters) > expected_total:
+        fail(
+            "INSUFFICIENT_CASE_DIVERSITY",
+            "Operational case budget cannot cover every source cluster",
+            cluster_count=len(clusters),
+            case_budget=expected_total,
+        )
+    keys = {
+        feature.target_id: _operational_selection_key(
+            feature,
+            source_hashes=source_hashes,
+            spent_sha256=spent_sha256,
+        )
+        for feature in fresh
+    }
+    representatives: dict[tuple[str, str], CaseFeature] = {}
+    cluster_options: list[tuple[str, tuple[str, ...]]] = []
+    for cluster in clusters:
+        options: list[str] = []
+        for stratum in STRATA:
+            candidates = [
+                feature for feature in by_stratum[stratum] if feature.cluster == cluster
+            ]
+            if not candidates:
+                continue
+            representative = min(
+                candidates,
+                key=lambda feature: (
+                    -int(feature.strategy == 2),
+                    keys[feature.target_id],
+                ),
+            )
+            representatives[(cluster, stratum)] = representative
+            options.append(stratum)
+        if not options:
+            fail(
+                "INSUFFICIENT_CASE_DIVERSITY",
+                "A source cluster has no fresh eligible case",
+                cluster=cluster,
+            )
+        cluster_options.append((cluster, tuple(options)))
+
+    feasible_assignments: list[tuple[tuple[Any, ...], tuple[CaseFeature, ...]]] = []
+    for assignment in product(*(options for _, options in cluster_options)):
+        counts = {stratum: assignment.count(stratum) for stratum in STRATA}
+        if any(counts[stratum] > OPERATIONAL_CASES_PER_STRATUM for stratum in STRATA):
+            continue
+        selected = tuple(
+            representatives[(cluster, stratum)]
+            for (cluster, _), stratum in zip(cluster_options, assignment, strict=True)
+        )
+        score = (
+            -sum(feature.strategy == 2 for feature in selected),
+            sum(int(keys[feature.target_id][:16], 16) for feature in selected),
+            tuple(sorted(keys[feature.target_id] for feature in selected)),
+        )
+        feasible_assignments.append((score, selected))
+    if not feasible_assignments:
+        fail(
+            "INSUFFICIENT_CASE_DIVERSITY",
+            "No stratum-balanced assignment covers every source cluster",
+        )
+    selected = list(min(feasible_assignments, key=lambda item: item[0])[1])
+
+    for stratum in STRATA:
+        stratum_selected = [
+            feature for feature in selected if feature.stratum == stratum
+        ]
+        ref_values = [feature.reference_count for feature in by_stratum[stratum]]
+        overlap_values = [feature.overlap_ppm for feature in by_stratum[stratum]]
+        ref_span = max(ref_values) - min(ref_values)
+        overlap_span = max(overlap_values) - min(overlap_values)
+        while len(stratum_selected) < OPERATIONAL_CASES_PER_STRATUM:
+            candidates = [
+                feature for feature in by_stratum[stratum] if feature not in selected
+            ]
+
+            def fill_key(feature: CaseFeature) -> tuple[Any, ...]:
+                distances = []
+                for existing in stratum_selected:
+                    ref_distance = (
+                        abs(feature.reference_count - existing.reference_count)
+                        * 1_000_000
+                        // max(1, ref_span)
+                    )
+                    overlap_distance = (
+                        abs(feature.overlap_ppm - existing.overlap_ppm)
+                        * 1_000_000
+                        // max(1, overlap_span)
+                    )
+                    distances.append(ref_distance + overlap_distance)
+                return (
+                    -min(distances),
+                    -int(feature.strategy == 2),
+                    keys[feature.target_id],
+                )
+
+            chosen = min(candidates, key=fill_key)
+            selected.append(chosen)
+            stratum_selected.append(chosen)
+
+    if (
+        len(selected) != expected_total
+        or len({item.target_id for item in selected}) != expected_total
+    ):
+        fail("INVALID_SELECTION", "Operational selection is incomplete or duplicated")
+    if {item.cluster for item in selected} != set(clusters):
+        fail(
+            "INSUFFICIENT_CASE_DIVERSITY", "Operational selection lost cluster coverage"
+        )
+    return tuple(
+        sorted(
+            selected,
+            key=lambda feature: (
+                STRATA.index(feature.stratum),
+                feature.reference_count,
+                keys[feature.target_id],
+            ),
+        )
+    )
+
+
+def _operational_assignments(
+    selected: tuple[CaseFeature, ...],
+) -> list[tuple[str, str, CaseFeature]]:
+    return [
+        (f"lr-op-{index:02d}", OPERATIONAL_SPLIT, feature)
+        for index, feature in enumerate(selected, start=1)
+    ]
+
+
 def _canonical_source_text(value: str, *, label: str) -> tuple[str, list[str]]:
     if not isinstance(value, str) or not value:
         fail("INVALID_RAW_DATA", f"{label} must be a non-empty string")
@@ -774,6 +946,147 @@ def prepare_inputs(
     }
 
 
+def prepare_operational_inputs(
+    repo_root: Path,
+    raw_root: Path,
+    output_root: Path,
+    spent_selection_path: Path,
+) -> dict[str, Any]:
+    source = load_source_data(raw_root)
+    spent_selection, spent_bytes = _read_json_object(
+        spent_selection_path, label="spent selection manifest"
+    )
+    if spent_selection.get("selection_version") != SELECTION_VERSION:
+        fail("UNSUPPORTED_SCHEMA", "Spent selection manifest version does not match")
+    if spent_selection.get("source_hashes") != source.source_hashes:
+        fail("SOURCE_DRIFT", "Spent selection uses a different source snapshot")
+    spent_cases = spent_selection.get("cases")
+    if not isinstance(spent_cases, list) or not spent_cases:
+        fail("INVALID_SELECTION", "Spent selection contains no cases")
+    spent_target_ids = {
+        item.get("target_paper_id")
+        for item in spent_cases
+        if isinstance(item, dict) and isinstance(item.get("target_paper_id"), str)
+    }
+    if len(spent_target_ids) != len(spent_cases):
+        fail("INVALID_SELECTION", "Spent selection target identities are incomplete")
+    spent_sha256 = sha256_bytes(spent_bytes)
+    features = derive_case_features(source)
+    selected = select_operational_cases(
+        features,
+        spent_target_ids=spent_target_ids,
+        source_hashes=source.source_hashes,
+        spent_sha256=spent_sha256,
+    )
+    assignments = _operational_assignments(selected)
+    excluded_count = len(source.target_rows) - len(features)
+    selection_keys = {
+        feature.target_id: _operational_selection_key(
+            feature,
+            source_hashes=source.source_hashes,
+            spent_sha256=spent_sha256,
+        )
+        for feature in selected
+    }
+
+    source_manifest = {
+        "source_hashes": source.source_hashes,
+        "source_paths": {
+            name: (raw_root / name).relative_to(repo_root).as_posix()
+            for name in sorted(source.source_hashes)
+        },
+    }
+    write_json_once(output_root / "source-manifest.json", source_manifest)
+
+    cases: list[dict[str, Any]] = []
+    authoring_cases: list[dict[str, Any]] = []
+    corpus_bundles: list[dict[str, Any]] = []
+    for case_id, split, feature in assignments:
+        target_row = source.target_rows[feature.target_id]
+        cases.append(
+            {
+                "case_id": case_id,
+                "cluster": feature.cluster,
+                "overlap_ppm": feature.overlap_ppm,
+                "reference_count": feature.reference_count,
+                "selection_key": selection_keys[feature.target_id],
+                "split": split,
+                "strategy": feature.strategy,
+                "stratum": feature.stratum,
+                "target_paper_id": feature.target_id,
+                "target_row_number": feature.target_row_number,
+                "target_row_sha256": feature.target_row_sha256,
+            }
+        )
+        authoring_cases.append(
+            {
+                "case_id": case_id,
+                "raw_abstract": target_row["abstract"],
+                "source_allowlist": ["title", "abstract"],
+                "target_row_sha256": feature.target_row_sha256,
+                "title": target_row["title"],
+            }
+        )
+        corpus_bundles.append(
+            _build_corpus_bundle(output_root, case_id, feature, source)
+        )
+
+    spent_relative = _repo_relative(
+        spent_selection_path, repo_root, label="spent selection manifest"
+    )
+    selection_manifest = {
+        "cases": cases,
+        "eligible_case_count": len(features),
+        "excluded_spent_case_count": len(spent_target_ids),
+        "excluded_unready_case_count": excluded_count,
+        "fresh_candidate_count": len(features) - len(spent_target_ids),
+        "selection_version": OPERATIONAL_SELECTION_VERSION,
+        "source_hashes": source.source_hashes,
+        "spent_selection": {
+            "path": spent_relative,
+            "sha256": spent_sha256,
+        },
+    }
+    write_json_once(output_root / "selection-manifest.json", selection_manifest)
+    write_json_once(
+        output_root / "workshop-authoring.json",
+        {
+            "cases": authoring_cases,
+            "contract_version": WORKSHOP_CONTRACT_VERSION,
+            "notice": "Derivation input contains only target title and raw abstract.",
+        },
+    )
+    preparation_manifest = {
+        "approval_status": "pending_robert_approval",
+        "case_count": len(cases),
+        "corpus_bundles": corpus_bundles,
+        "selection_manifest_sha256": sha256_bytes(
+            (output_root / "selection-manifest.json").read_bytes()
+        ),
+        "source_manifest_sha256": sha256_bytes(
+            (output_root / "source-manifest.json").read_bytes()
+        ),
+        "workshop_authoring_sha256": sha256_bytes(
+            (output_root / "workshop-authoring.json").read_bytes()
+        ),
+    }
+    write_json_once(output_root / "preparation-manifest.json", preparation_manifest)
+    return {
+        "approval_status": "pending_robert_approval",
+        "case_count": len(cases),
+        "cluster_count": len({item["cluster"] for item in cases}),
+        "fresh_candidate_count": len(features) - len(spent_target_ids),
+        "output_root": output_root.relative_to(repo_root).as_posix(),
+        "selection_version": OPERATIONAL_SELECTION_VERSION,
+        "spent_selection_sha256": spent_sha256,
+        "strata_counts": {
+            stratum: sum(item["stratum"] == stratum for item in cases)
+            for stratum in STRATA
+        },
+        "strategy_2_count": sum(item["strategy"] == 2 for item in cases),
+    }
+
+
 def _ngram_hash_hits(
     workshop_text: str, sources: list[tuple[str, str]]
 ) -> list[dict[str, Any]]:
@@ -935,7 +1248,10 @@ def validate_workshops(
     if not selection_path.is_file():
         fail("MISSING_ARTIFACT", "selection-manifest.json is missing")
     selection = json.loads(selection_path.read_text(encoding="utf-8"))
-    if selection.get("selection_version") != SELECTION_VERSION:
+    if selection.get("selection_version") not in {
+        SELECTION_VERSION,
+        OPERATIONAL_SELECTION_VERSION,
+    }:
         fail("UNSUPPORTED_SCHEMA", "Selection manifest version does not match")
     draft_root = preparation_root / "workshops" / draft_set
     validation_root = preparation_root / "workshop-validations" / draft_set
@@ -1260,7 +1576,10 @@ def approve_inputs(
         protocol_path, repo_root, label="approved protocol"
     )
 
-    if selection.get("selection_version") != SELECTION_VERSION:
+    if selection.get("selection_version") not in {
+        SELECTION_VERSION,
+        OPERATIONAL_SELECTION_VERSION,
+    }:
         fail("UNSUPPORTED_SCHEMA", "Selection manifest version does not match")
     selection_cases = selection.get("cases")
     if not isinstance(selection_cases, list) or not selection_cases:
@@ -1512,6 +1831,10 @@ def _parser() -> argparse.ArgumentParser:
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--raw-root", default="data/raw")
     prepare.add_argument("--output-root", required=True)
+    operational = subparsers.add_parser("prepare-operational")
+    operational.add_argument("--raw-root", default="data/raw")
+    operational.add_argument("--output-root", required=True)
+    operational.add_argument("--spent-selection", required=True)
     validate = subparsers.add_parser("validate-workshops")
     validate.add_argument("--raw-root", default="data/raw")
     validate.add_argument("--preparation-root", required=True)
@@ -1530,7 +1853,7 @@ def main(argv: list[str] | None = None) -> int:
     repo_root = Path.cwd().resolve()
     failure_root: Path | None = None
     try:
-        if args.command == "prepare":
+        if args.command in {"prepare", "prepare-operational"}:
             raw_root = resolve_repo_relative(repo_root, args.raw_root, label="raw-root")
             output_root = resolve_repo_relative(
                 repo_root, args.output_root, label="output-root"
@@ -1542,7 +1865,20 @@ def main(argv: list[str] | None = None) -> int:
                     "INVALID_PATH",
                     "Preparation output must stay under artifacts/local-ranking-prototype",
                 )
-            result = prepare_inputs(repo_root, raw_root, output_root)
+            if args.command == "prepare-operational":
+                spent_selection_path = resolve_repo_relative(
+                    repo_root,
+                    args.spent_selection,
+                    label="spent-selection",
+                )
+                result = prepare_operational_inputs(
+                    repo_root,
+                    raw_root,
+                    output_root,
+                    spent_selection_path,
+                )
+            else:
+                result = prepare_inputs(repo_root, raw_root, output_root)
         elif args.command == "validate-workshops":
             raw_root = resolve_repo_relative(repo_root, args.raw_root, label="raw-root")
             preparation_root = resolve_repo_relative(
