@@ -63,6 +63,24 @@ def _percentile_95(values: list[float]) -> float | None:
     return ordered[math.ceil(0.95 * len(ordered)) - 1]
 
 
+def _cold_start_seconds(elapsed: float, worker_result: dict[str, Any]) -> float:
+    corpus_build = worker_result.get("total_corpus_build_seconds")
+    if (
+        isinstance(corpus_build, bool)
+        or not isinstance(corpus_build, (int, float))
+        or not math.isfinite(float(corpus_build))
+        or float(corpus_build) < 0
+        or float(corpus_build) > elapsed
+    ):
+        fail(
+            "INVALID_RESOURCE_MEASUREMENT",
+            "Worker returned an invalid total corpus-build duration",
+            elapsed_seconds=elapsed,
+            total_corpus_build_seconds=corpus_build,
+        )
+    return elapsed - float(corpus_build)
+
+
 def _directory_size(root: Path) -> int:
     if not root.is_dir():
         fail("MISSING_ENVIRONMENT", "Isolated environment directory is missing")
@@ -689,7 +707,7 @@ def run_protocol(repo_root: Path, protocol_path_value: str) -> tuple[int, Path]:
                             },
                         )
                         break
-                    cold_samples.append(elapsed)
+                    cold_samples.append(_cold_start_seconds(elapsed, result))
             if preflight_error is not None:
                 summary = _write_candidate_failure(
                     candidate_root,

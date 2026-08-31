@@ -10,6 +10,7 @@ from prototypes.local_ranking.errors import HarnessError
 from prototypes.local_ranking.network_guard import install_network_guard
 from prototypes.local_ranking.run import (
     _apply_resource_gate,
+    _cold_start_seconds,
     _compose_rrf_resources,
     _invoke_worker,
 )
@@ -49,6 +50,25 @@ def test_worker_transport_forces_utf8_on_windows_sensitive_payloads(
     assert environment["PYTHONUTF8"] == "1"
     assert captured["encoding"] == "utf-8"
     assert result["status"] == "success"
+
+
+def test_cold_start_excludes_corpus_build_time() -> None:
+    assert _cold_start_seconds(
+        12.5, {"total_corpus_build_seconds": 10.25}
+    ) == pytest.approx(2.25)
+
+
+@pytest.mark.parametrize(
+    "corpus_build",
+    [None, True, -0.1, float("inf"), float("nan"), 12.6],
+)
+def test_cold_start_fails_closed_on_invalid_corpus_build_time(
+    corpus_build: object,
+) -> None:
+    with pytest.raises(HarnessError) as raised:
+        _cold_start_seconds(12.5, {"total_corpus_build_seconds": corpus_build})
+
+    assert raised.value.code == "INVALID_RESOURCE_MEASUREMENT"
 
 
 def test_network_guard_denies_dns_and_connect_paths() -> None:

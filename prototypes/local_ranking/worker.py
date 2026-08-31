@@ -105,6 +105,7 @@ def execute_worker(
         )
         build_by_case[case.case_id] = time.perf_counter() - case_started
     total_build = time.perf_counter() - build_started
+    total_corpus_build = sum(build_by_case.values())
     peak_rss, warnings = _peak_rss_bytes()
     if mode == "preflight":
         return {
@@ -112,6 +113,7 @@ def execute_worker(
             "mode": mode,
             "status": "success",
             "corpus_build_seconds": build_by_case,
+            "total_corpus_build_seconds": total_corpus_build,
             "total_build_seconds": total_build,
             "peak_rss_bytes": peak_rss,
             "warnings": warnings,
@@ -181,6 +183,7 @@ def execute_worker(
         "mode": mode,
         "status": "success",
         "corpus_build_seconds": build_by_case,
+        "total_corpus_build_seconds": total_corpus_build,
         "total_build_seconds": total_build,
         "peak_rss_bytes": peak_rss,
         "warnings": warnings,
