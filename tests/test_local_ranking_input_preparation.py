@@ -20,6 +20,7 @@ from prototypes.local_ranking.input_preparation import (
     _build_corpus_bundle,
     _case_assignments,
     _optional_int,
+    _validate_review_decision,
     approve_inputs,
     select_cases,
     select_operational_cases,
@@ -556,6 +557,26 @@ def test_input_approval_writes_hash_bound_query_author_packet(tmp_path) -> None:
             protocol_path,
             "input-approval-test",
         )
+
+
+def test_operational_review_accepts_exact_v1_4_protocol_version(tmp_path) -> None:
+    preparation_root, _, protocol_path, decision = _approval_fixture(tmp_path)
+    decision["protocol"]["version"] = "v1.4"
+    selection = json.loads((preparation_root / "selection-manifest.json").read_text())
+    selection_bytes = (preparation_root / "selection-manifest.json").read_bytes()
+
+    parsed = _validate_review_decision(
+        decision,
+        approval_id="input-approval-test",
+        case_ids=["lr-dev-01"],
+        protocol_path="docs/prototypes/protocol.md",
+        protocol_sha256=_sha256(protocol_path.read_bytes()),
+        protocol_version="v1.4",
+        selection_sha256=_sha256(selection_bytes),
+    )
+
+    assert selection["selection_version"] == SELECTION_VERSION
+    assert parsed["lr-dev-01"]["status"] == "approved"
 
 
 def test_input_approval_rejects_incomplete_semantic_decision(tmp_path) -> None:

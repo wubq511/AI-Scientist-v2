@@ -1403,6 +1403,7 @@ def _validate_review_decision(
     case_ids: list[str],
     protocol_path: str,
     protocol_sha256: str,
+    protocol_version: str,
     selection_sha256: str,
 ) -> dict[str, dict[str, Any]]:
     _require_exact_keys(
@@ -1444,9 +1445,9 @@ def _validate_review_decision(
     if (
         protocol["path"] != protocol_path
         or protocol["sha256"] != protocol_sha256
-        or protocol["version"] != "v1.1"
+        or protocol["version"] != protocol_version
     ):
-        fail("HASH_MISMATCH", "Decision does not approve the exact v1.1 protocol")
+        fail("HASH_MISMATCH", "Decision does not approve the exact protocol revision")
 
     selection = decision["selection"]
     if not isinstance(selection, dict):
@@ -1579,7 +1580,8 @@ def approve_inputs(
         protocol_path, repo_root, label="approved protocol"
     )
 
-    if selection.get("selection_version") not in {
+    selection_version = selection.get("selection_version")
+    if selection_version not in {
         SELECTION_VERSION,
         OPERATIONAL_SELECTION_VERSION,
     }:
@@ -1618,6 +1620,9 @@ def approve_inputs(
         case_ids=case_ids,
         protocol_path=protocol_relative,
         protocol_sha256=protocol_sha256,
+        protocol_version=(
+            "v1.4" if selection_version == OPERATIONAL_SELECTION_VERSION else "v1.1"
+        ),
         selection_sha256=selection_sha256,
     )
 
@@ -1714,7 +1719,7 @@ def approve_inputs(
             ):
                 fail(
                     "APPROVAL_REQUIRED",
-                    "v1.1 corpus must be publisher-abstract-only",
+                    "Approved corpus must be publisher-abstract-only",
                     case_id=case_id,
                 )
         approved_corpora.append(
