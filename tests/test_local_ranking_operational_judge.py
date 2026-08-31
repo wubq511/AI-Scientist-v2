@@ -276,6 +276,10 @@ def test_prepare_builds_balanced_mirrored_tool_less_bundles(tmp_path) -> None:
 
     assert len(manifest["bundles"]) == 4
     assert (root / "tool-less-agent.md").read_text().find("tools: []") >= 0
+    assert all(
+        "20-500 Unicode scalars" in (root / item["prompt_path"]).read_text()
+        for item in manifest["bundles"]
+    )
     for evaluator_id in ("judge-kimi", "judge-deepseek"):
         first = json.loads(
             (root / f"public/{evaluator_id}/orientation-1/bundle.json").read_text()

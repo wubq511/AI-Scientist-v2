@@ -10,11 +10,11 @@ from .canonical import canonical_json_bytes, sha256_bytes, write_json_once, writ
 from .errors import HarnessError, fail
 from .schema import RankingInput, parse_ranking_input
 
-BUNDLE_SCHEMA_VERSION = "local-ranking-setwise-judge-bundle-v1.0"
+BUNDLE_SCHEMA_VERSION = "local-ranking-setwise-judge-bundle-v1.0.1"
 DRAFT_SCHEMA_VERSION = "local-ranking-setwise-judge-draft-v1.0"
 TRACE_SCHEMA_VERSION = "local-ranking-setwise-judge-trace-v1.0"
 MAPPING_SCHEMA_VERSION = "local-ranking-setwise-mapping-v1.0"
-PREPARATION_SCHEMA_VERSION = "local-ranking-setwise-preparation-v1.0"
+PREPARATION_SCHEMA_VERSION = "local-ranking-setwise-preparation-v1.0.1"
 FORMALIZATION_SCHEMA_VERSION = "prototype-formal-input-v1.0"
 OPERATIONAL_SELECTION_VERSION = "local-ranking-operational-case-selection-v1.0.1"
 FROZEN_BASELINE_CANDIDATE_ID = "bm25-k16-b05-tw1-cap3"
@@ -373,6 +373,7 @@ def _draft_contract() -> dict[str, Any]:
         "judgment": {
             "catastrophic_omission_side": ["left", "right", "neither"],
             "evidence_quote_count": [1, 4],
+            "evidence_quote_scalar_count": [20, 500],
             "score_fields": sorted(SCORE_FIELDS),
             "score_values": [0, 1, 2],
             "winner": sorted(WINNERS),
@@ -394,8 +395,9 @@ def _prompt_text(bundle: dict[str, Any]) -> str:
         "Each judgment must have exactly: item_id, winner, left_scores, right_scores, "
         "catastrophic_omission_side, evidence_quotes, rationale. Each score object must contain "
         "coverage_diversity, direct_support, query_usefulness, specificity with integer 0, 1, or 2. "
-        "evidence_quotes must contain 1-4 objects with side, paper_id, segment_id, quote; every quote "
-        "must be a byte-exact substring of that displayed segment. A left/right winner needs a quote "
+        "evidence_quotes must contain 1-4 objects with side, paper_id, segment_id, quote; each quote "
+        "must contain 20-500 Unicode scalars and be a byte-exact substring of that displayed segment. "
+        "A left/right winner needs a quote "
         "from the winning side; tie/both_bad needs at least one quote from each side. Rationale must "
         "be concise and use only visible evidence.\n\n"
         f"EMBEDDED_BUNDLE_JSON\n{bundle_json}\n"
