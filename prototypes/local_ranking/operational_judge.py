@@ -401,6 +401,12 @@ def _draft_contract() -> dict[str, Any]:
 
 def _prompt_text(bundle: dict[str, Any]) -> str:
     bundle_json = canonical_json_bytes(bundle).decode("utf-8")
+    attestation_json = json.dumps(
+        _draft_contract()["attestation"],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return (
         "You are a blind setwise evidence evaluator. No tools are available. "
         "Use only the embedded bundle; do not rely on external facts or prior conversations.\n\n"
@@ -408,15 +414,21 @@ def _prompt_text(bundle: dict[str, Any]) -> str:
         "Judge direct support, usefulness for AI ideation, coverage/diversity, specificity, and "
         "catastrophic omissions. Do not reward length, fluency, or familiarity by themselves.\n\n"
         "Return exactly one JSON object and no Markdown. Copy bundle_sha256 and evaluator exactly. "
+        f"Set schema_version to exactly {DRAFT_SCHEMA_VERSION}. "
+        f"Set attestation to exactly {attestation_json}. "
         "The root keys must be attestation, bundle_sha256, evaluator, judgments, schema_version. "
         "Each judgment must have exactly: item_id, winner, left_scores, right_scores, "
         "catastrophic_omission_side, evidence_refs, rationale. Each score object must contain "
         "coverage_diversity, direct_support, query_usefulness, specificity with integer 0, 1, or 2. "
+        "Winner must be left, right, tie, or both_bad. catastrophic_omission_side must be left, "
+        "right, or neither. Include every visible item_id exactly once. "
         "evidence_refs must contain 1-4 objects with exactly side, paper_id, segment_id, support. "
-        "Each support must contain 20-500 Unicode scalars and explain why that visible segment "
+        "References must be unique and copy a visible side, paper_id, and segment_id exactly. "
+        "Each support must be trimmed, contain 20-500 Unicode scalars, and explain why that visible segment "
         "supports the score; it is not a source quote. A left/right winner needs a reference from "
         "the winning side; tie/both_bad needs at least one reference from each side. Rationale must "
-        "be concise and use only visible evidence.\n\n"
+        "contain 1-800 Unicode scalars and use only visible evidence. Do not name or infer retrieval "
+        "methods, ground-truth labels, or prior results.\n\n"
         f"EMBEDDED_BUNDLE_JSON\n{bundle_json}\n"
     )
 

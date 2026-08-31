@@ -286,7 +286,14 @@ def test_prepare_builds_balanced_mirrored_tool_less_bundles(tmp_path) -> None:
     assert len(manifest["bundles"]) == 4
     assert (root / "tool-less-agent.md").read_text().find("tools: []") >= 0
     assert all(
-        "support must contain 20-500 Unicode scalars"
+        "support must be trimmed, contain 20-500 Unicode scalars"
+        in (root / item["prompt_path"]).read_text()
+        for item in manifest["bundles"]
+    )
+    assert all(
+        "Set schema_version to exactly local-ranking-setwise-judge-draft-v1.1"
+        in (root / item["prompt_path"]).read_text()
+        and 'Set attestation to exactly {"bundle_only":true,"fresh_session":true,'
         in (root / item["prompt_path"]).read_text()
         for item in manifest["bundles"]
     )
