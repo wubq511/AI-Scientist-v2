@@ -33,6 +33,12 @@ Target Python 3.13 as the reference minor, four-space indentation, and Black. Re
 
 The ideation-only runtime must retain a portable CPU FP32 reference path. Optional inference acceleration may be added only after a scoped comparison proves a material end-to-end benefit, no observable payload drift or operator fallback, and acceptable dependency cost; no accelerator is required. Exclude accelerator-dependent runtime assumptions, GPU training, and downstream-only stacks. The root `README.md` retains upstream full-pipeline CUDA/Python 3.11 instructions and is not the runtime contract for this fork.
 
+## Local-Ranking Execution Topology
+
+Use Windows as the bulk evidence executor for local-ranking candidate matrices, calibration, repeated replay, and formal holdout evaluation. Copy immutable code/input/model bundles once, verify hashes, run from the Windows-local workspace, and return only evidence artifacts. Do not move these workloads to Mac merely because Windows is temporarily unavailable.
+
+Use Mac as the controller for editing, protocol and input preparation, SSH orchestration, evidence review, ordinary single-run ranking, and the Windows-unavailable fallback. The frozen scorer must remain runnable on Mac and produce the same canonical payload as Windows; raw float equality and performance parity are not required. Run Mac cross-platform checks only when the scorer, model, dependency lock, or output semantics change—not for every bulk evidence run.
+
 ## Reproducibility, Commits & Pull Requests
 
 For each model run, log the commit SHA, dataset hashes, target/reference counts, command, model/provider identifier, parameters, timestamps, output paths, validation results, failures, and output hashes where practical. Preserve raw logs; never expose secrets.

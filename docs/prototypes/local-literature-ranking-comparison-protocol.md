@@ -263,9 +263,10 @@ CPU reference path 是 portability 和 attribution 要求，不是永久禁止 a
 
 ### 10.1 角色分工
 
-- Mac：controller、编辑 protocol/harness、准备 immutable input bundle、触发 SSH、收回结果、做轻量 smoke/review。
-- Windows：唯一 full-matrix executor，使用 `D:\AI-Scientist-v2-workspace\` 下的 `repo/`、`envs/`、`model-cache/`、`artifacts/` 与 `tmp/` 存储 isolated Python 3.13 reference environment、pinned model cache、输入副本与 raw outputs。
-- Mac 只对 finalists 做 cross-platform replay；若 dense 未进 finalist，Mac 不安装 neural stack。
+- Mac：controller、编辑 protocol/harness、准备 immutable input bundle、触发 SSH、收回结果、做轻量 smoke/review；同时保留普通单次 ranking 与 Windows 不可用时的 fallback 能力。
+- Windows：bulk evidence executor，负责 full matrix、calibration、重复 replay 与正式 holdout；使用 `D:\AI-Scientist-v2-workspace\` 下的 `repo/`、`envs/`、`model-cache/`、`artifacts/` 与 `tmp/` 存储 isolated Python 3.13 reference environment、pinned model cache、输入副本与 raw outputs。
+- Mac 不承担 bulk evidence matrix。Finalists 只在 scorer、model、dependency lock 或 output semantics 改变时做 cross-platform canonical-payload check；不要求跨平台 raw float 相同或性能对等，也不为每次 Windows evidence 重跑。
+- Windows 暂时不可用时不得把 bulk evidence 静默转移到 Mac；只允许继续 controller/review、ordinary single-run 或明确限定的 smoke，并把正式 run 标为 blocked。
 
 Windows 当前已通过 existing SSH key 做连通性检查和 lexical/RRF tracked-fixture replay，`D:\python.exe` 为 3.13.7；硬件基线为 16-core CPU、约 32 GiB RAM、约 283 GiB `D:` free space。正式 run 仍必须在 `environment.json` 重新采集且不得保存 IP、用户名或 hostname 到 tracked evidence；workspace path 只进入 private execution evidence，不进入 model payload。
 
@@ -282,7 +283,7 @@ Windows 当前已通过 existing SSH key 做连通性检查和 lexical/RRF track
 - Full relevance matrix 强制 CPU FP32 execution；neural arm 显式关闭 GPU/MPS/XPU/DirectML 自动选择。只有 8.3 的 evidence gate 触发后，accelerator 才在独立 performance cell 中测试。
 - 固定 deterministic seed；`PYTHONHASHSEED`、BLAS/thread count 和 tokenizer parallelism 显式记录。
 - 正式 run 设置 library offline flags，并以 network-denied fixture 验证不会在线 fallback。
-- Full matrix 全部在同一 Windows environment 完成 latency comparison；不能把一个 arm 的 Windows latency 与另一个 arm 的 Mac latency横向比较。
+- Full matrix、calibration、重复 replay 与正式 holdout 全部在同一 Windows environment 完成；不能把一个 arm 的 Windows latency 与另一个 arm 的 Mac latency 横向比较。
 
 ## 11. Evidence layout 与 replay
 

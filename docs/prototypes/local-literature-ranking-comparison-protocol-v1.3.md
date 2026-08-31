@@ -39,7 +39,7 @@ total 缩短 `7.75x`、最大 case build 缩短 `8.46x`；8-thread 的 warm p95 
 
 ## 3. 决策
 
-1. Stage B、development output-budget calibration 与 Windows finalist replay 使用
+1. Stage B、development output-budget calibration、Windows finalist replay 与正式 holdout 使用
    `thread_count=16`，并在每个 `environment.json` 中记录；所有横向 relevance arms 必须使用
    同一值。
 2. 1-thread CPU FP32 路径继续保留并已经通过全部 complexity gates；它是 portability/fallback
@@ -47,6 +47,8 @@ total 缩短 `7.75x`、最大 case build 缩短 `8.46x`；8-thread 的 warm p95 
 3. 8-thread 结果保留为 latency-sensitive deployment 候选，但本 ticket 不据 development probe
    锁定 production serving 参数。Production implementation 仍需单独授权。
 4. 不引入 GPU、XPU、MPS、DirectML、新依赖或近似检索；本补充仍是 portable CPU FP32 路线。
+   Bulk evidence 固定由 Windows 执行；Mac 只保留 controller、ordinary single-run、fallback 与
+   必要的 canonical-payload compatibility check，不承担 formal matrix。
 5. 本轮不新增“score once, evaluate three qrels”的 replay 语义。虽然 worker 不读取 qrels，Stage A
    也已证明三套 payload 相同，但 16-thread 已把剩余重复成本降到可接受范围；为一次性 prototype
    增加新 evidence schema/validator 的维护和错误风险高于节省的几分钟。三套 qrels 继续独立运行，
