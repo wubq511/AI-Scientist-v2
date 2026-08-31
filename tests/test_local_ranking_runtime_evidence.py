@@ -8,11 +8,47 @@ import pytest
 
 from prototypes.local_ranking.errors import HarnessError
 from prototypes.local_ranking.network_guard import install_network_guard
-from prototypes.local_ranking.run import _apply_resource_gate, _compose_rrf_resources
+from prototypes.local_ranking.run import (
+    _apply_resource_gate,
+    _compose_rrf_resources,
+    _invoke_worker,
+)
 from prototypes.local_ranking.schema import parse_protocol
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PROTOCOL = REPO_ROOT / "prototypes/local_ranking/fixtures/protocol.json"
+
+
+def test_worker_transport_forces_utf8_on_windows_sensitive_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class Completed:
+        stdout = '{"status":"success"}'
+        stderr = ""
+        returncode = 0
+
+    def fake_run(command: list[str], **kwargs: object) -> Completed:
+        captured["command"] = command
+        captured.update(kwargs)
+        return Completed()
+
+    monkeypatch.setattr("prototypes.local_ranking.run.subprocess.run", fake_run)
+
+    result, _, _, _ = _invoke_worker(
+        REPO_ROOT,
+        FIXTURE_PROTOCOL,
+        "idf-v1",
+        "score",
+    )
+
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    assert environment["PYTHONIOENCODING"] == "utf-8"
+    assert environment["PYTHONUTF8"] == "1"
+    assert captured["encoding"] == "utf-8"
+    assert result["status"] == "success"
 
 
 def test_network_guard_denies_dns_and_connect_paths() -> None:

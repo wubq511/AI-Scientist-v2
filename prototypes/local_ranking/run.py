@@ -277,6 +277,8 @@ def _invoke_worker(
     environment.update(
         {
             "PYTHONHASHSEED": "0",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
             "TOKENIZERS_PARALLELISM": "false",
             "HF_HUB_OFFLINE": "1",
             "TRANSFORMERS_OFFLINE": "1",
@@ -289,6 +291,7 @@ def _invoke_worker(
         cwd=repo_root,
         env=environment,
         capture_output=True,
+        encoding="utf-8",
         text=True,
         check=False,
     )
