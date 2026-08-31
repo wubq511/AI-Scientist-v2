@@ -1,10 +1,18 @@
-# Local literature ranking：development Stage A 结果
+# Local literature ranking：comparison result
 
-日期：2026-08-31。范围：只报告 development scorer screen 与 Windows CPU thread probe；这不是
-最终 ranker 决策，不读取或暗示 holdout labels。
+日期：2026-08-31。范围：development scorer/calibration、finalist determinism 与一次性 holdout
+sensitivity。Formal result 为 `inconclusive`；本文不推荐或实现 production winner。
 
 ## 1. 结论
 
+- Formal holdout 没有通过 v1.2 qrels-stability gate：judge-A 选择 BM25，judge-B 名义选择 E5，
+  consensus 仅给 E5 `+0.008299` nDCG@5 的小幅优势。三套 winner direction 不一致。
+- E5 没有在每套 qrels 上独立满足复杂方案的 promotion margin：judge-A 中退化并新增一个
+  grade-3 miss；judge-B 的 `+0.034644` 落在 inconclusive margin 且 wins-losses 只有 `+2`；
+  consensus 只修复一个 miss，未达到两条 query 的替代门槛。
+- 按预注册停止线，本 attempt 必须返回 `inconclusive`，不得用多数票、consensus、调参、重跑或
+  first-party utility card 强行决胜。两个 finalists 都保留为可运行候选，但没有 synthetic-topical
+  recommendation。
 - Stage A sensitivity gate 通过：judge-A、judge-B、consensus 三套 qrels 都得到同一机制方向。
 - `intfloat/e5-small-v2` 是三套 qrels 的 best single scorer，且所有 complexity gates 通过；进入
   Stage B。
@@ -260,7 +268,61 @@ private model/input archive SHA-256 为
 `a4a335e0c55a010a543de22589200a3efe538ba557c03c384a255289102672fa`。Windows 10-run 与
 macOS stable 3-run 共同完成 finalist determinism gate。
 
-## 7. 保留的失败与下一步
+## 7. Formal holdout
+
+### 7.1 Evidence identity
+
+三套 holdout comparison 只改变 qrels；input、两个 frozen finalists、output budget、runtime 与
+environment 完全相同。
+
+| Item | Value |
+|---|---|
+| Git commit | `d44e8b2dfd9f8254c6660af49dfec0dad6ef7fd8`，clean |
+| Python / device / dtype / threads | `3.13.7` / CPU / FP32 / 16 |
+| Environment SHA-256 | `00c7887d1fe0b860e4d2b33a473b43f556782891c113a55a37d3a324d946d91a` |
+| Environment lock SHA-256 | `6ad4e9f0a5aa690345edf349fc6d983dd31dd452220c10e80b39e6a269a302dd` |
+| Holdout input SHA-256 | `2d0533d6af377c6652435df91a290f85bdd7e1410eebe4b21ad8f7a4c351ebf2` |
+| Model manifest SHA-256 | `a0459c80016d083d853c3c3d44c46754b793b005a8a84cca5e1fc2eb3f03bb04` |
+| judge-A qrels / protocol | `071c13f82d9c00d783a660afba9960d233bcceeb2655c8d77cc012e1e63d20dd` / `334e4a116c7e4a3197ca2595d39c363cedc7aeab26949bb6ecb3fb9ec704bbf2` |
+| judge-B qrels / protocol | `41afccf4651f280f23e6cdeec7bc4a1995d795ae22fa6e3cbec613c78a4f6a54` / `923b2b7d5c101360a1c0a0cde3497f6588b0d8198bd00690fa863732e1be3963` |
+| consensus qrels / protocol | `f263876d5b3dbebf58b1ebd969d75acae51a35e804cffbb31e87978901a4b890` / `54f6babd8f5443c176d798a0974426f92d7ad69a2173c9f72f4219e33771ad92` |
+| Windows raw archive SHA-256 | `575aac05ad4fbe68d57f5febdeb9373f0826361895ff9645eacec16f1713fcaa` |
+
+三套 comparisons 全部 success，6/6 candidate resource gates pass。BM25 的三份
+`payloads.jsonl`/`scores.jsonl` 分别 byte-identical；E5 也分别 byte-identical，证明 qrels 没有
+进入 scoring。E5 cold p95 `5.311–5.593 s`、max case build `2.289–2.408 s`、warm p95
+`23.3–24.6 ms`、peak RSS `728,543,232–783,822,848 B`，全部通过。`stderr.log` 只含 pinned
+model 的 weight-loading progress bar，没有 warning、fallback 或 error。
+
+Judge-B 的 qrels 来自 v1.2.1 允许的 validated-trace reconstruction；原 raw draft 因 A/B 共享路径
+collision 不再存在。Rebound result、qrels 与 trace hashes 全部匹配，但该 provenance degradation
+不能用于打破任何 tie。
+
+### 7.2 Relevance result
+
+| qrels | Candidate | nDCG@5 | Recall@5 | EvidenceHit | Grade-3 miss |
+|---|---|---:|---:|---:|---:|
+| judge-A | BM25 | **0.764606** | 0.631944 | 0.833333 | **3** |
+| judge-A | E5 | 0.727041 | **0.656944** | 0.833333 | 4 |
+| judge-B | BM25 | 0.840605 | 0.753968 | 0.916667 | 0 |
+| judge-B | E5 | **0.875249** | **0.815476** | 0.916667 | 0 |
+| consensus | BM25 | 0.799749 | 0.666667 | 0.833333 | 7 |
+| consensus | E5 | **0.808047** | **0.680556** | 0.833333 | **6** |
+
+逐 query `|ΔnDCG@5| <= 0.01` 记 tie：
+
+| qrels | E5 − BM25 nDCG | E5 wins / ties / losses | E5 miss delta | Nominal direction |
+|---|---:|---:|---:|---|
+| judge-A | -0.037565 | 5 / 2 / 5 | +1 | BM25 |
+| judge-B | +0.034644 | 5 / 4 / 3 | 0 | E5 |
+| consensus | +0.008299 | 5 / 3 / 4 | -1 | E5, below margin |
+
+三套方向不一致，且没有 candidate 在三套 qrels 上分别满足 v1.1 margin、wins-losses 与
+catastrophic-miss rules。因此 v1.2 synthetic-topical recommendation gate 失败，formal result 为
+`inconclusive`。v1.2 step 7 的 Robert anonymous utility gate 以相同 winner direction 为前提，本次
+不触发。
+
+## 8. 保留的失败与下一步
 
 - `stage-a-001`：Windows Git CRLF 改动 environment lock bytes，hash gate 正确拒绝。
 - `stage-a-002-lock-bytes`：Windows GBK stdout 无法编码真实 input 的 `U+2009`，worker transport
@@ -268,6 +330,12 @@ macOS stable 3-run 共同完成 finalist determinism gate。
 - `stage-a-003-utf8`：39/39 scoring 成功，但 cold-start measurement boundary 错误；relevance
   可审计，resource rejection 不使用。
 - `stage-a-004-cold-boundary`：39/39 success，identity、relevance、resource gates 全部通过。
+- `holdout checkout prepare-001`：创建了未 checkout 的新 Windows clone，但 controller 使用了未经
+  `rev-parse` 核对的错误完整 SHA；Git 拒绝 checkout，未运行任何 scorer。随后在同一空 clone 上
+  使用实际 commit `d44e8b2dfd9f8254c6660af49dfec0dad6ef7fd8` 完成 checkout，验证 clean 后才复制
+  immutable private artifacts 并开始唯一正式 attempt。
 
-下一步按 sealed receipts 验签并解封 judge-A、judge-B 与 consensus 三套 holdout qrels，然后只对
-两个 frozen finalists 做一次正式 holdout 评估。不得依据 holdout 调参、增加 candidate 或重跑择优。
+本 attempt 到此停止，不生成 utility card，也不再复用本 holdout。下一步需要 Robert 在看过
+`inconclusive` 证据后决定：接受“当前无可证明 winner”并结束 ticket，或另行批准一个使用新冻结
+topics、真正不同 provider/model family 或领域专家小样本的 future revision。任何 revision 都必须
+重新预注册，不能用当前 holdout 调 prompt、margin 或 ranker。
