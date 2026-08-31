@@ -77,6 +77,38 @@ judge-B 的 `0.000524` 名义优势选择更不稳的配置。因此 Stage B 冻
 `3 / 2 / 2`，E5 相对 BM25为 `9 / 8 / 8`。两种机制在三套 qrels 下都至少修复一个对方的
 paper-level miss，所以满足预注册 RRF eligibility；这不预先保证 RRF 会胜出。
 
+### 3.3 Stage B1：title weight
+
+Stage B1 从 clean `3f6660140f65e90a135a30786128f2ab31f32487` 运行，三套 qrels 共
+18/18 arms success，environment SHA-256 均为
+`00c7887d1fe0b860e4d2b33a473b43f556782891c113a55a37d3a324d946d91a`；相同 candidate 的
+payload hashes 跨 qrels 完全一致，所有 resource gates pass。
+
+| Family / title weight | judge-A nDCG@5 | judge-B nDCG@5 | consensus nDCG@5 |
+|---|---:|---:|---:|
+| BM25 / 0 | 0.731710 | 0.715008 | 0.689031 |
+| BM25 / 1 | **0.752826** | **0.720736** | **0.711809** |
+| BM25 / 2 | 0.739211 | 0.703846 | 0.686265 |
+| E5 / 0 | **0.855525** | 0.878195 | 0.865697 |
+| E5 / 1 | 0.847909 | **0.897539** | **0.883278** |
+| E5 / 2 | 0.851619 | 0.894614 | 0.881222 |
+
+BM25 的 `title_weight=1` 在三套 qrels 上方向完全一致，冻结进入 phrase ablation。
+
+E5 的 exact primary optimum 对 qrels 有轻微敏感性，但不改变 E5 finalist promotion：weight 1
+相对 weight 0 在 judge-A nDCG@5 下降 `0.007617`，在 judge-B/consensus 提升
+`0.019344/0.017582`；Recall@5 在三套分别提高 `0.007540/0.088095/0.026389`，并将
+judge-A/consensus 的 grade-3 catastrophic misses 从 5 降到 2，judge-B 保持 0。Weight 1 与 2
+的 nDCG@5 差异在三套都不超过 `0.003710`，miss 数相同；weight 1 在 B/consensus 的 nDCG 和
+Recall 更高且 title coupling 更低。因此 development 冻结 E5 `title_weight=1`，同时保留 judge-A
+的微小 primary trade-off，不把它表述成跨数据集通用值。
+
+Stage B1 protocols SHA-256：judge-A
+`0861d6607de092932fe6c99d637fd101cd278312ced4401d0c32fa29973972cb`、judge-B
+`c9f95544711ca8d42cf361f02f578edf07f3f0b03ecda3dee124333fcb71af84`、consensus
+`e983e14593865f41f986de470d7b84566d0728560766e603b09f21325418af21`。Windows raw archive
+SHA-256 为 `0fcc3a22c60fc906d15a3f025dc256c79a2cf40d96decfc3bf63219455cb75a4`。
+
 ## 4. Corrected resource evidence
 
 `stage-a-003-utf8` 曾把整个 preflight elapsed 记为 cold start，重复包含 corpus build，导致 E5
@@ -119,6 +151,6 @@ Probe protocol SHA-256 为 `78afd8d9c4bfd2a76601a231f41b4b21da4b2fe993bd555b99fe
   可审计，resource rejection 不使用。
 - `stage-a-004-cold-boundary`：39/39 success，identity、relevance、resource gates 全部通过。
 
-下一步按 v1.1 Stage B 比较冻结 BM25 与 E5 的 title weight，再做 BM25 phrase ablation 和合格的
-RRF `k∈{10,60}`；随后校准 `paper_cap∈{3,5}`。Finalists、参数和 budget 冻结前，holdout
-继续 sealed。
+下一步用 BM25 `k1=1.6,b=0.5,title_weight=1` 做 phrase off/on ablation；随后用冻结 BM25
+field/phrase configuration 与 E5 `title_weight=1` 比较 RRF `k∈{10,60}`，再校准
+`paper_cap∈{3,5}`。Finalists、参数和 budget 冻结前，holdout 继续 sealed。
