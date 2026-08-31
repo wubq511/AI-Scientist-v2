@@ -31,6 +31,7 @@ blocked_by:
 - [本地文献排序比较协议 v1.4（approved operational overlay）](../../../prototypes/local-literature-ranking-comparison-protocol-v1.4.md)
 - [DeepSeek V4 Flash 裁判适配研究](../../../research/deepseek-v4-flash-judge-fit.md)
 - [Local-ranking evaluator qualification protocol v1.0](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.md)
+- [Local-ranking evaluator qualification protocol v1.0.1（quote contract correction）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.1.md)
 
 ## Question
 
