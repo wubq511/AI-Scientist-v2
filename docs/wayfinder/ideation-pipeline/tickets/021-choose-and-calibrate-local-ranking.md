@@ -17,6 +17,8 @@ blocked_by:
 - [本地文献排序最小公平比较协议 v1.2（approved overlay）](../../../prototypes/local-literature-ranking-comparison-protocol-v1.2.md)
 - [本地文献排序比较协议 v1.2.1（actual judge provenance correction）](../../../prototypes/local-literature-ranking-comparison-protocol-v1.2.1.md)
 - [AI qrels development evidence 与 holdout receipts](../../../prototypes/local-ranking-ai-qrels-development-evidence.md)
+- [Development Stage A 结果](../../../prototypes/local-literature-ranking-comparison-result.md)
+- [Windows CPU thread-count 执行补充 v1.3](../../../prototypes/local-literature-ranking-comparison-protocol-v1.3.md)
 - [Local ranking 是否需要论文全文](../../../prototypes/local-ranking-full-text-decision.md)
 - [Local ranking 正式输入就绪检查](../../../prototypes/local-ranking-input-readiness.md)
 - [Local ranking 正式输入准备证据](../../../prototypes/local-ranking-input-preparation.md)
@@ -33,7 +35,7 @@ Which minimal ranking approach returns useful evidence from 3–36 allowed refer
 
 Robert 已批准 comparison protocol、v1.2 AI-qrels overlay 与在任何 ranking 前完成的 v1.2.1 actual-judge provenance correction。v1.1 的 Python 3.13.7 + mandatory CPU FP32 reference path、pinned `intfloat/e5-small-v2` dense challenger、12 cases / 24 queries、题名 + `publisher_abstract` relevance scope、固定 normalization/resource/promotion/output-budget rules 继续生效；overlays 只覆盖 qrels authority、stability、holdout sealing 与真实执行模型绑定，不原地修改 hash-bound v1.1/v1.2。
 
-Throwaway harness 已实现：strict allowlist-only schemas、input/qrels/model/environment-lock hash verification、lexical/RRF scoring、deterministic payload、candidate-isolated worker、typed failure capture、immutable attempt evidence 与 one-command replay 均已落地。Windows SSH 已恢复，并在 `D:\python.exe` 3.13.7 下通过 bundle transfer、`compileall`、lexical/RRF fixture 与 pinned E5 dense smoke；持久工作根目录为 `D:\AI-Scientist-v2-workspace`。正式 ranker comparison 尚未运行。
+Throwaway harness 已实现：strict allowlist-only schemas、input/qrels/model/environment-lock hash verification、lexical/RRF scoring、deterministic payload、candidate-isolated worker、typed failure capture、immutable attempt evidence 与 one-command replay 均已落地。Windows SSH 已恢复，持久工作根目录为 `D:\AI-Scientist-v2-workspace`。Development Stage A 已从 clean `2c1b332` 完成：三套 qrels 共 39/39 arms success、跨 qrels payload identity 完全一致、全部 resource gates pass。Cold-start measurement 已与 corpus-build 分离，旧的重复计时 evidence 不用于淘汰 dense。
 
 正式输入盘点最初发现 approved case bundles 为 0；随后完成了独立、不可变的 input preparation 与 approval chain，没有把 raw rows 直接重命名成 Approved Workshop/Corpus。
 
@@ -51,4 +53,4 @@ v1.1 正式 relevance comparison 明确采用题名 + `publisher_abstract`，不
 
 Development A/B 在 grade、segment 或 exact-span 上共有 73 个 disputed items；不含 prior labels/rationales 的 blind packet 已由 judge-C=`gpt-5.6-sol`/`xhigh` 全部裁决。Development consensus 完整覆盖 176 items；holdout A/B/C/consensus 也已通过 validator，但标签继续 sealed。A/B exact paper-grade agreement 为 71.59%，linear-weighted kappa 0.6561，`1↔2` boundary disagreement 3.98%，grade gap≥2 为 1.14%；diagnostics 不冒充真实性门槛。
 
-下一步是用 judge-A、judge-B、consensus 三套 development qrels 运行完全相同的 rankers 并做 sensitivity gate；三套必须导出相同 promotion/winner direction，否则直接 `inconclusive`。Robert 不再做 336 条 qrels，只在最多两个 finalists 后做 12-query anonymous first-party utility check。Finalists 冻结后再做 Windows 10 次 fresh-process replay，且只有 dense 成为 finalist 时才在 Mac 安装 neural stack 做 cross-platform replay。在 Robert 审阅真实 development/holdout 与 utility 结果并选择 winner 前，本 ticket 保持 open，不能写 Resolution 或更新 map 为最终 ranking 决策。
+Stage A sensitivity gate 已通过：三套 qrels 都选择 E5 为 best single scorer、BM25 为 best lexical；Stage B 冻结 BM25 `k1=1.6,b=0.5`，并因双方都有对方遗漏的 grade≥2 papers 而保留 RRF ablation。Windows 1/4/8/16-thread probe 的 12-query payload 完全一致；16-thread 将 corpus build total 缩短 7.75x，后续 formal development evidence 按 approved v1.3 使用 16 threads，1-thread CPU FP32 path 继续保留。下一步运行 Stage B field/phrase/fusion 与 output-budget calibration；holdout 继续 sealed。Robert 只在最多两个 finalists 后做 12-query anonymous first-party utility check。Finalists 冻结后再做 Windows 10 次 fresh-process replay，且只有 dense 成为 finalist 时才在 Mac 安装 neural stack 做 cross-platform replay。在 Robert 审阅真实 development/holdout 与 utility 结果并选择 winner 前，本 ticket 保持 open，不能写 Resolution 或更新 map 为最终 ranking 决策。
