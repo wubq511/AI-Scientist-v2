@@ -209,7 +209,31 @@ Probe protocol SHA-256 为 `78afd8d9c4bfd2a76601a231f41b4b21da4b2fe993bd555b99fe
 8-thread 仅作为未来 latency-sensitive serving 的候选，不在本 ticket 锁定 production runtime。
 完整边界见 [v1.3 overlay](local-literature-ranking-comparison-protocol-v1.3.md)。
 
-## 6. 保留的失败与下一步
+## 6. Finalist determinism
+
+### 6.1 Windows 10-run
+
+两个 frozen finalists 从 clean `5ffda00d67981e9d3eaa27a89b6fe15db89c220b` 运行 10 个
+scoring-only attempts；qrels 不进入 protocol，16 threads、input/model/lock 与 candidate bytes 固定。
+
+- 10/10 attempts success；20/20 candidate runs resource gate pass；
+- BM25 与 E5 各自的 12-query payload hash maps 均为 10/10 identical；
+- 两个 candidates 的 `payloads.jsonl` 与 `scores.jsonl` 各自也都是 10 份 byte-identical；
+- 10 份 environment SHA-256 都是
+  `00c7887d1fe0b860e4d2b33a473b43f556782891c113a55a37d3a324d946d91a`；
+- E5 cold p95 范围 `5.166–6.620 s`、max case build `3.184–3.439 s`、warm p95
+  `22.5–37.2 ms`、peak RSS `509,931,520–512,966,656 B`，全部通过。
+
+Windows raw archive SHA-256 为
+`e1dfed55edfb85e9989fbe9d45c0bc11130b296dd79c524f30104e76e73524a2`。每个 attempt 使用不同
+protocol/attempt hash 并写入独立 root，没有以一次运行复制成十份。
+
+### 6.2 macOS 3-run
+
+Pending。只安装 pinned finalist neural environment、运行相同 scoring-only input 和两个 frozen
+candidates；不得扩大为完整 development matrix。完成前 holdout 继续 sealed。
+
+## 7. 保留的失败与下一步
 
 - `stage-a-001`：Windows Git CRLF 改动 environment lock bytes，hash gate 正确拒绝。
 - `stage-a-002-lock-bytes`：Windows GBK stdout 无法编码真实 input 的 `U+2009`，worker transport
@@ -218,5 +242,5 @@ Probe protocol SHA-256 为 `78afd8d9c4bfd2a76601a231f41b4b21da4b2fe993bd555b99fe
   可审计，resource rejection 不使用。
 - `stage-a-004-cold-boundary`：39/39 success，identity、relevance、resource gates 全部通过。
 
-下一步对两个 frozen finalists 做 scoring-only Windows 10-run 与 Mac 3-run determinism replay。
-全部通过后才解封 holdout；此前 holdout 继续 sealed。
+下一步对两个 frozen finalists 做 scoring-only Mac 3-run determinism replay。通过后才解封
+holdout；此前 holdout 继续 sealed。
