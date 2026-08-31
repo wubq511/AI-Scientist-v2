@@ -150,6 +150,32 @@ Stage B3 protocols SHA-256：judge-A
 均为 `00c7887d1fe0b860e4d2b33a473b43f556782891c113a55a37d3a324d946d91a`，Windows raw archive
 SHA-256 为 `0cc73e376c07dc6b9282a2dcfdcd1cc9390bdeb9666b1d2205cd4b6ab337f3dd`。
 
+### 3.6 Stage B4：output budget
+
+| Family / paper cap | EvidenceHit A/B/C | Mean payload bytes | nDCG/Recall/miss vs cap 5 |
+|---|---:|---:|---|
+| BM25 / 3 | 0.833333 / 0.833333 / 0.833333 | **5,215.5** | identical |
+| BM25 / 5 | 0.833333 / 0.833333 / 0.833333 | 8,092.3 | baseline |
+| E5 / 3 | 0.916667 / 0.916667 / 0.916667 | **5,084.1** | identical |
+| E5 / 5 | 0.916667 / 0.916667 / 0.916667 | 7,777.3 | baseline |
+
+三套共 12/12 arms success、resource gates pass；相同 candidate 的 payload hashes 跨 qrels
+完全一致。两种 family 的 cap 3/5 `EvidenceHit@budget` 差值都为 0，nDCG@5、Recall@3/5 与
+catastrophic misses 也相同。按预注册 tie-break，选择平均 payload 少约 2,877 bytes 的 BM25
+cap 3 与少约 2,693 bytes 的 E5 cap 3；`segments_per_paper=1,total_segment_cap=3` 同步冻结。
+
+Stage B4 protocols SHA-256：judge-A
+`7b7c2d1e58a0cae989925c47f9a68b259f1f2395807f67b276cca349b432c9ef`、judge-B
+`f085412f240a8359d3cef6772a53690d5971bd57e8b343cc8f3f87f2c5ad45cb`、consensus
+`af21fec39a901ff398529caa0f537117c9279d8382a4d65cad9331871775013a`。Environment SHA-256
+均为 `00c7887d1fe0b860e4d2b33a473b43f556782891c113a55a37d3a324d946d91a`，Windows raw archive
+SHA-256 为 `503eb59176a10b9bb0f8a261ad6aa9c82658ec28363b6556ba5f71e16b942094`。
+
+Development finalists 至此完整冻结：
+
+1. BM25：`k1=1.6,b=0.5,title_weight=1,max aggregation,phrase_bonus=false,paper_cap=3`；
+2. E5-small-v2：pinned model，`title_weight=1,max aggregation,paper_cap=3`。
+
 ## 4. Corrected resource evidence
 
 `stage-a-003-utf8` 曾把整个 preflight elapsed 记为 cold start，重复包含 corpus build，导致 E5
@@ -192,5 +218,5 @@ Probe protocol SHA-256 为 `78afd8d9c4bfd2a76601a231f41b4b21da4b2fe993bd555b99fe
   可审计，resource rejection 不使用。
 - `stage-a-004-cold-boundary`：39/39 success，identity、relevance、resource gates 全部通过。
 
-下一步对两个 development finalists 校准 `paper_cap∈{3,5}`。Budget 冻结后才进行 Windows
-10-run 与 Mac 3-run determinism replay，再解封 holdout；此前 holdout 继续 sealed。
+下一步对两个 frozen finalists 做 scoring-only Windows 10-run 与 Mac 3-run determinism replay。
+全部通过后才解封 holdout；此前 holdout 继续 sealed。
