@@ -212,6 +212,31 @@ The extraction step preserves and hashes every raw invocation input/output, acce
 JSON or Kimi Code's single text-renderer prefix, and canonicalizes no model semantics. The judge
 validator remains a separate closed-schema and byte-exact evidence gate.
 
+DeepSeek uses its official Responses API with provider-enforced JSON Schema after the Kimi Code
+text transport failed qualification twice. Prepare the credential-free canonical request first:
+
+```bash
+python -m prototypes.local_ranking.deepseek_responses prepare \
+  --bundle <judge-deepseek-bundle.json> \
+  --prompt <matching-judge-deepseek-prompt.txt> \
+  --output-root <new-deepseek-request-preparation>
+```
+
+Only after the exact request size and cost ceiling are approved, execute it into a new private
+attempt. The adapter can read `DEEPSEEK_API_KEY`, or the existing local Kimi `deepseek` provider
+credential without printing it:
+
+```bash
+python -m prototypes.local_ranking.deepseek_responses execute \
+  --preparation-root <approved-deepseek-request-preparation> \
+  --output-root <new-private-deepseek-execution> \
+  --kimi-config ~/.kimi-code/config.toml
+```
+
+The provider schema is only a transport constraint. Pass its canonical `response.json` through
+`operational_judge finalize`; never treat HTTP 200 or provider JSON Schema as the scientific
+validator.
+
 After all four orientations pass, reduce them with:
 
 ```bash

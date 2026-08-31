@@ -38,9 +38,9 @@ EVALUATORS = {
         "reasoning_effort": "high",
     },
     "judge-deepseek": {
-        "harness": "kimi-code-cli",
-        "model_alias": "opencode-go/deepseek-v4-flash",
-        "provider": "opencode-go",
+        "harness": "deepseek-responses-api",
+        "model_alias": "deepseek-v4-flash",
+        "provider": "deepseek-official",
         "reasoning_effort": "high",
     },
 }
