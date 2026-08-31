@@ -17,6 +17,10 @@ MAPPING_SCHEMA_VERSION = "local-ranking-setwise-mapping-v1.1"
 PREPARATION_SCHEMA_VERSION = "local-ranking-setwise-preparation-v1.1"
 FORMALIZATION_SCHEMA_VERSION = "prototype-formal-input-v1.0"
 OPERATIONAL_SELECTION_VERSION = "local-ranking-operational-case-selection-v1.0.1"
+SPENT_QUALIFICATION_MANIFEST_VERSION = "local-ranking-spent-qualification-input-v1.0"
+SPENT_QUALIFICATION_SELECTION_VERSION = (
+    "local-ranking-spent-qualification-case-selection-v1.0"
+)
 FROZEN_BASELINE_CANDIDATE_ID = "bm25-k16-b05-tw1-cap3"
 FROZEN_CHALLENGER_CANDIDATE_ID = "e5-small-v2-tw1-cap3"
 WINNERS = {"left", "right", "tie", "both_bad"}
@@ -317,6 +321,17 @@ def _selection_strata(
                 "INPUT_IDENTITY_MISMATCH",
                 "Operational selection and formal input case sets differ",
             )
+    elif ranking_input.split == "spent_qualification":
+        if selection.get("selection_version") != SPENT_QUALIFICATION_SELECTION_VERSION:
+            fail(
+                "INVALID_SELECTION",
+                "Spent qualification input requires its derived selection version",
+            )
+        if set(by_case) != input_case_ids:
+            fail(
+                "INPUT_IDENTITY_MISMATCH",
+                "Spent qualification selection and input case sets differ",
+            )
     elif ranking_input.split not in {"development", "holdout"}:
         fail(
             "INVALID_SPLIT",
@@ -332,7 +347,7 @@ def _selection_strata(
                 case_id=case.case_id,
             )
         strata[case.case_id] = item["stratum"]
-    if ranking_input.split == "operational":
+    if ranking_input.split in {"operational", "spent_qualification"}:
         counts = {
             stratum: sum(value == stratum for value in strata.values())
             for stratum in ("small", "medium", "large")
@@ -340,7 +355,7 @@ def _selection_strata(
         if counts != {"small": 4, "medium": 4, "large": 4}:
             fail(
                 "INVALID_SELECTION",
-                "Operational selection must contain four cases per stratum",
+                "Evaluation selection must contain four cases per stratum",
                 counts=counts,
             )
     return strata
@@ -467,36 +482,63 @@ def prepare(
             "MISSING_ARTIFACT", "v1.5 evaluator protocol is unreadable", error=str(exc)
         )
     evaluator_protocol_sha256 = sha256_bytes(evaluator_protocol_bytes)
-    if formal_manifest.get("schema_version") != FORMALIZATION_SCHEMA_VERSION:
-        fail("UNSUPPORTED_SCHEMA", "Formal input manifest version is unsupported")
-    formal_files = formal_manifest.get("files")
-    expected_input_key = f"{ranking_input.split}/input.json"
-    if not isinstance(formal_files, dict) or formal_files.get(
-        expected_input_key
-    ) != sha256_bytes(input_bytes):
-        fail("HASH_MISMATCH", "Formal input manifest does not bind the exact input")
-    expected_status = (
-        "formal_operational_input_ready"
-        if ranking_input.split == "operational"
-        else "formal_inputs_ready_qrels_pending"
-    )
-    if formal_manifest.get("status") != expected_status:
-        fail("INVALID_ARTIFACT", "Formal input manifest status is incompatible")
-    formal_source = formal_manifest.get("source_binding")
-    if not isinstance(formal_source, dict):
-        fail("INVALID_ARTIFACT", "Formal input provenance binding is missing")
-    if ranking_input.split == "operational" and (
-        formal_source.get("selection_manifest_sha256") != sha256_bytes(selection_bytes)
-        or formal_source.get("protocol_sha256") != protocol_sha256
-    ):
-        fail(
-            "INPUT_IDENTITY_MISMATCH",
-            "Operational input, selection, and v1.4 protocol are not hash-bound",
-        )
     baseline_records, baseline_bytes = _read_payload_records(baseline_payload_path)
     challenger_records, challenger_bytes = _read_payload_records(
         challenger_payload_path
     )
+    formal_files = formal_manifest.get("files")
+    if ranking_input.split == "spent_qualification":
+        _expect_keys(
+            formal_manifest,
+            {"evidence_mode", "files", "schema_version", "source_bindings", "status"},
+            label="spent qualification manifest",
+        )
+        expected_files = {
+            "baseline-payloads.jsonl": sha256_bytes(baseline_bytes),
+            "challenger-payloads.jsonl": sha256_bytes(challenger_bytes),
+            "comparison-summary.json": sha256_bytes(summary_bytes),
+            "input.json": sha256_bytes(input_bytes),
+            "selection.json": sha256_bytes(selection_bytes),
+        }
+        if (
+            formal_manifest.get("schema_version")
+            != SPENT_QUALIFICATION_MANIFEST_VERSION
+            or formal_manifest.get("status") != "spent_qualification_input_ready"
+            or formal_manifest.get("evidence_mode") != "spent_diagnostic_only"
+            or formal_files != expected_files
+            or not isinstance(formal_manifest.get("source_bindings"), dict)
+        ):
+            fail(
+                "INVALID_ARTIFACT",
+                "Spent qualification manifest is incompatible with exact derived inputs",
+            )
+    else:
+        if formal_manifest.get("schema_version") != FORMALIZATION_SCHEMA_VERSION:
+            fail("UNSUPPORTED_SCHEMA", "Formal input manifest version is unsupported")
+        expected_input_key = f"{ranking_input.split}/input.json"
+        if not isinstance(formal_files, dict) or formal_files.get(
+            expected_input_key
+        ) != sha256_bytes(input_bytes):
+            fail("HASH_MISMATCH", "Formal input manifest does not bind the exact input")
+        expected_status = (
+            "formal_operational_input_ready"
+            if ranking_input.split == "operational"
+            else "formal_inputs_ready_qrels_pending"
+        )
+        if formal_manifest.get("status") != expected_status:
+            fail("INVALID_ARTIFACT", "Formal input manifest status is incompatible")
+        formal_source = formal_manifest.get("source_binding")
+        if not isinstance(formal_source, dict):
+            fail("INVALID_ARTIFACT", "Formal input provenance binding is missing")
+        if ranking_input.split == "operational" and (
+            formal_source.get("selection_manifest_sha256")
+            != sha256_bytes(selection_bytes)
+            or formal_source.get("protocol_sha256") != protocol_sha256
+        ):
+            fail(
+                "INPUT_IDENTITY_MISMATCH",
+                "Operational input, selection, and v1.4 protocol are not hash-bound",
+            )
     baseline_rendered = _validate_payload_set(baseline_records, ranking_input)
     challenger_rendered = _validate_payload_set(challenger_records, ranking_input)
     gate_evidence = _validate_summary(

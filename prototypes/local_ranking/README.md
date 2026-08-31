@@ -154,6 +154,29 @@ python -m prototypes.local_ranking.operational_judge prepare \
   --output-root <new-setwise-preparation-attempt>
 ```
 
+Evaluator qualification must use all 24 already-spent development and holdout queries. Build
+one immutable derived packet first; do not point the qualification harness at either 12-query
+split by itself:
+
+```bash
+python -m prototypes.local_ranking.qualification_input \
+  --development-input <spent-development-input.json> \
+  --holdout-input <spent-holdout-input.json> \
+  --selection <source-selection-manifest.json> \
+  --development-summary <spent-development-comparison-summary.json> \
+  --holdout-summary <spent-holdout-comparison-summary.json> \
+  --development-baseline-payloads <spent-development-bm25-payloads.jsonl> \
+  --holdout-baseline-payloads <spent-holdout-bm25-payloads.jsonl> \
+  --development-challenger-payloads <spent-development-e5-payloads.jsonl> \
+  --holdout-challenger-payloads <spent-holdout-e5-payloads.jsonl> \
+  --output-root <new-spent-qualification-input-attempt>
+```
+
+The derived manifest binds both source inputs, both comparison summaries, all four source
+payload files, the source selection, and the five combined outputs. Its split is
+`spent_qualification`, its scale is exactly 12 cases / 24 queries, and downstream reducers
+must retain `spent_diagnostic_only`.
+
 The public bundles expose only query plus anonymous left/right evidence. The private mapping
 binds the exact formal manifest, input, selection, protocol, candidate payloads, resource
 gates, and side assignments. `tool-less-agent.md` disables tools and subagents. Do not start

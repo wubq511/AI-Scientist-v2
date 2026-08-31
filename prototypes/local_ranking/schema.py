@@ -203,7 +203,13 @@ def parse_ranking_input(value: Any) -> RankingInput:
     if root["schema_version"] != INPUT_SCHEMA_VERSION:
         fail("UNSUPPORTED_SCHEMA", "Unsupported ranking input schema")
     split = _string(root["split"], label="input.split")
-    if split not in {"fixture", "development", "holdout", "operational"}:
+    if split not in {
+        "fixture",
+        "development",
+        "holdout",
+        "operational",
+        "spent_qualification",
+    }:
         fail("INVALID_SCHEMA", "input.split is invalid", value=split)
     if not isinstance(root["cases"], list) or not root["cases"]:
         fail("INVALID_SCHEMA", "input.cases must be a non-empty array")
@@ -345,7 +351,7 @@ def parse_ranking_input(value: Any) -> RankingInput:
     query_ids = [query.query_id for case in cases for query in case.queries]
     if len(query_ids) != len(set(query_ids)):
         fail("INVALID_SCHEMA", "query_id must be globally unique")
-    expected_case_count = 12 if split == "operational" else 6
+    expected_case_count = 12 if split in {"operational", "spent_qualification"} else 6
     if split != "fixture" and len(cases) != expected_case_count:
         fail(
             "INVALID_SCHEMA",
