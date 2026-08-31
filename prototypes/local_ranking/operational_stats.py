@@ -17,7 +17,7 @@ from .operational_judge import (
     TRACE_SCHEMA_VERSION,
 )
 
-REPORT_SCHEMA_VERSION = "local-ranking-setwise-statistics-v1.0"
+REPORT_SCHEMA_VERSION = "local-ranking-setwise-statistics-v1.1"
 BOOTSTRAP_REPETITIONS = 10_000
 PROMOTION_MIN_RESOLVED = 18
 PROMOTION_MIN_STRATUM_RESOLVED = 5

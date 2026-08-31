@@ -126,6 +126,7 @@ def _fixture(tmp_path: Path) -> dict[str, Path]:
     formal_manifest_path = tmp_path / "formal-manifest.json"
     selection_path = tmp_path / "selection.json"
     protocol_path = tmp_path / "protocol.md"
+    evaluator_protocol_path = tmp_path / "evaluator-protocol.md"
     summary_path = tmp_path / "summary.json"
     baseline_path = tmp_path / "baseline.jsonl"
     challenger_path = tmp_path / "challenger.jsonl"
@@ -145,6 +146,9 @@ def _fixture(tmp_path: Path) -> dict[str, Path]:
         },
     )
     protocol_path.write_text("approved v1.4 protocol\n", encoding="utf-8")
+    evaluator_protocol_path.write_text(
+        "approved v1.5 evaluator protocol\n", encoding="utf-8"
+    )
     protocol_sha256 = sha256_bytes(protocol_path.read_bytes())
     selection_sha256 = sha256_bytes(selection_path.read_bytes())
     _write_json(
@@ -182,6 +186,7 @@ def _fixture(tmp_path: Path) -> dict[str, Path]:
     return {
         "baseline": baseline_path,
         "challenger": challenger_path,
+        "evaluator_protocol": evaluator_protocol_path,
         "formal_manifest": formal_manifest_path,
         "input": input_path,
         "protocol": protocol_path,
@@ -198,6 +203,7 @@ def _prepare(tmp_path: Path) -> Path:
         formal_manifest_path=paths["formal_manifest"],
         selection_path=paths["selection"],
         protocol_path=paths["protocol"],
+        evaluator_protocol_path=paths["evaluator_protocol"],
         comparison_summary_path=paths["summary"],
         baseline_candidate_id=BASELINE_ID,
         baseline_payload_path=paths["baseline"],
@@ -223,12 +229,15 @@ def _draft(bundle: dict, mapping: dict, *, challenger_wins: bool = True) -> dict
         judgments.append(
             {
                 "catastrophic_omission_side": "neither",
-                "evidence_quotes": [
+                "evidence_refs": [
                     {
                         "paper_id": winner_paper["paper_id"],
-                        "quote": winner_segment["text"][:80],
                         "segment_id": winner_segment["segment_id"],
                         "side": winner_side,
+                        "support": (
+                            "This visible segment directly supports the selected side's "
+                            "mechanism and research implications."
+                        ),
                     }
                 ],
                 "item_id": item["item_id"],
@@ -277,7 +286,8 @@ def test_prepare_builds_balanced_mirrored_tool_less_bundles(tmp_path) -> None:
     assert len(manifest["bundles"]) == 4
     assert (root / "tool-less-agent.md").read_text().find("tools: []") >= 0
     assert all(
-        "20-500 Unicode scalars" in (root / item["prompt_path"]).read_text()
+        "support must contain 20-500 Unicode scalars"
+        in (root / item["prompt_path"]).read_text()
         for item in manifest["bundles"]
     )
     for evaluator_id in ("judge-kimi", "judge-deepseek"):
@@ -317,15 +327,13 @@ def test_prepare_builds_balanced_mirrored_tool_less_bundles(tmp_path) -> None:
     assert b"e5-small" not in public_bytes
 
 
-def test_finalize_rejects_non_exact_quote(tmp_path) -> None:
+def test_finalize_rejects_unknown_evidence_reference(tmp_path) -> None:
     root = _prepare(tmp_path)
     mapping = json.loads((root / "private/mapping.json").read_text())
     bundle_path = root / "public/judge-kimi/orientation-1/bundle.json"
     bundle = json.loads(bundle_path.read_text())
     draft = _draft(bundle, mapping)
-    draft["judgments"][0]["evidence_quotes"][0][
-        "quote"
-    ] = "not present in the segment text at all"
+    draft["judgments"][0]["evidence_refs"][0]["segment_id"] = "unknown-segment"
     draft_path = tmp_path / "bad-draft.json"
     draft_path.write_text(json.dumps(draft), encoding="utf-8")
 
@@ -336,7 +344,7 @@ def test_finalize_rejects_non_exact_quote(tmp_path) -> None:
             output_root=tmp_path / "result",
         )
 
-    assert raised.value.code == "QUOTE_NOT_EXACT"
+    assert raised.value.code == "INVALID_EVIDENCE_REFERENCE"
 
 
 def test_four_stable_orientations_promote_large_challenger_effect(tmp_path) -> None:

@@ -10,11 +10,11 @@ from .canonical import canonical_json_bytes, sha256_bytes, write_json_once, writ
 from .errors import HarnessError, fail
 from .schema import RankingInput, parse_ranking_input
 
-BUNDLE_SCHEMA_VERSION = "local-ranking-setwise-judge-bundle-v1.0.1"
-DRAFT_SCHEMA_VERSION = "local-ranking-setwise-judge-draft-v1.0"
-TRACE_SCHEMA_VERSION = "local-ranking-setwise-judge-trace-v1.0"
-MAPPING_SCHEMA_VERSION = "local-ranking-setwise-mapping-v1.0"
-PREPARATION_SCHEMA_VERSION = "local-ranking-setwise-preparation-v1.0.1"
+BUNDLE_SCHEMA_VERSION = "local-ranking-setwise-judge-bundle-v1.1"
+DRAFT_SCHEMA_VERSION = "local-ranking-setwise-judge-draft-v1.1"
+TRACE_SCHEMA_VERSION = "local-ranking-setwise-judge-trace-v1.1"
+MAPPING_SCHEMA_VERSION = "local-ranking-setwise-mapping-v1.1"
+PREPARATION_SCHEMA_VERSION = "local-ranking-setwise-preparation-v1.1"
 FORMALIZATION_SCHEMA_VERSION = "prototype-formal-input-v1.0"
 OPERATIONAL_SELECTION_VERSION = "local-ranking-operational-case-selection-v1.0.1"
 FROZEN_BASELINE_CANDIDATE_ID = "bm25-k16-b05-tw1-cap3"
@@ -29,13 +29,15 @@ SCORE_FIELDS = {
 EVALUATORS = {
     "judge-kimi": {
         "harness": "kimi-code-cli",
-        "model": "kimi-k3",
-        "provider": "kimi-code-harness",
+        "model_alias": "kimi-code/k3",
+        "provider": "managed:kimi-code",
+        "reasoning_effort": "high",
     },
     "judge-deepseek": {
         "harness": "kimi-code-cli",
-        "model": "deepseek-v4-flash",
-        "provider": "kimi-code-harness",
+        "model_alias": "opencode-go/deepseek-v4-flash",
+        "provider": "opencode-go",
+        "reasoning_effort": "high",
     },
 }
 FORBIDDEN_PUBLIC_TEXT = ("bm25", "e5-small", "qrels", "old winner")
@@ -372,8 +374,8 @@ def _draft_contract() -> dict[str, Any]:
         },
         "judgment": {
             "catastrophic_omission_side": ["left", "right", "neither"],
-            "evidence_quote_count": [1, 4],
-            "evidence_quote_scalar_count": [20, 500],
+            "evidence_ref_count": [1, 4],
+            "evidence_support_scalar_count": [20, 500],
             "score_fields": sorted(SCORE_FIELDS),
             "score_values": [0, 1, 2],
             "winner": sorted(WINNERS),
@@ -393,12 +395,12 @@ def _prompt_text(bundle: dict[str, Any]) -> str:
         "Return exactly one JSON object and no Markdown. Copy bundle_sha256 and evaluator exactly. "
         "The root keys must be attestation, bundle_sha256, evaluator, judgments, schema_version. "
         "Each judgment must have exactly: item_id, winner, left_scores, right_scores, "
-        "catastrophic_omission_side, evidence_quotes, rationale. Each score object must contain "
+        "catastrophic_omission_side, evidence_refs, rationale. Each score object must contain "
         "coverage_diversity, direct_support, query_usefulness, specificity with integer 0, 1, or 2. "
-        "evidence_quotes must contain 1-4 objects with side, paper_id, segment_id, quote; each quote "
-        "must contain 20-500 Unicode scalars and be a byte-exact substring of that displayed segment. "
-        "A left/right winner needs a quote "
-        "from the winning side; tie/both_bad needs at least one quote from each side. Rationale must "
+        "evidence_refs must contain 1-4 objects with exactly side, paper_id, segment_id, support. "
+        "Each support must contain 20-500 Unicode scalars and explain why that visible segment "
+        "supports the score; it is not a source quote. A left/right winner needs a reference from "
+        "the winning side; tie/both_bad needs at least one reference from each side. Rationale must "
         "be concise and use only visible evidence.\n\n"
         f"EMBEDDED_BUNDLE_JSON\n{bundle_json}\n"
     )
@@ -423,6 +425,7 @@ def prepare(
     formal_manifest_path: Path,
     selection_path: Path,
     protocol_path: Path,
+    evaluator_protocol_path: Path,
     comparison_summary_path: Path,
     baseline_candidate_id: str,
     baseline_payload_path: Path,
@@ -457,6 +460,13 @@ def prepare(
     except OSError as exc:
         fail("MISSING_ARTIFACT", "v1.4 protocol is unreadable", error=str(exc))
     protocol_sha256 = sha256_bytes(protocol_bytes)
+    try:
+        evaluator_protocol_bytes = evaluator_protocol_path.read_bytes()
+    except OSError as exc:
+        fail(
+            "MISSING_ARTIFACT", "v1.5 evaluator protocol is unreadable", error=str(exc)
+        )
+    evaluator_protocol_sha256 = sha256_bytes(evaluator_protocol_bytes)
     if formal_manifest.get("schema_version") != FORMALIZATION_SCHEMA_VERSION:
         fail("UNSUPPORTED_SCHEMA", "Formal input manifest version is unsupported")
     formal_files = formal_manifest.get("files")
@@ -517,7 +527,10 @@ def prepare(
             side_order = sorted(
                 block,
                 key=lambda query_id: sha256_bytes(
-                    f"{protocol_sha256}|balanced-side|{stratum}|{query_kind}|{query_id}".encode()
+                    (
+                        f"{protocol_sha256}|{evaluator_protocol_sha256}|balanced-side|"
+                        f"{stratum}|{query_kind}|{query_id}"
+                    ).encode()
                 ),
             )
             baseline_left.update(side_order[: len(side_order) // 2])
@@ -560,6 +573,7 @@ def prepare(
             if ranking_input.split == "operational"
             else "spent_diagnostic_only"
         ),
+        "evaluator_protocol_sha256": evaluator_protocol_sha256,
         "formal_manifest_sha256": sha256_bytes(formal_manifest_bytes),
         "input_sha256": sha256_bytes(input_bytes),
         "protocol_sha256": protocol_sha256,
@@ -580,7 +594,10 @@ def prepare(
         item_order = sorted(
             query_ids,
             key=lambda query_id: sha256_bytes(
-                f"{protocol_sha256}|{evaluator_id}|item-order|{query_id}".encode()
+                (
+                    f"{protocol_sha256}|{evaluator_protocol_sha256}|{evaluator_id}|"
+                    f"item-order|{query_id}"
+                ).encode()
             ),
         )
         for orientation in (1, 2):
@@ -603,11 +620,13 @@ def prepare(
                 "bundle_id": f"{evaluator_id}-orientation-{orientation}",
                 "draft_contract": _draft_contract(),
                 "evaluator": evaluator,
+                "evaluator_protocol_sha256": evaluator_protocol_sha256,
                 "items": items,
                 "orientation": orientation,
                 "protocol_sha256": protocol_sha256,
                 "schema_version": BUNDLE_SCHEMA_VERSION,
                 "source_binding": {
+                    "evaluator_protocol_sha256": evaluator_protocol_sha256,
                     "formal_input_sha256": sha256_bytes(input_bytes),
                     "mapping_commitment_sha256": mapping_sha256,
                     "payload_set_sha256": sorted(
@@ -639,6 +658,7 @@ def prepare(
     manifest = {
         "bundles": bundle_records,
         "evidence_mode": mapping["evidence_mode"],
+        "evaluator_protocol_sha256": evaluator_protocol_sha256,
         "file_hashes": {
             name: sha256_bytes(data) for name, data in sorted(files.items())
         },
@@ -700,7 +720,7 @@ def _validate_draft(
             raw,
             {
                 "catastrophic_omission_side",
-                "evidence_quotes",
+                "evidence_refs",
                 "item_id",
                 "left_scores",
                 "rationale",
@@ -743,65 +763,67 @@ def _validate_draft(
                 "Judge rationale exposes forbidden candidate text",
                 item_id=item_id,
             )
-        quote_items = raw.get("evidence_quotes")
-        if not isinstance(quote_items, list) or not 1 <= len(quote_items) <= 4:
+        evidence_items = raw.get("evidence_refs")
+        if not isinstance(evidence_items, list) or not 1 <= len(evidence_items) <= 4:
             fail(
                 "INVALID_JUDGE_DRAFT",
-                "Judgment needs 1-4 evidence quotes",
+                "Judgment needs 1-4 evidence references",
                 item_id=item_id,
             )
-        visible: dict[tuple[str, str, str], str] = {}
+        visible: set[tuple[str, str, str]] = set()
         for side in ("left", "right"):
             for paper in item_by_id[item_id][side]["papers"]:
                 for segment in paper["segments"]:
-                    visible[(side, paper["paper_id"], segment["segment_id"])] = segment[
-                        "text"
-                    ]
-        parsed_quotes: list[dict[str, str]] = []
-        quote_sides: set[str] = set()
-        for quote_item in quote_items:
-            if not isinstance(quote_item, dict):
+                    visible.add((side, paper["paper_id"], segment["segment_id"]))
+        parsed_refs: list[dict[str, str]] = []
+        evidence_sides: set[str] = set()
+        seen_refs: set[tuple[str, str, str]] = set()
+        for evidence_item in evidence_items:
+            if not isinstance(evidence_item, dict):
                 fail(
                     "INVALID_JUDGE_DRAFT",
-                    "Evidence quote must be an object",
+                    "Evidence reference must be an object",
                     item_id=item_id,
                 )
             _expect_keys(
-                quote_item,
-                {"paper_id", "quote", "segment_id", "side"},
-                label="evidence quote",
+                evidence_item,
+                {"paper_id", "segment_id", "side", "support"},
+                label="evidence reference",
             )
-            side = quote_item.get("side")
-            paper_id = quote_item.get("paper_id")
-            segment_id = quote_item.get("segment_id")
-            quote = quote_item.get("quote")
+            side = evidence_item.get("side")
+            paper_id = evidence_item.get("paper_id")
+            segment_id = evidence_item.get("segment_id")
+            support = evidence_item.get("support")
             key = (side, paper_id, segment_id)
             if (
                 side not in {"left", "right"}
                 or not isinstance(paper_id, str)
                 or not isinstance(segment_id, str)
-                or not isinstance(quote, str)
-                or not 20 <= len(quote) <= 500
+                or not isinstance(support, str)
+                or support != support.strip()
+                or not 20 <= len(support) <= 500
+                or any(text in support.casefold() for text in FORBIDDEN_PUBLIC_TEXT)
                 or key not in visible
-                or quote not in visible[key]
+                or key in seen_refs
             ):
                 fail(
-                    "QUOTE_NOT_EXACT",
-                    "Evidence quote is not exact visible evidence",
+                    "INVALID_EVIDENCE_REFERENCE",
+                    "Evidence reference is not unique visible evidence",
                     item_id=item_id,
                 )
-            quote_sides.add(side)
-            parsed_quotes.append(dict(sorted(quote_item.items())))
+            seen_refs.add(key)
+            evidence_sides.add(side)
+            parsed_refs.append(dict(sorted(evidence_item.items())))
         required_sides = {winner} if winner in {"left", "right"} else {"left", "right"}
-        if not required_sides.issubset(quote_sides):
+        if not required_sides.issubset(evidence_sides):
             fail(
                 "INVALID_JUDGE_DRAFT",
-                "Evidence quotes do not cover required sides",
+                "Evidence references do not cover required sides",
                 item_id=item_id,
             )
         parsed[item_id] = {
             "catastrophic_omission_side": catastrophic,
-            "evidence_quotes": parsed_quotes,
+            "evidence_refs": parsed_refs,
             "item_id": item_id,
             "left_scores": _score_object(
                 raw.get("left_scores"), label=f"{item_id}.left_scores"
@@ -870,6 +892,7 @@ def _parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--formal-manifest", type=Path, required=True)
     prepare_parser.add_argument("--selection", type=Path, required=True)
     prepare_parser.add_argument("--protocol", type=Path, required=True)
+    prepare_parser.add_argument("--evaluator-protocol", type=Path, required=True)
     prepare_parser.add_argument("--comparison-summary", type=Path, required=True)
     prepare_parser.add_argument("--baseline-candidate-id", required=True)
     prepare_parser.add_argument("--baseline-payloads", type=Path, required=True)
@@ -892,6 +915,7 @@ def main(argv: list[str] | None = None) -> int:
                 formal_manifest_path=args.formal_manifest,
                 selection_path=args.selection,
                 protocol_path=args.protocol,
+                evaluator_protocol_path=args.evaluator_protocol,
                 comparison_summary_path=args.comparison_summary,
                 baseline_candidate_id=args.baseline_candidate_id,
                 baseline_payload_path=args.baseline_payloads,

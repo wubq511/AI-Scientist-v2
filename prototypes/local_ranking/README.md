@@ -145,6 +145,7 @@ python -m prototypes.local_ranking.operational_judge prepare \
   --formal-manifest <formal-operational-manifest.json> \
   --selection <operational-selection-manifest.json> \
   --protocol docs/prototypes/local-literature-ranking-comparison-protocol-v1.4.md \
+  --evaluator-protocol docs/prototypes/local-literature-ranking-comparison-protocol-v1.5.md \
   --comparison-summary <windows-comparison-summary.json> \
   --baseline-candidate-id bm25-k16-b05-tw1-cap3 \
   --baseline-payloads <windows-bm25-payloads.jsonl> \
