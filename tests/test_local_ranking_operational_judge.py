@@ -141,7 +141,7 @@ def _fixture(tmp_path: Path) -> dict[str, Path]:
         selection_path,
         {
             "cases": selection_cases,
-            "selection_version": "local-ranking-operational-case-selection-v1.0",
+            "selection_version": "local-ranking-operational-case-selection-v1.0.1",
         },
     )
     protocol_path.write_text("approved v1.4 protocol\n", encoding="utf-8")

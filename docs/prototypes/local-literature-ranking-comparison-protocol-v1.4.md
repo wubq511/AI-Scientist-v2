@@ -50,7 +50,8 @@ Union/full-corpus 不进入 primary。它们改变 evidence budget，不能在�
 approved cases：
 
 1. 绑定旧 12-case selection manifest 为 exclusion set；
-2. 使用 source hashes + selection version + spent-manifest hash 派生 seed；
+2. 使用 source hashes + selection version `local-ranking-operational-case-selection-v1.0.1` +
+   spent-manifest hash 派生 seed；每个 stratum 在 maximin fill 前至少有一个 cluster representative；
 3. 选择 12 cases，small/medium/large 各 4，最大化 domain coverage，并在不读取 ranker output 的前提下
    保留 reference-count、title/abstract-overlap 与 strategy spread；
 4. 重新完成 Workshop derivation、deterministic validation、semantic approval、abstract-only corpus

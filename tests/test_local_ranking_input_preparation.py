@@ -144,6 +144,41 @@ def test_operational_selection_excludes_spent_and_covers_all_clusters() -> None:
     } == {"small": 4, "medium": 4, "large": 4}
 
 
+def test_operational_selection_seeds_every_stratum_before_maximin_fill() -> None:
+    features = []
+    index = 0
+    for cluster in ("cluster-a", "cluster-b", "cluster-c", "cluster-d"):
+        for stratum, reference_count in (("small", 3), ("medium", 9), ("large", 19)):
+            features.append(
+                CaseFeature(
+                    target_id=f"target-{index:02d}",
+                    cluster=cluster,
+                    strategy=1 if stratum == "large" else 2,
+                    reference_count=reference_count,
+                    stratum=stratum,
+                    overlap_ppm=10_000 + index,
+                    split_bucket="development",
+                    selection_key=f"{index:064x}",
+                    target_row_number=index + 2,
+                    target_row_sha256=f"{index + 100:064x}",
+                )
+            )
+            index += 1
+
+    selected = select_operational_cases(
+        tuple(features),
+        spent_target_ids=set(),
+        source_hashes={"source": "a" * 64},
+        spent_sha256="b" * 64,
+    )
+
+    assert len(selected) == 12
+    assert {
+        stratum: sum(item.stratum == stratum for item in selected)
+        for stratum in ("small", "medium", "large")
+    } == {"small": 4, "medium": 4, "large": 4}
+
+
 def test_integer_valued_raw_year_is_canonicalized() -> None:
     assert _optional_int("2018", label="year") == 2018
     assert _optional_int("2018.0", label="year") == 2018

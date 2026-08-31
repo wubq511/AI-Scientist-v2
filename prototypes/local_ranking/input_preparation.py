@@ -25,7 +25,7 @@ from .errors import HarnessError, fail
 from .normalization import normalize_text, tokenize_text
 
 SELECTION_VERSION = "local-ranking-case-selection-v1.1"
-OPERATIONAL_SELECTION_VERSION = "local-ranking-operational-case-selection-v1.0"
+OPERATIONAL_SELECTION_VERSION = "local-ranking-operational-case-selection-v1.0.1"
 SELECTION_SPLIT_SEED_VERSION = "local-ranking-case-selection-v1"
 CORPUS_SCHEMA_VERSION = "prototype-frozen-corpus-v1"
 CORPUS_NORMALIZATION_VERSION = "source-text-nfc-lf-trim-v1"
@@ -499,7 +499,10 @@ def select_operational_cases(
     feasible_assignments: list[tuple[tuple[Any, ...], tuple[CaseFeature, ...]]] = []
     for assignment in product(*(options for _, options in cluster_options)):
         counts = {stratum: assignment.count(stratum) for stratum in STRATA}
-        if any(counts[stratum] > OPERATIONAL_CASES_PER_STRATUM for stratum in STRATA):
+        if any(
+            counts[stratum] < 1 or counts[stratum] > OPERATIONAL_CASES_PER_STRATUM
+            for stratum in STRATA
+        ):
             continue
         selected = tuple(
             representatives[(cluster, stratum)]
@@ -546,7 +549,7 @@ def select_operational_cases(
                     )
                     distances.append(ref_distance + overlap_distance)
                 return (
-                    -min(distances),
+                    -min(distances, default=0),
                     -int(feature.strategy == 2),
                     keys[feature.target_id],
                 )
