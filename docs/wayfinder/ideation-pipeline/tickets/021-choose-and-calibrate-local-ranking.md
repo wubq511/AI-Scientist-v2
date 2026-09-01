@@ -37,6 +37,7 @@ blocked_by:
 - [Local-ranking atomic evaluator contract v2.0（approved adversarial redesign）](../../../prototypes/local-ranking-atomic-evaluator-contract-v2.0.md)
 - [Local-ranking atomic transport smoke protocol v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-v2.0.md)
 - [Local-ranking atomic transport smoke result v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-result-v2.0.md)
+- [Local-ranking atomic Pro/high calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-protocol-v2.0.md)
 
 ## Question
 
