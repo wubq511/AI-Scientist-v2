@@ -6,14 +6,13 @@ from pathlib import Path
 import pytest
 
 from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
-from prototypes.local_ranking.deepseek_responses import (
-    MAX_OUTPUT_TOKENS,
-    _extract_output_text,
-    prepare as prepare_deepseek,
-)
 from prototypes.local_ranking.errors import HarnessError
+from prototypes.local_ranking.opencode_go_chat import (
+    MAX_TOKENS,
+    _extract_chat_response,
+    prepare as prepare_opencode_go,
+)
 from prototypes.local_ranking.operational_judge import (
-    DRAFT_SCHEMA_VERSION,
     finalize,
     prepare,
 )
@@ -270,16 +269,9 @@ def _draft(bundle: dict, mapping: dict, *, challenger_wins: bool = True) -> dict
         )
         assert loser_side != winner_side
     return {
-        "attestation": {
-            "bundle_only": True,
-            "fresh_session": True,
-            "no_external_sources": True,
-            "tool_access": "disabled",
-        },
         "bundle_sha256": bundle["bundle_sha256"],
         "evaluator": bundle["evaluator"],
         "judgments": judgments,
-        "schema_version": DRAFT_SCHEMA_VERSION,
     }
 
 
@@ -296,9 +288,7 @@ def test_prepare_builds_balanced_mirrored_tool_less_bundles(tmp_path) -> None:
         for item in manifest["bundles"]
     )
     assert all(
-        "Set schema_version to exactly local-ranking-setwise-judge-draft-v1.1"
-        in (root / item["prompt_path"]).read_text()
-        and 'Set attestation to exactly {"bundle_only":true,"fresh_session":true,'
+        "root keys must be exactly bundle_sha256, evaluator, judgments"
         in (root / item["prompt_path"]).read_text()
         for item in manifest["bundles"]
     )
@@ -359,72 +349,87 @@ def test_finalize_rejects_unknown_evidence_reference(tmp_path) -> None:
     assert raised.value.code == "INVALID_EVIDENCE_REFERENCE"
 
 
-def test_prepare_deepseek_responses_binds_json_schema_request(tmp_path) -> None:
+def test_prepare_opencode_go_chat_binds_minimal_json_request(tmp_path) -> None:
     root = _prepare(tmp_path)
-    output_root = tmp_path / "deepseek-request"
+    output_root = tmp_path / "opencode-go-request"
 
-    manifest = prepare_deepseek(
+    manifest = prepare_opencode_go(
         bundle_path=root / "public/judge-deepseek/orientation-1/bundle.json",
         prompt_path=root / "public/judge-deepseek/orientation-1/prompt.txt",
         output_root=output_root,
     )
 
     request = json.loads((output_root / "request.json").read_text())
-    schema = request["text"]["format"]["schema"]
-    assert manifest["transport"] == "deepseek-official-responses-json-schema"
-    assert request["model"] == "deepseek-v4-flash"
-    assert request["reasoning"] == {"effort": "high"}
-    assert request["max_output_tokens"] == MAX_OUTPUT_TOKENS
-    assert request["stream"] is False
-    assert schema["additionalProperties"] is False
-    assert schema["properties"]["judgments"]["minItems"] == 24
-    assert schema["properties"]["judgments"]["maxItems"] == 24
-    assert schema["properties"]["schema_version"]["enum"] == [DRAFT_SCHEMA_VERSION]
-
-
-def test_extract_deepseek_response_requires_one_completed_output() -> None:
-    draft = {"schema_version": DRAFT_SCHEMA_VERSION}
-    response = {
-        "error": None,
-        "incomplete_details": None,
-        "model": "deepseek-v4-flash",
-        "object": "response",
-        "output": [
-            {"content": [], "status": "completed", "type": "reasoning"},
+    assert manifest["transport"] == (
+        "opencode-go-chat-completions-json-object-candidate"
+    )
+    assert request == {
+        "max_tokens": MAX_TOKENS,
+        "messages": [
             {
-                "content": [
-                    {
-                        "annotations": [],
-                        "text": json.dumps(draft),
-                        "type": "output_text",
-                    }
-                ],
-                "role": "assistant",
-                "status": "completed",
-                "type": "message",
-            },
+                "content": (
+                    root / "public/judge-deepseek/orientation-1/prompt.txt"
+                ).read_text(),
+                "role": "user",
+            }
         ],
-        "status": "completed",
+        "model": "deepseek-v4-flash",
+        "reasoning_effort": "high",
+        "response_format": {"type": "json_object"},
+        "stream": False,
+    }
+
+
+def test_extract_opencode_go_chat_requires_one_finished_json_choice() -> None:
+    draft = {
+        "bundle_sha256": "a" * 64,
+        "evaluator": {"provider": "opencode-go"},
+        "judgments": [],
+    }
+    response = {
+        "choices": [
+            {
+                "finish_reason": "stop",
+                "index": 0,
+                "message": {
+                    "content": json.dumps(draft),
+                    "role": "assistant",
+                },
+            }
+        ],
+        "cost": "0",
+        "created": 1,
+        "id": "chatcmpl-test",
+        "model": "deepseek-v4-flash",
+        "object": "chat.completion",
         "usage": {
-            "input_tokens": 100,
-            "input_tokens_details": {"cached_tokens": 20},
-            "output_tokens": 50,
-            "total_tokens": 150,
+            "completion_tokens": 25,
+            "completion_tokens_details": {"reasoning_tokens": 5},
+            "prompt_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 10},
+            "total_tokens": 125,
         },
     }
 
-    parsed, usage = _extract_output_text(response)
+    parsed, usage, identity = _extract_chat_response(response)
 
     assert parsed == draft
     assert usage == {
-        "cached_tokens": 20,
-        "input_tokens": 100,
-        "output_tokens": 50,
-        "total_tokens": 150,
+        "cached_tokens": 10,
+        "completion_tokens": 25,
+        "prompt_tokens": 100,
+        "reasoning_tokens": 5,
+        "total_tokens": 125,
     }
-    response["status"] = "incomplete"
+    assert identity == {
+        "cost": "0",
+        "created": 1,
+        "model": "deepseek-v4-flash",
+        "provider_response_id": "chatcmpl-test",
+    }
+    response["choices"][0]["finish_reason"] = "length"
     with pytest.raises(HarnessError) as raised:
-        _extract_output_text(response)
+        _extract_chat_response(response)
     assert raised.value.code == "PROVIDER_RESPONSE_FAILED"
 
 

@@ -10,11 +10,11 @@ from .canonical import canonical_json_bytes, sha256_bytes, write_json_once, writ
 from .errors import HarnessError, fail
 from .schema import RankingInput, parse_ranking_input
 
-BUNDLE_SCHEMA_VERSION = "local-ranking-setwise-judge-bundle-v1.1"
-DRAFT_SCHEMA_VERSION = "local-ranking-setwise-judge-draft-v1.1"
-TRACE_SCHEMA_VERSION = "local-ranking-setwise-judge-trace-v1.1"
-MAPPING_SCHEMA_VERSION = "local-ranking-setwise-mapping-v1.1"
-PREPARATION_SCHEMA_VERSION = "local-ranking-setwise-preparation-v1.1"
+BUNDLE_SCHEMA_VERSION = "local-ranking-setwise-judge-bundle-v1.2"
+DRAFT_SCHEMA_VERSION = "local-ranking-setwise-judge-draft-v1.2"
+TRACE_SCHEMA_VERSION = "local-ranking-setwise-judge-trace-v1.2"
+MAPPING_SCHEMA_VERSION = "local-ranking-setwise-mapping-v1.2"
+PREPARATION_SCHEMA_VERSION = "local-ranking-setwise-preparation-v1.2"
 FORMALIZATION_SCHEMA_VERSION = "prototype-formal-input-v1.0"
 OPERATIONAL_SELECTION_VERSION = "local-ranking-operational-case-selection-v1.0.1"
 SPENT_QUALIFICATION_MANIFEST_VERSION = "local-ranking-spent-qualification-input-v1.0"
@@ -38,9 +38,9 @@ EVALUATORS = {
         "reasoning_effort": "high",
     },
     "judge-deepseek": {
-        "harness": "deepseek-responses-api",
-        "model_alias": "deepseek-v4-flash",
-        "provider": "deepseek-official",
+        "harness": "opencode-go-chat-completions",
+        "model_alias": "opencode-go/deepseek-v4-flash",
+        "provider": "opencode-go",
         "reasoning_effort": "high",
     },
 }
@@ -381,12 +381,6 @@ def _bundle_item(
 
 def _draft_contract() -> dict[str, Any]:
     return {
-        "attestation": {
-            "bundle_only": True,
-            "fresh_session": True,
-            "no_external_sources": True,
-            "tool_access": "disabled",
-        },
         "judgment": {
             "catastrophic_omission_side": ["left", "right", "neither"],
             "evidence_ref_count": [1, 4],
@@ -395,18 +389,13 @@ def _draft_contract() -> dict[str, Any]:
             "score_values": [0, 1, 2],
             "winner": sorted(WINNERS),
         },
+        "root_keys": ["bundle_sha256", "evaluator", "judgments"],
         "schema_version": DRAFT_SCHEMA_VERSION,
     }
 
 
 def _prompt_text(bundle: dict[str, Any]) -> str:
     bundle_json = canonical_json_bytes(bundle).decode("utf-8")
-    attestation_json = json.dumps(
-        _draft_contract()["attestation"],
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
     return (
         "You are a blind setwise evidence evaluator. No tools are available. "
         "Use only the embedded bundle; do not rely on external facts or prior conversations.\n\n"
@@ -414,9 +403,7 @@ def _prompt_text(bundle: dict[str, Any]) -> str:
         "Judge direct support, usefulness for AI ideation, coverage/diversity, specificity, and "
         "catastrophic omissions. Do not reward length, fluency, or familiarity by themselves.\n\n"
         "Return exactly one JSON object and no Markdown. Copy bundle_sha256 and evaluator exactly. "
-        f"Set schema_version to exactly {DRAFT_SCHEMA_VERSION}. "
-        f"Set attestation to exactly {attestation_json}. "
-        "The root keys must be attestation, bundle_sha256, evaluator, judgments, schema_version. "
+        "The root keys must be exactly bundle_sha256, evaluator, judgments. "
         "Each judgment must have exactly: item_id, winner, left_scores, right_scores, "
         "catastrophic_omission_side, evidence_refs, rationale. Each score object must contain "
         "coverage_diversity, direct_support, query_usefulness, specificity with integer 0, 1, or 2. "
@@ -745,20 +732,13 @@ def _validate_draft(
 ) -> list[dict[str, Any]]:
     _expect_keys(
         draft,
-        {"attestation", "bundle_sha256", "evaluator", "judgments", "schema_version"},
+        {"bundle_sha256", "evaluator", "judgments"},
         label="judge draft",
     )
-    if draft.get("schema_version") != DRAFT_SCHEMA_VERSION:
-        fail("UNSUPPORTED_SCHEMA", "Judge draft schema version is unsupported")
     if draft.get("bundle_sha256") != bundle.get("bundle_sha256"):
         fail("HASH_MISMATCH", "Judge draft does not bind the exact bundle")
     if draft.get("evaluator") != bundle.get("evaluator"):
         fail("PROVENANCE_MISMATCH", "Judge evaluator profile differs from bundle")
-    expected_attestation = _draft_contract()["attestation"]
-    if draft.get("attestation") != expected_attestation:
-        fail(
-            "ISOLATION_ATTESTATION_FAILED", "Judge tool-less attestation is incomplete"
-        )
     raw_judgments = draft.get("judgments")
     items = bundle.get("items")
     if not isinstance(raw_judgments, list) or not isinstance(items, list):

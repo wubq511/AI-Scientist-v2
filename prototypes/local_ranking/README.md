@@ -145,7 +145,7 @@ python -m prototypes.local_ranking.operational_judge prepare \
   --formal-manifest <formal-operational-manifest.json> \
   --selection <operational-selection-manifest.json> \
   --protocol docs/prototypes/local-literature-ranking-comparison-protocol-v1.4.md \
-  --evaluator-protocol docs/prototypes/local-literature-ranking-comparison-protocol-v1.5.md \
+  --evaluator-protocol docs/prototypes/local-literature-ranking-comparison-protocol-v1.6.md \
   --comparison-summary <windows-comparison-summary.json> \
   --baseline-candidate-id bm25-k16-b05-tw1-cap3 \
   --baseline-payloads <windows-bm25-payloads.jsonl> \
@@ -180,8 +180,8 @@ must retain `spent_diagnostic_only`.
 The public bundles expose only query plus anonymous left/right evidence. The private mapping
 binds the exact formal manifest, input, selection, protocol, candidate payloads, resource
 gates, and side assignments. `tool-less-agent.md` disables tools and subagents. Do not start
-the four paid evaluator sessions until exact prompt sizes, model context support, invocation
-count, and the one-whole-orientation retry ceiling have separate budget approval.
+the four evaluator sessions until exact prompt sizes, model context support, invocation
+count, privacy status, and the one-whole-orientation retry ceiling are frozen.
 
 Validate each raw evaluator JSON without repair:
 
@@ -210,32 +210,34 @@ python -m prototypes.local_ranking.operational_judge finalize \
 
 The extraction step preserves and hashes every raw invocation input/output, accepts only bare
 JSON or Kimi Code's single text-renderer prefix, and canonicalizes no model semantics. The judge
-validator remains a separate closed-schema and byte-exact evidence gate.
+validator remains a separate closed-schema and visible-segment-reference evidence gate.
 
-DeepSeek uses its official Responses API with provider-enforced JSON Schema after the Kimi Code
-text transport failed qualification twice. Prepare the credential-free canonical request first:
+DeepSeek stays on `provider=opencode-go`, but bypasses the Kimi Code text renderer. Prepare the
+credential-free direct Chat Completions request first:
 
 ```bash
-python -m prototypes.local_ranking.deepseek_responses prepare \
+python -m prototypes.local_ranking.opencode_go_chat prepare \
   --bundle <judge-deepseek-bundle.json> \
   --prompt <matching-judge-deepseek-prompt.txt> \
-  --output-root <new-deepseek-request-preparation>
+  --output-root <new-opencode-go-request-preparation>
 ```
 
-Only after the exact request size and cost ceiling are approved, execute it into a new private
-attempt. The adapter can read `DEEPSEEK_API_KEY`, or the existing local Kimi `deepseek` provider
-credential without printing it:
+Execute only an approved synthetic/spent attempt into a new private directory. The adapter can
+read `OPENCODE_GO_API_KEY`, or the existing local Kimi Code `opencode-go` credential without
+printing it:
 
 ```bash
-python -m prototypes.local_ranking.deepseek_responses execute \
-  --preparation-root <approved-deepseek-request-preparation> \
-  --output-root <new-private-deepseek-execution> \
+python -m prototypes.local_ranking.opencode_go_chat execute \
+  --preparation-root <approved-opencode-go-request-preparation> \
+  --output-root <new-private-opencode-go-execution> \
   --kimi-config ~/.kimi-code/config.toml
 ```
 
-The provider schema is only a transport constraint. Pass its canonical `response.json` through
-`operational_judge finalize`; never treat HTTP 200 or provider JSON Schema as the scientific
-validator.
+The direct request uses the documented OpenCode Go Chat endpoint. `json_object` and
+`reasoning_effort=high` remain qualification candidates rather than assumed provider contracts;
+pass the canonical `response.json` through `operational_judge finalize`. The 2026-08-31 DeepSeek
+ZDR statement has expired, so only synthetic payloads may be sent until the v1.6 data-retention
+gate is satisfied.
 
 After all four orientations pass, reduce them with:
 
