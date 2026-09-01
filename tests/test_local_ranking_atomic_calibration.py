@@ -9,6 +9,7 @@ from prototypes.local_ranking.atomic_calibration import aggregate, evaluate_prog
 from prototypes.local_ranking.atomic_judge import (
     ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION,
 )
+from prototypes.local_ranking.atomic_pair import evaluate_pair
 from prototypes.local_ranking.canonical import canonical_json_bytes
 
 
@@ -137,6 +138,23 @@ def test_atomic_profile_rejects_all_tie_degeneracy(tmp_path: Path) -> None:
 
     assert result["status"] == "fail"
     assert result["gates"]["all_replicates_directional"] is False
+
+
+def test_pair_result_stops_after_frozen_replicate_failure(tmp_path: Path) -> None:
+    result = evaluate_pair(
+        replicate_id="r1",
+        orientation_1_trace=_write(
+            tmp_path / "o1.json", _trace(replicate_id="r1", orientation=1)
+        ),
+        orientation_2_trace=_write(
+            tmp_path / "o2.json",
+            _trace(replicate_id="r1", orientation=2, unstable=4),
+        ),
+        output_path=tmp_path / "pair.json",
+    )
+
+    assert result["stable_count"] == 20
+    assert result["decision"] == "stop_profile_failed"
 
 
 def test_first_attempt_validity_is_reported_but_not_an_admission_gate(
