@@ -49,8 +49,8 @@ def _chunk(
     }
 
 
-def _successful_stream() -> bytes:
-    terminal = _chunk(content="", finish_reason="stop")
+def _successful_stream(*, model: str = "deepseek-v4-flash") -> bytes:
+    terminal = _chunk(content="", finish_reason="stop", model=model)
     terminal["usage"] = {
         "completion_tokens": 19,
         "prompt_tokens": 10,
@@ -60,7 +60,7 @@ def _successful_stream() -> bytes:
         "choices": [],
         "created": 1,
         "id": "chatcmpl-stream-test",
-        "model": "deepseek-v4-flash",
+        "model": model,
         "object": "chat.completion.chunk",
         "usage": {
             "completion_tokens": 20,
@@ -72,8 +72,8 @@ def _successful_stream() -> bytes:
     return b"".join(
         (
             b": keepalive\n\n",
-            _event(_chunk(content='{"value":', role="assistant")),
-            _event(_chunk(content="true}")),
+            _event(_chunk(content='{"value":', role="assistant", model=model)),
+            _event(_chunk(content="true}", model=model)),
             _event(terminal),
             _event(usage_enrichment),
             _event("[DONE]"),
@@ -110,6 +110,15 @@ def test_extract_stream_requires_terminal_done_and_rebuilds_json() -> None:
         "keepalive_count": 1,
         "post_done_cost_received": True,
     }
+
+
+def test_extract_stream_binds_requested_pro_model() -> None:
+    _, _, identity, _, _ = _extract_stream_response(
+        _successful_stream(model="deepseek-v4-pro"),
+        expected_model="deepseek-v4-pro",
+    )
+
+    assert identity["model"] == "deepseek-v4-pro"
 
 
 @pytest.mark.parametrize(
@@ -272,3 +281,44 @@ def test_prepare_stream_request_rejects_unapproved_effort(tmp_path) -> None:
         )
 
     assert raised.value.code == "INVALID_ARTIFACT"
+
+
+def test_prepare_stream_request_binds_pro_high_profile(tmp_path) -> None:
+    base_protocol = tmp_path / "base.md"
+    evaluator_protocol = tmp_path / "evaluator.md"
+    base_protocol.write_text("synthetic base protocol\n")
+    evaluator_protocol.write_text("synthetic evaluator protocol\n")
+    synthetic_root = tmp_path / "synthetic"
+    prepare_synthetic(
+        base_protocol_path=base_protocol,
+        evaluator_protocol_path=evaluator_protocol,
+        output_root=synthetic_root,
+    )
+    bundle_path = synthetic_root / "input/bundle.json"
+    old_bundle_bytes = bundle_path.read_bytes()
+    bundle = json.loads(old_bundle_bytes)
+    bundle["evaluator"]["model_alias"] = "opencode-go/deepseek-v4-pro"
+    bundle_without_hash = {
+        key: value for key, value in bundle.items() if key != "bundle_sha256"
+    }
+    bundle["bundle_sha256"] = sha256_bytes(canonical_json_bytes(bundle_without_hash))
+    new_bundle_bytes = canonical_json_bytes(bundle)
+    bundle_path.write_bytes(new_bundle_bytes)
+    prompt_path = synthetic_root / "input/prompt.txt"
+    prompt_path.write_bytes(
+        prompt_path.read_bytes().replace(old_bundle_bytes, new_bundle_bytes)
+    )
+
+    output_root = tmp_path / "stream"
+    manifest = prepare(
+        bundle_path=bundle_path,
+        prompt_path=prompt_path,
+        output_root=output_root,
+    )
+    request = json.loads((output_root / "request.json").read_text())
+    validated = _validate_preparation(preparation_root=output_root)
+
+    assert request["model"] == "deepseek-v4-pro"
+    assert request["reasoning_effort"] == "high"
+    assert manifest["model"] == "deepseek-v4-pro"
+    assert validated[2]["model"] == "deepseek-v4-pro"

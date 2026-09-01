@@ -27,26 +27,35 @@ from .operational_judge import BUNDLE_SCHEMA_VERSION, EVALUATORS
 LEGACY_PREPARATION_SCHEMA_VERSION = "local-ranking-opencode-go-stream-preparation-v1.0"
 PREPARATION_SCHEMA_VERSION = "local-ranking-opencode-go-stream-preparation-v1.1"
 RECEIPT_SCHEMA_VERSION = "local-ranking-opencode-go-chat-stream-receipt-v1.0"
-ALLOWED_FLASH_REASONING_EFFORTS = {"high", "max"}
+ALLOWED_DEEPSEEK_PROFILES = {
+    ("opencode-go/deepseek-v4-flash", "high"): "deepseek-v4-flash",
+    ("opencode-go/deepseek-v4-flash", "max"): "deepseek-v4-flash",
+    ("opencode-go/deepseek-v4-pro", "high"): "deepseek-v4-pro",
+    ("opencode-go/deepseek-v4-pro", "max"): "deepseek-v4-pro",
+}
+ALLOWED_WIRE_PROFILES = {
+    (model, effort)
+    for (model_alias, effort), model in ALLOWED_DEEPSEEK_PROFILES.items()
+}
 
 
-def _flash_reasoning_effort(bundle: dict[str, Any]) -> str:
+def _deepseek_profile(bundle: dict[str, Any]) -> tuple[str, str]:
     evaluator = bundle.get("evaluator")
     expected = EVALUATORS["judge-deepseek"]
-    if not isinstance(evaluator, dict):
+    if not isinstance(evaluator, dict) or set(evaluator) != set(expected):
         fail("INVALID_ARTIFACT", "Judge bundle evaluator is invalid")
+    model_alias = evaluator.get("model_alias")
     reasoning_effort = evaluator.get("reasoning_effort")
-    normalized = dict(evaluator)
-    normalized["reasoning_effort"] = expected["reasoning_effort"]
     if (
-        normalized != expected
-        or reasoning_effort not in ALLOWED_FLASH_REASONING_EFFORTS
+        evaluator.get("harness") != expected["harness"]
+        or evaluator.get("provider") != expected["provider"]
+        or (model_alias, reasoning_effort) not in ALLOWED_DEEPSEEK_PROFILES
     ):
         fail(
             "INVALID_ARTIFACT",
-            "Judge bundle is not an approved OpenCode Go DeepSeek Flash profile",
+            "Judge bundle is not an approved OpenCode Go DeepSeek profile",
         )
-    return reasoning_effort
+    return ALLOWED_DEEPSEEK_PROFILES[(model_alias, reasoning_effort)], reasoning_effort
 
 
 def prepare(
@@ -59,7 +68,7 @@ def prepare(
             "INVALID_ARTIFACT",
             "Judge bundle is not the frozen OpenCode Go DeepSeek schema",
         )
-    reasoning_effort = _flash_reasoning_effort(bundle)
+    model, reasoning_effort = _deepseek_profile(bundle)
     expected_bundle_hash = bundle.get("bundle_sha256")
     without_hash = {
         key: value for key, value in bundle.items() if key != "bundle_sha256"
@@ -75,7 +84,7 @@ def prepare(
     request = {
         "max_tokens": MAX_TOKENS,
         "messages": [{"content": prompt, "role": "user"}],
-        "model": MODEL_ID,
+        "model": model,
         "reasoning_effort": reasoning_effort,
         "response_format": {"type": "json_object"},
         "stream": True,
@@ -88,7 +97,7 @@ def prepare(
             "prompt.txt": sha256_bytes(prompt_bytes),
             "request.json": sha256_bytes(request_bytes),
         },
-        "model": MODEL_ID,
+        "model": model,
         "provider": "opencode-go",
         "reasoning_effort": reasoning_effort,
         "schema_version": PREPARATION_SCHEMA_VERSION,
@@ -170,6 +179,8 @@ def _merge_usage(
 
 def _extract_stream_response(
     raw_stream: bytes,
+    *,
+    expected_model: str = MODEL_ID,
 ) -> tuple[
     dict[str, Any],
     dict[str, int] | None,
@@ -247,7 +258,7 @@ def _extract_stream_response(
             if (
                 not isinstance(chunk_id, str)
                 or not chunk_id
-                or chunk_model != MODEL_ID
+                or chunk_model != expected_model
                 or isinstance(chunk_created, bool)
                 or not isinstance(chunk_created, int)
                 or chunk_created < 0
@@ -350,7 +361,7 @@ def _extract_stream_response(
         "created_first": created_first,
         "created_last": created_last,
         "finish_reason": "stop",
-        "model": MODEL_ID,
+        "model": expected_model,
         "provider_response_id": response_id,
     }
     diagnostics = {
@@ -376,22 +387,25 @@ def _validate_preparation(
         preparation_root / "prompt.txt", label="stream prompt"
     )
     schema_version = manifest.get("schema_version")
+    request_model = request.get("model")
     request_effort = request.get("reasoning_effort")
     legacy_high_profile = (
         schema_version == LEGACY_PREPARATION_SCHEMA_VERSION
         and "reasoning_effort" not in manifest
+        and request_model == MODEL_ID
         and request_effort == "high"
     )
     profile_aware_manifest = (
         schema_version == PREPARATION_SCHEMA_VERSION
+        and manifest.get("model") == request_model
         and manifest.get("reasoning_effort") == request_effort
-        and request_effort in ALLOWED_FLASH_REASONING_EFFORTS
+        and (request_model, request_effort) in ALLOWED_WIRE_PROFILES
     )
     if (
         not (legacy_high_profile or profile_aware_manifest)
         or manifest.get("status") != "ready_for_synthetic_or_spent_stream_qualification"
         or manifest.get("endpoint") != API_URL
-        or manifest.get("model") != MODEL_ID
+        or manifest.get("model") != request_model
         or manifest.get("files", {}).get("request.json") != sha256_bytes(request_bytes)
         or manifest.get("files", {}).get("prompt.txt") != sha256_bytes(prompt_bytes)
         or set(request)
@@ -404,9 +418,8 @@ def _validate_preparation(
             "stream",
         }
         or request.get("messages") != [{"content": prompt, "role": "user"}]
-        or request.get("model") != MODEL_ID
+        or (request_model, request_effort) not in ALLOWED_WIRE_PROFILES
         or request.get("max_tokens") != MAX_TOKENS
-        or request_effort not in ALLOWED_FLASH_REASONING_EFFORTS
         or request.get("response_format") != {"type": "json_object"}
         or request.get("stream") is not True
     ):
@@ -488,7 +501,8 @@ def execute(
         )
     try:
         draft, usage, identity, chunks, diagnostics = _extract_stream_response(
-            raw_stream
+            raw_stream,
+            expected_model=request["model"],
         )
     except HarnessError as exc:
         write_once(
