@@ -52,6 +52,9 @@ def _trace(
             {
                 "attempt_sha256s": [f"{index:064x}"],
                 "call_id": f"call-{index + 1:03d}",
+                "provider_response_ids": [
+                    f"{replicate_id}-o{orientation}-response-{index + 1:03d}"
+                ],
                 "selected_attempt_number": 1,
             }
             for index in range(24)
@@ -153,6 +156,7 @@ def test_first_attempt_validity_is_reported_but_not_an_admission_gate(
     trace["selected_attempts"][0] = {
         "attempt_sha256s": ["a" * 64, "b" * 64],
         "call_id": "call-001",
+        "provider_response_ids": ["r1-o1-retry-1", "r1-o1-retry-2"],
         "selected_attempt_number": 2,
     }
     _write(trace_path, trace)

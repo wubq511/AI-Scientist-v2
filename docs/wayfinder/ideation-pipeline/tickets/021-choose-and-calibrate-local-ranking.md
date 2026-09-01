@@ -83,7 +83,12 @@ spent Pro/max 两个 bundles 的 prepare-only dry run 生成 48/48 单题 prompt
 IDs，同输入重建 byte-identical；单 prompt 8,996–14,503 bytes，总 input bytes 比旧 prompts 增加 4.72%，该成本
 已披露但不作为无科学含义的阻塞门槛。
 
-当前下一阶段不是立即发模型请求：先为 atomic request 冻结 OpenCode Go receipt/response binding、exact
-max-token ceiling、concurrency smoke 与 live execution manifest。完成后才可按 Pro/high → Pro/max 的顺序运行
-spent calibration；首个合格 DeepSeek profile 再与 Kimi K3 使用全新 atomic calls 做 panel qualification。
-Calibration votes 不得复用为 candidate votes，ticket 继续保持 open。
+Atomic OpenCode Go adapter 已实现：source/effective evaluator 分开记录，request 固定 DeepSeek Pro、JSON-object
+SSE 与 `max_tokens=16384`，receipt 逐 call 绑定 manifest/prompt/request/response/provider identity，resolver 与
+aggregator 禁止复用 provider response ID。4-call concurrency smoke scheduler 及 fail-closed probe validator 已
+加入；targeted tests 21/21 PASS，并已用 historical Pro/max bundle 做 24-call Pro/high prepare-only integration。
+
+下一步先以冻结 commit/manifest 发起 4 个 transport-only Pro/high probes；它只决定 concurrency 4 是否可用，
+不产生 semantic votes。Smoke PASS 后才按 Pro/high → Pro/max 的顺序运行 spent calibration；首个合格 DeepSeek
+profile 再与 Kimi K3 使用全新 atomic calls 做 panel qualification。Calibration votes 不得复用为 candidate
+votes，ticket 继续保持 open。

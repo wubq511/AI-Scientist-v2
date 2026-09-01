@@ -1,7 +1,7 @@
 # Local-ranking atomic evaluator contract v2.0
 
 Protocol date: 2026-09-01（Asia/Shanghai）
-Status: **Approved for implementation; live model calls require a separately frozen execution manifest**
+Status: **Approved and implemented locally; live model calls require the frozen smoke manifest described below**
 
 ## 1. 决策
 
@@ -167,8 +167,10 @@ Private manifest 保存：
 - `L1-L3` / `R1-R3` 到 exact side/paper/segment IDs 的映射；
 - public packet/prompt path、bytes 与 SHA-256。
 
-Final trace 保存 raw response SHA-256 和 controller 展开的 evidence refs。扩展只做确定性 handle lookup；不得
-修改 winner、scores、catastrophic omission 或 rationale。
+Final trace 保存 raw response、execution receipt、request SHA-256、唯一 provider response ID 和 controller
+展开的 evidence refs。扩展只做确定性 handle lookup；不得修改 winner、scores、catastrophic omission 或
+rationale。Attempt 若没有与 exact atomic manifest、call、prompt、request、response、model/effort 绑定的 canonical
+receipt，或者六条 traces 复用了 provider response ID，均 fail closed。
 
 ## 5. Retry 与执行预算
 
@@ -185,9 +187,10 @@ execution profile，不提供 validator 错误，不要求“改正上一版”�
 不允许 retry 的原因包括 winner、分数、rationale 观点、mirror mismatch、与另一模型不一致。Controller
 provenance/hash mismatch 是 harness hard fail，修复后必须创建新 attempt，不能算该 model call 的第二次。
 
-`max_tokens` 在 live manifest 中冻结为足以避免单 item reasoning 截断的 ceiling；它不是要求模型用满的预算。
-在发起 semantic calibration 前只用 transport smoke 确认 chosen ceiling 可被 provider 接受。若 ceiling 本身要改，
-在 profile 开始前改 manifest；profile 内不临时改变。
+`max_tokens` 冻结为 `16,384`。历史 Pro/max 多个 24-item receipts 的 completion 分别为 24,174、27,359、
+29,452 等量级，平均约 1,100 tokens/item；因此 16,384 给单 item 约 14 倍历史均值余量，同时把旧 32,768
+异常生成上界减半。它只是防截断和失控的 ceiling，不是要求模型用满的预算，也不是 semantic gate。在发起
+semantic calibration 前只用 transport smoke 确认 provider 接受该 ceiling；profile 内不得临时改变。
 
 ## 6. 并发、早停与 profile ladder
 
@@ -227,8 +230,10 @@ valid calls 直到过线。
    `21+24+24` FAIL，并证明冗余 23 gate 已删除；
 4. 对 historical spent Pro/max bundles 做 **prepare-only dry run**，验证 48 个 prompts 均为单 item、无 controller
    IDs、hash 可重建；不把 dry run 当模型 evidence；
-5. 冻结 live execution manifest、token ceiling、concurrency 和 provider receipt adapter 后，另行获得 live-call
-   授权再发起 transport smoke 与 Pro/high calibration。
+5. 冻结 live execution manifest、`max_tokens=16384`、concurrency 1-4 和 provider receipt adapter；
+6. 先运行 4-call transport-only smoke。只有 transport/SSE/JSON/receipt/唯一 response ID 是 smoke gate；probe
+   的语义内容不进入 calibration；
+7. smoke PASS 后按 Pro/high → Pro/max 发起 fresh semantic calibration。
 
 Mac 继续作为 API controller、protocol/input preparation、evidence review 与 fallback；该阶段没有本地模型计算，
 不需要为了形式把 API calls 转到 Windows。Windows 仍负责本地 ranking 的 bulk compute，不改变仓库已记录的职责
@@ -271,12 +276,33 @@ Pro/max 仍达不到 gates，失败就更能归因于 rubric 含糊、证据确�
 - public roots 全量搜索不到 `item_id`、`case_id`、`paper_id`、`segment_id`、`bundle_sha256` 或
   `deepseek-v4-pro`；
 - 对 orientation 1 用相同 source 与 replicate ID 重新 prepare，`diff -qr` byte-identical；
-- 本地 atomic targeted tests 16/16 PASS，覆盖 first-valid、retry-after-valid、attempt exhaustion、private
+- 初版本地 atomic targeted tests 16/16 PASS，覆盖 first-valid、retry-after-valid、attempt exhaustion、private
   handle expansion、冗余 gate 删除、degeneracy、数学早停与 144-call end-to-end aggregation；Python 3.13
   与 3.14 均通过；
 - 当前源码的 Python 3.14 `tests/` 全量 119/119 PASS；changed Python files 的 Black 26.5.1、Ruff
   0.16.5、compileall 与 `git diff --check` 均通过。全仓 Black/Ruff 仍有上游既存失败，未为本 prototype
   修改无关文件。
+
+## 11. Atomic transport implementation evidence
+
+2026-09-01 新增独立的 `atomic_opencode_go` adapter，不修改历史 v1.x transport：
+
+- source evaluator 与 effective evaluator 分开记录；只允许同一 OpenCode Go DeepSeek Pro profile 在
+  `high/max` 间显式选择，能够从 spent Pro/max bundle 诚实派生 Pro/high request；
+- 每个 call 的 prompt/request 独立 canonical + write-once，request 固定 `deepseek-v4-pro`、JSON object、SSE、
+  `max_tokens=16384`；
+- receipt 绑定 atomic manifest、call/replicate/orientation、prompt/request/response hashes、model/effort、
+  provider response ID、usage、safe headers 与 raw SSE；
+- resolver 禁止 physical attempts 复用 provider response ID，calibration aggregator 再对六条 traces 做全局
+  uniqueness 检查；
+- 4-call smoke 使用真实并发 scheduler，但只检查 HTTP/SSE/JSON/receipt、exact probe schema 和 response ID
+  uniqueness，不把 synthetic answer 当模型判断能力；
+- targeted tests 更新为 21/21 PASS；prepare-only integration 从 historical Pro/max orientation 1 成功生成
+  24 个 effective Pro/high atomic requests，source/effective evaluator 同时保留，concurrency 4 与 token ceiling
+  16,384 均可重建。
+
+实时 smoke 的 commit、preparation hashes、quota snapshot、receipts、latency/usage/cost 和 PASS/FAIL 另写入冻结的
+transport smoke protocol/result，不能由本地 mock PASS 代替。
 
 总 input 增长不设为失败门槛：4.72% 是重复短 instruction 的明确成本，但它换取每次只处理一个独立判断，并
 允许 scheduler 并发。若 live token/cost 证明该成本不可接受，再以 atomic 结果为 reference 对 micro-batch 做独立

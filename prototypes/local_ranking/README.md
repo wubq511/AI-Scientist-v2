@@ -288,19 +288,38 @@ controller-private manifest with:
 python -m prototypes.local_ranking.atomic_judge prepare \
   --bundle <frozen-v1.2-source-bundle.json> \
   --replicate-id <replicate-id> \
+  --reasoning-effort <high-or-max> \
   --output-root <new-atomic-preparation>
 ```
 
 The public prompts contain only query text, visible evidence, and `L1-L3`/`R1-R3` handles. Item,
 paper, segment, bundle, and evaluator identities stay controller-owned. After each physical call,
-preserve and validate its unmodified response with:
+prepare immutable OpenCode Go requests. The adapter freezes `deepseek-v4-pro`, JSON-object SSE,
+`max_tokens=16384`, concurrency 1-4, request hashes, and the bounded retry policy:
+
+```bash
+python -m prototypes.local_ranking.atomic_opencode_go prepare-atomic \
+  --atomic-manifest <atomic-preparation/private/manifest.json> \
+  --max-concurrency <1-4> \
+  --output-root <new-atomic-transport-preparation>
+
+python -m prototypes.local_ranking.atomic_opencode_go execute-call \
+  --preparation-root <atomic-transport-preparation> \
+  --call-sequence <1-24> \
+  --output-root <new-transport-attempt> \
+  --kimi-config <kimi-config-with-opencode-go-key>
+```
+
+After each physical call, preserve and validate its unmodified response together with the exact
+provider receipt:
 
 ```bash
 python -m prototypes.local_ranking.atomic_judge record-attempt \
   --manifest <atomic-preparation/private/manifest.json> \
   --call-sequence <1-24> \
   --attempt-number <1-2> \
-  --response <raw-response> \
+  --response <transport-attempt/response.json> \
+  --execution-receipt <transport-attempt/receipt.json> \
   --output-root <new-call-attempt>
 ```
 
@@ -331,8 +350,10 @@ Atomic v2 keeps only the direct gates: every replicate at least 22/24 mirror-sta
 least 69/72, and no all-tie/all-both-bad replicate. The old “at least two replicates reach 23”
 gate is omitted because the retained gates mathematically imply it. First-attempt validity and
 retry rates are diagnostics, not additional admission thresholds. The local prototype does not
-yet bind provider receipts or execute live requests; freeze that adapter and a live execution
-manifest before any model call. See
+accept an attempt without an exact request/response/provider-receipt binding, and provider response
+IDs must be unique across the six traces. Before semantic calls, use `prepare-smoke` and `run-smoke`
+to prove the frozen concurrency against four transport-only probes; their answers never enter the
+ranking gates. See
 `docs/prototypes/local-ranking-atomic-evaluator-contract-v2.0.md` for the approved boundary.
 
 After all four orientations pass, reduce them with:

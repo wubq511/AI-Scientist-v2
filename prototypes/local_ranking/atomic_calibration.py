@@ -40,7 +40,7 @@ def _normalize_mirrored_winner(winner: str) -> str:
 
 def _winner_index(
     trace: dict[str, Any], *, replicate_id: str, orientation: int
-) -> dict[str, str]:
+) -> tuple[dict[str, str], set[str]]:
     expected_keys = {
         "attempt_summary",
         "evaluator",
@@ -94,17 +94,20 @@ def _winner_index(
     if not isinstance(selected, list) or len(selected) != EXPECTED_ITEM_COUNT:
         fail("INVALID_ATOMIC_TRACE", "Atomic selected-attempt coverage is invalid")
     selected_call_ids: set[str] = set()
+    provider_response_ids: set[str] = set()
     selected_second_attempts = 0
     for selection in selected:
         if not isinstance(selection, dict) or set(selection) != {
             "attempt_sha256s",
             "call_id",
+            "provider_response_ids",
             "selected_attempt_number",
         }:
             fail("INVALID_ATOMIC_TRACE", "Selected attempt binding is invalid")
         call_id = selection.get("call_id")
         selected_number = selection.get("selected_attempt_number")
         hashes = selection.get("attempt_sha256s")
+        response_ids = selection.get("provider_response_ids")
         if (
             not isinstance(call_id, str)
             or call_id in selected_call_ids
@@ -113,9 +116,15 @@ def _winner_index(
             or not isinstance(hashes, list)
             or len(hashes) != selected_number
             or any(not isinstance(value, str) or len(value) != 64 for value in hashes)
+            or not isinstance(response_ids, list)
+            or len(response_ids) != selected_number
+            or any(not isinstance(value, str) or not value for value in response_ids)
+            or len(set(response_ids)) != len(response_ids)
+            or any(value in provider_response_ids for value in response_ids)
         ):
             fail("INVALID_ATOMIC_TRACE", "Selected attempt identity is invalid")
         selected_call_ids.add(call_id)
+        provider_response_ids.update(response_ids)
         selected_second_attempts += selected_number == 2
     if (
         selected_call_ids
@@ -144,7 +153,7 @@ def _winner_index(
         value = trace.get(key)
         if not isinstance(value, str) or len(value) != 64:
             fail("INVALID_ATOMIC_TRACE", f"{key} is invalid")
-    return winners
+    return winners, provider_response_ids
 
 
 def evaluate_progress(stable_counts: list[int]) -> dict[str, Any]:
@@ -194,6 +203,7 @@ def aggregate(
     total_physical_attempts = 0
     total_retried_calls = 0
     invalid_codes: Counter[str] = Counter()
+    all_provider_response_ids: set[str] = set()
     for raw_replicate in replicates:
         replicate_id = raw_replicate.get("replicate_id")
         if (
@@ -216,9 +226,15 @@ def aggregate(
                 trace_path,
                 label=f"{replicate_id} orientation {orientation} atomic trace",
             )
-            winners = _winner_index(
+            winners, response_ids = _winner_index(
                 trace, replicate_id=replicate_id, orientation=orientation
             )
+            if response_ids & all_provider_response_ids:
+                fail(
+                    "DUPLICATE_PROVIDER_RESPONSE",
+                    "Atomic traces reuse a provider response",
+                )
+            all_provider_response_ids.update(response_ids)
             if evaluator is None:
                 evaluator = trace["evaluator"]
             elif trace["evaluator"] != evaluator:

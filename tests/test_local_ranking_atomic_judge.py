@@ -1,15 +1,19 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from prototypes.local_ranking.atomic_calibration import aggregate
 from prototypes.local_ranking.atomic_judge import (
+    ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
     ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION,
     prepare_atomic,
-    record_attempt,
     resolve_orientation,
+)
+from prototypes.local_ranking.atomic_judge import (
+    record_attempt as _record_attempt,
 )
 from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
 from prototypes.local_ranking.errors import HarnessError
@@ -106,6 +110,56 @@ def _valid_response(*, winner: str = "left") -> dict:
     }
 
 
+def record_attempt(**kwargs):
+    manifest_path = kwargs["manifest_path"]
+    response_path = kwargs["response_path"]
+    output_root = kwargs["output_root"]
+    manifest = json.loads(manifest_path.read_bytes())
+    call = manifest["calls"][kwargs["call_sequence"] - 1]
+    response_bytes = response_path.read_bytes()
+    response_id = "test-" + sha256_bytes(str(output_root).encode())[:24]
+    receipt = {
+        "call_binding": {
+            "atomic_manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
+            "call_id": call["call_id"],
+            "kind": "atomic",
+            "orientation": manifest["orientation"],
+            "prompt_sha256": call["prompt_sha256"],
+            "replicate_id": manifest["replicate_id"],
+            "sequence": call["sequence"],
+        },
+        "diagnostics": {},
+        "endpoint": "https://opencode.ai/zen/go/v1/chat/completions",
+        "files": {"response.json": sha256_bytes(response_bytes)},
+        "http_status": 200,
+        "identity": {
+            "cost": "0",
+            "created_first": 1,
+            "created_last": 1,
+            "finish_reason": "stop",
+            "model": "deepseek-v4-pro",
+            "provider_response_id": response_id,
+        },
+        "preparation_manifest_sha256": "a" * 64,
+        "provider": "opencode-go",
+        "request_sha256": "b" * 64,
+        "schema_version": ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
+        "status": "pass",
+        "transport_qualification": {
+            "json_object_accepted": True,
+            "reasoning_effort_requested": manifest["evaluator"]["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        },
+        "usage": None,
+    }
+    receipt_path = _write(
+        output_root.parent / f"{output_root.name}-receipt.json", receipt
+    )
+    return _record_attempt(execution_receipt_path=receipt_path, **kwargs)
+
+
 def test_prepare_atomic_removes_controller_owned_id_copying(tmp_path: Path) -> None:
     source = _source_bundle(tmp_path / "source.json")
     output = tmp_path / "prepared"
@@ -128,6 +182,27 @@ def test_prepare_atomic_removes_controller_owned_id_copying(tmp_path: Path) -> N
     assert '"handle":"L1"' in packet
     assert "bundle_sha256" not in prompt
     assert "item_id" not in prompt
+
+
+def test_prepare_atomic_records_source_and_effective_evaluator(tmp_path: Path) -> None:
+    source = _source_bundle(tmp_path / "source.json")
+    bundle = json.loads(source.read_bytes())
+    bundle["evaluator"]["reasoning_effort"] = "max"
+    without_hash = {
+        key: value for key, value in bundle.items() if key != "bundle_sha256"
+    }
+    bundle["bundle_sha256"] = sha256_bytes(canonical_json_bytes(without_hash))
+    source.write_bytes(canonical_json_bytes(bundle))
+
+    manifest = prepare_atomic(
+        bundle_path=source,
+        replicate_id="r1",
+        output_root=tmp_path / "prepared",
+        reasoning_effort="high",
+    )
+
+    assert manifest["source_evaluator"]["reasoning_effort"] == "max"
+    assert manifest["evaluator"]["reasoning_effort"] == "high"
 
 
 def test_first_valid_attempt_is_selected_and_handles_expand_privately(

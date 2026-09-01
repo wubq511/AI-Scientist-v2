@@ -23,14 +23,20 @@ from .operational_judge import (
 )
 
 ATOMIC_PACKET_SCHEMA_VERSION = "local-ranking-atomic-judge-packet-v2.0"
-ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.0"
-ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.0"
-ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.0"
+ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.1"
+ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.1"
+ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.1"
 ATOMIC_ORIENTATION_RESULT_SCHEMA_VERSION = (
     "local-ranking-atomic-orientation-result-v2.0"
 )
 EXPECTED_ITEM_COUNT = 24
 MAX_PHYSICAL_ATTEMPTS = 2
+ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION = (
+    "local-ranking-atomic-opencode-go-receipt-v2.0"
+)
+OPENCODE_GO_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
+APPROVED_ATOMIC_MODEL_ALIAS = "opencode-go/deepseek-v4-pro"
+APPROVED_ATOMIC_EFFORTS = {"high", "max"}
 RESPONSE_KEYS = {
     "catastrophic_omission_side",
     "evidence_handles",
@@ -213,8 +219,38 @@ def _prompt_text(packet: dict[str, Any]) -> str:
     )
 
 
+def _effective_evaluator(
+    source_evaluator: Any, *, reasoning_effort: str | None
+) -> dict[str, str]:
+    expected_keys = {"harness", "model_alias", "provider", "reasoning_effort"}
+    if not isinstance(source_evaluator, dict) or set(source_evaluator) != expected_keys:
+        fail("INVALID_EVALUATOR", "Source evaluator has an invalid closed schema")
+    if (
+        source_evaluator.get("harness") != "opencode-go-chat-completions"
+        or source_evaluator.get("provider") != "opencode-go"
+        or source_evaluator.get("model_alias") != APPROVED_ATOMIC_MODEL_ALIAS
+        or source_evaluator.get("reasoning_effort") not in APPROVED_ATOMIC_EFFORTS
+    ):
+        fail(
+            "INVALID_EVALUATOR",
+            "Atomic calibration requires the approved OpenCode Go DeepSeek Pro profile",
+        )
+    effective_effort = (
+        source_evaluator["reasoning_effort"]
+        if reasoning_effort is None
+        else reasoning_effort
+    )
+    if effective_effort not in APPROVED_ATOMIC_EFFORTS:
+        fail("INVALID_EVALUATOR", "Atomic reasoning effort must be high or max")
+    return {**source_evaluator, "reasoning_effort": effective_effort}
+
+
 def prepare_atomic(
-    *, bundle_path: Path, replicate_id: str, output_root: Path
+    *,
+    bundle_path: Path,
+    replicate_id: str,
+    output_root: Path,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     if (
         not isinstance(replicate_id, str)
@@ -224,6 +260,9 @@ def prepare_atomic(
         fail("INVALID_REPLICATE_ID", "Replicate ID must be a non-empty trimmed string")
     bundle, bundle_bytes = _read_canonical_object(bundle_path, label="source bundle")
     _validate_source_bundle(bundle)
+    evaluator = _effective_evaluator(
+        bundle["evaluator"], reasoning_effort=reasoning_effort
+    )
     files: dict[str, bytes] = {}
     calls = []
     for sequence, item in enumerate(bundle["items"], start=1):
@@ -256,10 +295,11 @@ def prepare_atomic(
     manifest = {
         "call_count": len(calls),
         "calls": calls,
-        "evaluator": bundle["evaluator"],
+        "evaluator": evaluator,
         "orientation": bundle["orientation"],
         "replicate_id": replicate_id,
         "schema_version": ATOMIC_PREPARATION_SCHEMA_VERSION,
+        "source_evaluator": bundle["evaluator"],
         "source_bundle_file_sha256": sha256_bytes(bundle_bytes),
         "source_bundle_self_sha256": bundle["bundle_sha256"],
         "status": "ready_for_atomic_execution",
@@ -285,6 +325,7 @@ def _load_manifest(
             "schema_version",
             "source_bundle_file_sha256",
             "source_bundle_self_sha256",
+            "source_evaluator",
             "status",
         },
         label="atomic manifest",
@@ -298,6 +339,15 @@ def _load_manifest(
         or len(calls) != EXPECTED_ITEM_COUNT
     ):
         fail("INVALID_ATOMIC_MANIFEST", "Atomic manifest is incomplete")
+    evaluator = manifest.get("evaluator")
+    effective = _effective_evaluator(
+        manifest.get("source_evaluator"),
+        reasoning_effort=(
+            evaluator.get("reasoning_effort") if isinstance(evaluator, dict) else None
+        ),
+    )
+    if evaluator != effective:
+        fail("INVALID_ATOMIC_MANIFEST", "Atomic effective evaluator is invalid")
     by_sequence: dict[int, dict[str, Any]] = {}
     seen_call_ids: set[str] = set()
     seen_item_ids: set[str] = set()
@@ -485,12 +535,143 @@ def _assess_response(
     return judgment, {"error": None, "status": "pass"}
 
 
+def _validate_execution_receipt(
+    *,
+    receipt_path: Path,
+    response_bytes: bytes,
+    manifest: dict[str, Any],
+    manifest_file_sha256: str,
+    call: dict[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    receipt, receipt_bytes = _read_canonical_object(
+        receipt_path, label="atomic execution receipt"
+    )
+    _expect_keys(
+        receipt,
+        {
+            "call_binding",
+            "diagnostics",
+            "endpoint",
+            "files",
+            "http_status",
+            "identity",
+            "preparation_manifest_sha256",
+            "provider",
+            "request_sha256",
+            "schema_version",
+            "status",
+            "transport_qualification",
+            "usage",
+        },
+        label="atomic execution receipt",
+    )
+    binding = receipt.get("call_binding")
+    if not isinstance(binding, dict):
+        fail("INVALID_EXECUTION_RECEIPT", "Atomic call binding is missing")
+    _expect_keys(
+        binding,
+        {
+            "atomic_manifest_sha256",
+            "call_id",
+            "kind",
+            "orientation",
+            "prompt_sha256",
+            "replicate_id",
+            "sequence",
+        },
+        label="atomic receipt call binding",
+    )
+    identity = receipt.get("identity")
+    if not isinstance(identity, dict):
+        fail("INVALID_EXECUTION_RECEIPT", "Provider identity is missing")
+    _expect_keys(
+        identity,
+        {
+            "cost",
+            "created_first",
+            "created_last",
+            "finish_reason",
+            "model",
+            "provider_response_id",
+        },
+        label="atomic receipt provider identity",
+    )
+    qualification = receipt.get("transport_qualification")
+    if not isinstance(qualification, dict):
+        fail("INVALID_EXECUTION_RECEIPT", "Transport qualification is missing")
+    _expect_keys(
+        qualification,
+        {
+            "json_object_accepted",
+            "reasoning_effort_requested",
+            "reasoning_execution_proven",
+            "stream_completed",
+            "streaming_requested",
+        },
+        label="atomic receipt transport qualification",
+    )
+    files = receipt.get("files")
+    response_sha256 = sha256_bytes(response_bytes)
+    provider_response_id = identity.get("provider_response_id")
+    request_sha256 = receipt.get("request_sha256")
+    preparation_sha256 = receipt.get("preparation_manifest_sha256")
+    evaluator = manifest["evaluator"]
+    if (
+        receipt.get("schema_version") != ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
+        or receipt.get("status") != "pass"
+        or receipt.get("provider") != "opencode-go"
+        or receipt.get("endpoint") != OPENCODE_GO_ENDPOINT
+        or receipt.get("http_status") != 200
+        or not isinstance(files, dict)
+        or files.get("response.json") != response_sha256
+        or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            for name, digest in files.items()
+        )
+        or not isinstance(preparation_sha256, str)
+        or len(preparation_sha256) != 64
+        or not isinstance(request_sha256, str)
+        or len(request_sha256) != 64
+        or binding
+        != {
+            "atomic_manifest_sha256": manifest_file_sha256,
+            "call_id": call["call_id"],
+            "kind": "atomic",
+            "orientation": manifest["orientation"],
+            "prompt_sha256": call["prompt_sha256"],
+            "replicate_id": manifest["replicate_id"],
+            "sequence": call["sequence"],
+        }
+        or identity.get("finish_reason") != "stop"
+        or identity.get("model") != evaluator["model_alias"].rsplit("/", 1)[-1]
+        or not isinstance(provider_response_id, str)
+        or not provider_response_id
+        or qualification
+        != {
+            "json_object_accepted": True,
+            "reasoning_effort_requested": evaluator["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        }
+    ):
+        fail(
+            "INVALID_EXECUTION_RECEIPT",
+            "Execution receipt does not bind this atomic response",
+        )
+    return receipt, receipt_bytes
+
+
 def record_attempt(
     *,
     manifest_path: Path,
     call_sequence: int,
     attempt_number: int,
     response_path: Path,
+    execution_receipt_path: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     if (
@@ -500,6 +681,7 @@ def record_attempt(
     ):
         fail("ATTEMPT_LIMIT_EXCEEDED", "Physical attempt number must be 1 or 2")
     manifest, artifact_root, calls = _load_manifest(manifest_path)
+    manifest_file_sha256 = sha256_bytes(manifest_path.read_bytes())
     call = calls.get(call_sequence)
     if call is None:
         fail("UNKNOWN_LOGICAL_CALL", "Logical call sequence is not in the manifest")
@@ -512,23 +694,34 @@ def record_attempt(
         response_bytes=response_bytes,
         handle_map=call["evidence_handle_map"],
     )
+    receipt, receipt_bytes = _validate_execution_receipt(
+        receipt_path=execution_receipt_path,
+        response_bytes=response_bytes,
+        manifest=manifest,
+        manifest_file_sha256=manifest_file_sha256,
+        call=call,
+    )
     outcome = {
         "attempt_number": attempt_number,
         "call_id": call["call_id"],
         "case_id": call["case_id"],
         "evaluator": manifest["evaluator"],
+        "execution_receipt_sha256": sha256_bytes(receipt_bytes),
         "item_id": call["item_id"],
         "judgment": judgment,
         "orientation": manifest["orientation"],
         "packet_sha256": call["packet_sha256"],
         "prompt_sha256": call["prompt_sha256"],
+        "provider_response_id": receipt["identity"]["provider_response_id"],
         "raw_response_sha256": sha256_bytes(response_bytes),
         "replicate_id": manifest["replicate_id"],
+        "request_sha256": receipt["request_sha256"],
         "schema_version": ATOMIC_ATTEMPT_SCHEMA_VERSION,
         "status": "valid" if judgment is not None else "invalid",
         "validation": validation,
     }
     write_once(output_root / "raw-response.bin", response_bytes)
+    write_once(output_root / "execution-receipt.json", receipt_bytes)
     write_json_once(output_root / "attempt.json", outcome)
     return outcome
 
@@ -550,13 +743,16 @@ def _validate_attempt(
             "call_id",
             "case_id",
             "evaluator",
+            "execution_receipt_sha256",
             "item_id",
             "judgment",
             "orientation",
             "packet_sha256",
             "prompt_sha256",
+            "provider_response_id",
             "raw_response_sha256",
             "replicate_id",
+            "request_sha256",
             "schema_version",
             "status",
             "validation",
@@ -581,12 +777,27 @@ def _validate_attempt(
     ):
         fail("ATTEMPT_IDENTITY_MISMATCH", "Atomic attempt identity is invalid")
     raw_path = attempt_path.parent / "raw-response.bin"
+    receipt_path = attempt_path.parent / "execution-receipt.json"
     try:
         raw_bytes = raw_path.read_bytes()
     except OSError as exc:
         fail("MISSING_ARTIFACT", "Atomic raw response is missing", error=str(exc))
     if sha256_bytes(raw_bytes) != attempt.get("raw_response_sha256"):
         fail("HASH_MISMATCH", "Atomic raw response hash changed")
+    receipt, receipt_bytes = _validate_execution_receipt(
+        receipt_path=receipt_path,
+        response_bytes=raw_bytes,
+        manifest=manifest,
+        manifest_file_sha256=sha256_bytes(canonical_json_bytes(manifest)),
+        call=call,
+    )
+    if (
+        sha256_bytes(receipt_bytes) != attempt.get("execution_receipt_sha256")
+        or receipt["identity"]["provider_response_id"]
+        != attempt.get("provider_response_id")
+        or receipt["request_sha256"] != attempt.get("request_sha256")
+    ):
+        fail("HASH_MISMATCH", "Atomic execution receipt binding changed")
     _load_call_packet(artifact_root=artifact_root, call=call)
     judgment, validation = _assess_response(
         response_bytes=raw_bytes,
@@ -625,6 +836,7 @@ def resolve_orientation(
     retried_count = 0
     total_attempts = 0
     invalid_codes: Counter[str] = Counter()
+    provider_response_ids: set[str] = set()
     for sequence in range(1, EXPECTED_ITEM_COUNT + 1):
         call = calls[sequence]
         entries = sorted(
@@ -668,6 +880,15 @@ def resolve_orientation(
                 )
             selected = entries[1]
         total_attempts += len(entries)
+        entry_response_ids = [entry[0]["provider_response_id"] for entry in entries]
+        if any(
+            response_id in provider_response_ids for response_id in entry_response_ids
+        ):
+            fail(
+                "DUPLICATE_PROVIDER_RESPONSE",
+                "Each physical atomic attempt needs a unique provider response ID",
+            )
+        provider_response_ids.update(entry_response_ids)
         selected_attempt, _ = selected
         judgments.append(
             {
@@ -682,6 +903,7 @@ def resolve_orientation(
                     sha256_bytes(attempt_bytes) for _, attempt_bytes in entries
                 ],
                 "call_id": call["call_id"],
+                "provider_response_ids": entry_response_ids,
                 "selected_attempt_number": selected_attempt["attempt_number"],
             }
         )
@@ -723,12 +945,16 @@ def _parser() -> argparse.ArgumentParser:
     prepare_parser = subparsers.add_parser("prepare")
     prepare_parser.add_argument("--bundle", type=Path, required=True)
     prepare_parser.add_argument("--replicate-id", required=True)
+    prepare_parser.add_argument(
+        "--reasoning-effort", choices=sorted(APPROVED_ATOMIC_EFFORTS)
+    )
     prepare_parser.add_argument("--output-root", type=Path, required=True)
     attempt_parser = subparsers.add_parser("record-attempt")
     attempt_parser.add_argument("--manifest", type=Path, required=True)
     attempt_parser.add_argument("--call-sequence", type=int, required=True)
     attempt_parser.add_argument("--attempt-number", type=int, required=True)
     attempt_parser.add_argument("--response", type=Path, required=True)
+    attempt_parser.add_argument("--execution-receipt", type=Path, required=True)
     attempt_parser.add_argument("--output-root", type=Path, required=True)
     resolve_parser = subparsers.add_parser("resolve-orientation")
     resolve_parser.add_argument("--manifest", type=Path, required=True)
@@ -745,6 +971,7 @@ def main(argv: list[str] | None = None) -> int:
                 bundle_path=args.bundle,
                 replicate_id=args.replicate_id,
                 output_root=args.output_root,
+                reasoning_effort=args.reasoning_effort,
             )
             displayed_result = {
                 key: result[key]
@@ -764,6 +991,7 @@ def main(argv: list[str] | None = None) -> int:
                 call_sequence=args.call_sequence,
                 attempt_number=args.attempt_number,
                 response_path=args.response,
+                execution_receipt_path=args.execution_receipt,
                 output_root=args.output_root,
             )
             displayed_result = {
