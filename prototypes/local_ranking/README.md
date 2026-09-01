@@ -239,6 +239,25 @@ pass the canonical `response.json` through `operational_judge finalize`. The 202
 ZDR statement has expired, so only synthetic payloads may be sent until the v1.6 data-retention
 gate is satisfied.
 
+When a frozen evaluator profile needs repeated mirror calibration, run exactly three fresh pairs
+and aggregate every result rather than retrying until one pair passes. Each replicate supplies two
+validated traces and their matching direct-transport receipts:
+
+```bash
+python -m prototypes.local_ranking.evaluator_profile_calibration \
+  --model deepseek-v4-flash \
+  --reasoning-effort high \
+  --replicate r1 <r1-o1-trace> <r1-o2-trace> <r1-o1-receipt> <r1-o2-receipt> \
+  --replicate r2 <r2-o1-trace> <r2-o2-trace> <r2-o1-receipt> <r2-o2-receipt> \
+  --replicate r3 <r3-o1-trace> <r3-o2-trace> <r3-o1-receipt> <r3-o2-receipt> \
+  --output <new-profile-calibration-result.json>
+```
+
+The v1.0 aggregator requires one frozen request/bundle per orientation, six unique provider
+response IDs, all three pairs at least 22/24 stable, at least two pairs at the original 23/24 gate,
+and pooled stability at least 69/72. Calibration output remains anonymous spent diagnostic
+evidence and must never be used as a candidate vote.
+
 After all four orientations pass, reduce them with:
 
 ```bash
