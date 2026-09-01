@@ -304,6 +304,10 @@ Pro/max 仍达不到 gates，失败就更能归因于 rubric 含糊、证据确�
 实时 smoke 的 commit、preparation hashes、quota snapshot、receipts、latency/usage/cost 和 PASS/FAIL 另写入冻结的
 transport smoke protocol/result，不能由本地 mock PASS 代替。
 
+实时 `transport-smoke-001` 随后按冻结 protocol 一次 PASS：4/4 receipts 有效且 response IDs 唯一，整批
+wall 2.911 秒、total 793 tokens、receipt cost 合计 `0`，因此 semantic scheduler max concurrency 冻结为 4。
+完整 evidence 见 [atomic transport smoke result v2.0](local-ranking-atomic-transport-smoke-result-v2.0.md)。
+
 总 input 增长不设为失败门槛：4.72% 是重复短 instruction 的明确成本，但它换取每次只处理一个独立判断，并
 允许 scheduler 并发。若 live token/cost 证明该成本不可接受，再以 atomic 结果为 reference 对 micro-batch 做独立
 比较；不能在取得证据前因为总 bytes 略增而退回已知不可靠的 24-item response。

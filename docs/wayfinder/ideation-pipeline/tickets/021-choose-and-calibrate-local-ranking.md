@@ -36,6 +36,7 @@ blocked_by:
 - [Local-ranking evaluator qualification protocol v1.1（segment-reference schema）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.1.md)
 - [Local-ranking atomic evaluator contract v2.0（approved adversarial redesign）](../../../prototypes/local-ranking-atomic-evaluator-contract-v2.0.md)
 - [Local-ranking atomic transport smoke protocol v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-v2.0.md)
+- [Local-ranking atomic transport smoke result v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-result-v2.0.md)
 
 ## Question
 
@@ -89,7 +90,9 @@ SSE 与 `max_tokens=16384`，receipt 逐 call 绑定 manifest/prompt/request/res
 aggregator 禁止复用 provider response ID。4-call concurrency smoke scheduler 及 fail-closed probe validator 已
 加入；targeted tests 21/21 PASS，并已用 historical Pro/max bundle 做 24-call Pro/high prepare-only integration。
 
-下一步先以冻结 commit/manifest 发起 4 个 transport-only Pro/high probes；它只决定 concurrency 4 是否可用，
-不产生 semantic votes。Smoke PASS 后才按 Pro/high → Pro/max 的顺序运行 spent calibration；首个合格 DeepSeek
-profile 再与 Kimi K3 使用全新 atomic calls 做 panel qualification。Calibration votes 不得复用为 candidate
-votes，ticket 继续保持 open。
+冻结的 4-call transport-only Pro/high smoke 已一次 PASS：4/4 HTTP/SSE/closed JSON/receipts 有效，provider
+response IDs 唯一，整批 wall 2.911s、总计 793 tokens、receipt cost 合计 `0`。因此 semantic scheduler 的并发
+上限冻结为 4；probe 不产生 semantic votes。下一步冻结六个 orientation manifests、144 logical-call budget、
+invalid retry state machine 与 early-stop receipts，再按 Pro/high → Pro/max 运行 spent calibration；首个合格
+DeepSeek profile 再与 Kimi K3 使用全新 atomic calls 做 panel qualification。Calibration votes 不得复用为
+candidate votes，ticket 继续保持 open。
