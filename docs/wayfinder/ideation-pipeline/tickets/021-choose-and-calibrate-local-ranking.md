@@ -35,6 +35,7 @@ blocked_by:
 - [Local-ranking evaluator qualification protocol v1.0.1（quote contract correction）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.1.md)
 - [Local-ranking evaluator qualification protocol v1.1（segment-reference schema）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.1.md)
 - [Local-ranking atomic evaluator contract v2.0（approved adversarial redesign）](../../../prototypes/local-ranking-atomic-evaluator-contract-v2.0.md)
+- [Local-ranking atomic transport smoke protocol v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-v2.0.md)
 
 ## Question
 
