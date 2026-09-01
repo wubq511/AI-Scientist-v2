@@ -24,8 +24,29 @@ from .opencode_go_chat import (
 )
 from .operational_judge import BUNDLE_SCHEMA_VERSION, EVALUATORS
 
-PREPARATION_SCHEMA_VERSION = "local-ranking-opencode-go-stream-preparation-v1.0"
+LEGACY_PREPARATION_SCHEMA_VERSION = "local-ranking-opencode-go-stream-preparation-v1.0"
+PREPARATION_SCHEMA_VERSION = "local-ranking-opencode-go-stream-preparation-v1.1"
 RECEIPT_SCHEMA_VERSION = "local-ranking-opencode-go-chat-stream-receipt-v1.0"
+ALLOWED_FLASH_REASONING_EFFORTS = {"high", "max"}
+
+
+def _flash_reasoning_effort(bundle: dict[str, Any]) -> str:
+    evaluator = bundle.get("evaluator")
+    expected = EVALUATORS["judge-deepseek"]
+    if not isinstance(evaluator, dict):
+        fail("INVALID_ARTIFACT", "Judge bundle evaluator is invalid")
+    reasoning_effort = evaluator.get("reasoning_effort")
+    normalized = dict(evaluator)
+    normalized["reasoning_effort"] = expected["reasoning_effort"]
+    if (
+        normalized != expected
+        or reasoning_effort not in ALLOWED_FLASH_REASONING_EFFORTS
+    ):
+        fail(
+            "INVALID_ARTIFACT",
+            "Judge bundle is not an approved OpenCode Go DeepSeek Flash profile",
+        )
+    return reasoning_effort
 
 
 def prepare(
@@ -33,14 +54,12 @@ def prepare(
 ) -> dict[str, Any]:
     bundle, bundle_bytes = _read_canonical_object(bundle_path, label="judge bundle")
     prompt, prompt_bytes = _read_utf8(prompt_path, label="judge prompt")
-    if (
-        bundle.get("schema_version") != BUNDLE_SCHEMA_VERSION
-        or bundle.get("evaluator") != EVALUATORS["judge-deepseek"]
-    ):
+    if bundle.get("schema_version") != BUNDLE_SCHEMA_VERSION:
         fail(
             "INVALID_ARTIFACT",
-            "Judge bundle is not the frozen OpenCode Go DeepSeek profile",
+            "Judge bundle is not the frozen OpenCode Go DeepSeek schema",
         )
+    reasoning_effort = _flash_reasoning_effort(bundle)
     expected_bundle_hash = bundle.get("bundle_sha256")
     without_hash = {
         key: value for key, value in bundle.items() if key != "bundle_sha256"
@@ -57,7 +76,7 @@ def prepare(
         "max_tokens": MAX_TOKENS,
         "messages": [{"content": prompt, "role": "user"}],
         "model": MODEL_ID,
-        "reasoning_effort": "high",
+        "reasoning_effort": reasoning_effort,
         "response_format": {"type": "json_object"},
         "stream": True,
     }
@@ -71,6 +90,7 @@ def prepare(
         },
         "model": MODEL_ID,
         "provider": "opencode-go",
+        "reasoning_effort": reasoning_effort,
         "schema_version": PREPARATION_SCHEMA_VERSION,
         "status": "ready_for_synthetic_or_spent_stream_qualification",
         "transport": "opencode-go-chat-completions-json-object-sse-candidate",
@@ -345,8 +365,20 @@ def _validate_preparation(
     prompt, prompt_bytes = _read_utf8(
         preparation_root / "prompt.txt", label="stream prompt"
     )
+    schema_version = manifest.get("schema_version")
+    request_effort = request.get("reasoning_effort")
+    legacy_high_profile = (
+        schema_version == LEGACY_PREPARATION_SCHEMA_VERSION
+        and "reasoning_effort" not in manifest
+        and request_effort == "high"
+    )
+    profile_aware_manifest = (
+        schema_version == PREPARATION_SCHEMA_VERSION
+        and manifest.get("reasoning_effort") == request_effort
+        and request_effort in ALLOWED_FLASH_REASONING_EFFORTS
+    )
     if (
-        manifest.get("schema_version") != PREPARATION_SCHEMA_VERSION
+        not (legacy_high_profile or profile_aware_manifest)
         or manifest.get("status") != "ready_for_synthetic_or_spent_stream_qualification"
         or manifest.get("endpoint") != API_URL
         or manifest.get("model") != MODEL_ID
@@ -364,7 +396,7 @@ def _validate_preparation(
         or request.get("messages") != [{"content": prompt, "role": "user"}]
         or request.get("model") != MODEL_ID
         or request.get("max_tokens") != MAX_TOKENS
-        or request.get("reasoning_effort") != "high"
+        or request_effort not in ALLOWED_FLASH_REASONING_EFFORTS
         or request.get("response_format") != {"type": "json_object"}
         or request.get("stream") is not True
     ):
@@ -379,7 +411,7 @@ def execute(
     api_key_env: str,
     kimi_config_path: Path | None,
 ) -> dict[str, Any]:
-    manifest, manifest_bytes, _, request_bytes, _, _ = _validate_preparation(
+    manifest, manifest_bytes, request, request_bytes, _, _ = _validate_preparation(
         preparation_root=preparation_root
     )
     key = _api_key(env_name=api_key_env, kimi_config_path=kimi_config_path)
@@ -480,7 +512,7 @@ def execute(
         "status": "pass",
         "transport_qualification": {
             "json_object_accepted": True,
-            "reasoning_effort_requested": "high",
+            "reasoning_effort_requested": request["reasoning_effort"],
             "reasoning_execution_proven": False,
             "stream_completed": True,
             "streaming_requested": True,

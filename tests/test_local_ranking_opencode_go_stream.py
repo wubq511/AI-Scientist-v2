@@ -4,10 +4,12 @@ import json
 
 import pytest
 
+from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
 from prototypes.local_ranking.errors import HarnessError
 from prototypes.local_ranking.opencode_go_chat import prepare_synthetic
 from prototypes.local_ranking.opencode_go_stream import (
     _extract_stream_response,
+    _validate_preparation,
     prepare,
 )
 
@@ -183,3 +185,81 @@ def test_prepare_stream_request_changes_only_transport_shape(tmp_path) -> None:
     assert manifest["transport"] == (
         "opencode-go-chat-completions-json-object-sse-candidate"
     )
+
+
+def test_prepare_stream_request_binds_flash_max_profile(tmp_path) -> None:
+    base_protocol = tmp_path / "base.md"
+    evaluator_protocol = tmp_path / "evaluator.md"
+    base_protocol.write_text("synthetic base protocol\n")
+    evaluator_protocol.write_text("synthetic evaluator protocol\n")
+    synthetic_root = tmp_path / "synthetic"
+    prepare_synthetic(
+        base_protocol_path=base_protocol,
+        evaluator_protocol_path=evaluator_protocol,
+        output_root=synthetic_root,
+    )
+    bundle_path = synthetic_root / "input/bundle.json"
+    old_bundle_bytes = bundle_path.read_bytes()
+    bundle = json.loads(old_bundle_bytes)
+    bundle["evaluator"]["reasoning_effort"] = "max"
+    bundle_without_hash = {
+        key: value for key, value in bundle.items() if key != "bundle_sha256"
+    }
+    bundle["bundle_sha256"] = sha256_bytes(canonical_json_bytes(bundle_without_hash))
+    new_bundle_bytes = canonical_json_bytes(bundle)
+    bundle_path.write_bytes(new_bundle_bytes)
+    prompt_path = synthetic_root / "input/prompt.txt"
+    prompt_path.write_bytes(
+        prompt_path.read_bytes().replace(old_bundle_bytes, new_bundle_bytes)
+    )
+
+    output_root = tmp_path / "stream"
+    manifest = prepare(
+        bundle_path=bundle_path,
+        prompt_path=prompt_path,
+        output_root=output_root,
+    )
+    request = json.loads((output_root / "request.json").read_text())
+    validated = _validate_preparation(preparation_root=output_root)
+
+    assert request["reasoning_effort"] == "max"
+    assert manifest["bundle_sha256"] == sha256_bytes(new_bundle_bytes)
+    assert manifest["reasoning_effort"] == "max"
+    assert manifest["schema_version"].endswith("v1.1")
+    assert validated[2]["reasoning_effort"] == "max"
+
+    manifest["reasoning_effort"] = "high"
+    (output_root / "manifest.json").write_bytes(canonical_json_bytes(manifest))
+    with pytest.raises(HarnessError) as raised:
+        _validate_preparation(preparation_root=output_root)
+    assert raised.value.code == "INVALID_ARTIFACT"
+
+
+def test_prepare_stream_request_rejects_unapproved_effort(tmp_path) -> None:
+    base_protocol = tmp_path / "base.md"
+    evaluator_protocol = tmp_path / "evaluator.md"
+    base_protocol.write_text("synthetic base protocol\n")
+    evaluator_protocol.write_text("synthetic evaluator protocol\n")
+    synthetic_root = tmp_path / "synthetic"
+    prepare_synthetic(
+        base_protocol_path=base_protocol,
+        evaluator_protocol_path=evaluator_protocol,
+        output_root=synthetic_root,
+    )
+    bundle_path = synthetic_root / "input/bundle.json"
+    bundle = json.loads(bundle_path.read_bytes())
+    bundle["evaluator"]["reasoning_effort"] = "low"
+    bundle_without_hash = {
+        key: value for key, value in bundle.items() if key != "bundle_sha256"
+    }
+    bundle["bundle_sha256"] = sha256_bytes(canonical_json_bytes(bundle_without_hash))
+    bundle_path.write_bytes(canonical_json_bytes(bundle))
+
+    with pytest.raises(HarnessError) as raised:
+        prepare(
+            bundle_path=bundle_path,
+            prompt_path=synthetic_root / "input/prompt.txt",
+            output_root=tmp_path / "stream",
+        )
+
+    assert raised.value.code == "INVALID_ARTIFACT"
