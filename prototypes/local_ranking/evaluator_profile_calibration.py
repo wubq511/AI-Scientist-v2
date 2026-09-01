@@ -13,6 +13,9 @@ from .operational_judge import TRACE_SCHEMA_VERSION
 
 CALIBRATION_SCHEMA_VERSION = "local-ranking-evaluator-profile-calibration-v1.0"
 OPENCODE_RECEIPT_SCHEMA_VERSION = "local-ranking-opencode-go-chat-receipt-v1.0"
+OPENCODE_STREAM_RECEIPT_SCHEMA_VERSION = (
+    "local-ranking-opencode-go-chat-stream-receipt-v1.0"
+)
 EXPECTED_ITEM_COUNT = 24
 EXPECTED_REPLICATE_COUNT = 3
 MIN_PAIR_STABILITY = 22
@@ -119,11 +122,17 @@ def _normalize_mirrored_winner(winner: str) -> str:
 
 def _validate_receipt(
     receipt: dict[str, Any], *, model: str, reasoning_effort: str
-) -> tuple[str, str]:
+) -> tuple[str, str, str]:
     identity = receipt.get("identity")
     qualification = receipt.get("transport_qualification")
+    schema_version = receipt.get("schema_version")
+    is_stream = schema_version == OPENCODE_STREAM_RECEIPT_SCHEMA_VERSION
     if (
-        receipt.get("schema_version") != OPENCODE_RECEIPT_SCHEMA_VERSION
+        schema_version
+        not in {
+            OPENCODE_RECEIPT_SCHEMA_VERSION,
+            OPENCODE_STREAM_RECEIPT_SCHEMA_VERSION,
+        }
         or receipt.get("status") != "pass"
         or receipt.get("provider") != "opencode-go"
         or receipt.get("http_status") != 200
@@ -132,6 +141,14 @@ def _validate_receipt(
         or not isinstance(qualification, dict)
         or qualification.get("reasoning_effort_requested") != reasoning_effort
         or qualification.get("json_object_accepted") is not True
+        or (
+            is_stream
+            and (
+                qualification.get("streaming_requested") is not True
+                or qualification.get("stream_completed") is not True
+                or identity.get("finish_reason") != "stop"
+            )
+        )
     ):
         fail("INVALID_RECEIPT", "OpenCode Go execution receipt is incompatible")
     response_id = identity.get("provider_response_id")
@@ -143,7 +160,7 @@ def _validate_receipt(
         or len(request_sha256) != 64
     ):
         fail("INVALID_RECEIPT", "OpenCode Go receipt identity is incomplete")
-    return response_id, request_sha256
+    return response_id, request_sha256, "sse" if is_stream else "non_streaming"
 
 
 def aggregate(
@@ -165,6 +182,7 @@ def aggregate(
     seen_response_ids: set[str] = set()
     bundle_hashes: dict[int, set[str]] = {1: set(), 2: set()}
     request_hashes: dict[int, set[str]] = {1: set(), 2: set()}
+    transport_modes: set[str] = set()
     pair_results: list[dict[str, Any]] = []
     input_files: dict[str, str] = {}
 
@@ -205,9 +223,10 @@ def aggregate(
                     orientation=orientation,
                 )
             _validate_result_receipt(result, trace=trace, trace_bytes=trace_bytes)
-            response_id, request_hash = _validate_receipt(
+            response_id, request_hash, transport_mode = _validate_receipt(
                 receipt, model=model, reasoning_effort=reasoning_effort
             )
+            transport_modes.add(transport_mode)
             if response_id in seen_response_ids:
                 fail(
                     "DUPLICATE_PROVIDER_RESPONSE",
@@ -266,6 +285,11 @@ def aggregate(
             "INPUT_IDENTITY_MISMATCH",
             "Replicates do not use one frozen request per orientation",
         )
+    if len(transport_modes) != 1:
+        fail(
+            "TRANSPORT_MISMATCH",
+            "All profile calibration calls must use one frozen transport",
+        )
     pooled_stable = sum(pair["stable_count"] for pair in pair_results)
     pairs_at_original_gate = sum(1 for pair in pair_results if pair["at_original_gate"])
     gates = {
@@ -299,6 +323,7 @@ def aggregate(
         },
         "schema_version": CALIBRATION_SCHEMA_VERSION,
         "status": "pass" if passed else "fail",
+        "transport": next(iter(transport_modes)),
     }
     write_once(output_path, canonical_json_bytes(result))
     return result

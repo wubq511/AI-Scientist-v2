@@ -157,3 +157,29 @@ def test_profile_rejects_duplicate_provider_response(tmp_path) -> None:
         )
 
     assert raised.value.code == "DUPLICATE_PROVIDER_RESPONSE"
+
+
+def test_profile_accepts_one_frozen_completed_sse_transport(tmp_path) -> None:
+    replicates = _replicates(tmp_path, (0, 0, 0))
+    for replicate in replicates:
+        for orientation in (1, 2):
+            receipt_path = replicate[f"orientation_{orientation}_receipt"]
+            receipt = json.loads(receipt_path.read_text())
+            receipt["schema_version"] = (
+                "local-ranking-opencode-go-chat-stream-receipt-v1.0"
+            )
+            receipt["identity"]["finish_reason"] = "stop"
+            receipt["transport_qualification"].update(
+                {"stream_completed": True, "streaming_requested": True}
+            )
+            _write(receipt_path, receipt)
+
+    result = aggregate(
+        model="deepseek-v4-flash",
+        reasoning_effort="high",
+        replicates=replicates,
+        output_path=tmp_path / "result.json",
+    )
+
+    assert result["status"] == "pass"
+    assert result["transport"] == "sse"

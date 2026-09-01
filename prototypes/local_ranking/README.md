@@ -239,6 +239,28 @@ pass the canonical `response.json` through `operational_judge finalize`. The 202
 ZDR statement has expired, so only synthetic payloads may be sent until the v1.6 data-retention
 gate is satisfied.
 
+For a separately approved SSE transport qualification, derive a streaming request from the same
+frozen bundle and prompt. This changes only `stream` from `false` to `true`; it does not add
+`stream_options`, alter the evaluator prompt, or relax the local validator:
+
+```bash
+python -m prototypes.local_ranking.opencode_go_stream prepare \
+  --bundle <judge-deepseek-bundle.json> \
+  --prompt <matching-judge-deepseek-prompt.txt> \
+  --output-root <new-opencode-go-stream-preparation>
+
+python -m prototypes.local_ranking.opencode_go_stream execute \
+  --preparation-root <approved-opencode-go-stream-preparation> \
+  --output-root <new-private-opencode-go-stream-execution> \
+  --kimi-config ~/.kimi-code/config.toml
+```
+
+The streaming adapter preserves the complete SSE body, parsed chunks, safe headers, timestamps,
+request identity, and provider response identity. It fails closed on malformed SSE, mixed response
+IDs/models, refusal/tools, abnormal finish reasons, content after the terminal chunk, missing
+`[DONE]`, incomplete JSON, or a local judge validation failure. A streaming receipt may omit usage
+when the provider sends no usage chunk; absence is recorded, never reconstructed.
+
 When a frozen evaluator profile needs repeated mirror calibration, run exactly three fresh pairs
 and aggregate every result rather than retrying until one pair passes. Each replicate supplies two
 validated traces and their matching direct-transport receipts:
