@@ -388,6 +388,7 @@ python -m prototypes.local_ranking.atomic_profile snapshot-usage \
 
 python -m prototypes.local_ranking.atomic_profile prepare \
   --source-commit <full-commit-sha> \
+  --reasoning-effort <high-or-max> \
   --usage-snapshot <usage-snapshot.json> \
   --smoke-result-sha256 <transport-smoke-result-sha256> \
   --replicate r1 <r1-o1-atomic> <r1-o1-prep> <r1-o2-atomic> <r1-o2-prep> \

@@ -157,6 +157,7 @@ def prepare_profile(
     *,
     replicates: list[dict[str, Path | str]],
     source_commit: str,
+    reasoning_effort: str,
     usage_snapshot_path: Path,
     smoke_result_sha256: str,
     output_path: Path,
@@ -165,6 +166,8 @@ def prepare_profile(
         fail("INVALID_SOURCE_COMMIT", "Profile source commit must be a full SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", smoke_result_sha256):
         fail("INVALID_SMOKE_BINDING", "Smoke result SHA-256 is invalid")
+    if reasoning_effort not in {"high", "max"}:
+        fail("PROFILE_MISMATCH", "Profile reasoning effort must be high or max")
     if len(replicates) != EXPECTED_REPLICATES:
         fail("INVALID_PROFILE_INPUT", "Profile requires exactly three replicates")
     usage_snapshot, usage_snapshot_bytes = _validate_usage_snapshot(usage_snapshot_path)
@@ -241,9 +244,12 @@ def prepare_profile(
         )
     if evaluator is None or (
         evaluator.get("model_alias") != APPROVED_ATOMIC_MODEL_ALIAS
-        or evaluator.get("reasoning_effort") != "high"
+        or evaluator.get("reasoning_effort") != reasoning_effort
     ):
-        fail("PROFILE_MISMATCH", "First atomic profile must be DeepSeek Pro/high")
+        fail(
+            "PROFILE_MISMATCH",
+            "Atomic profile evaluator does not match the requested effort",
+        )
     if any(len(values) != 1 for values in source_hashes.values()):
         fail(
             "INPUT_IDENTITY_MISMATCH",
@@ -275,7 +281,7 @@ def prepare_profile(
             for orientation, values in source_hashes.items()
         },
         "source_commit": source_commit,
-        "status": "ready_for_pro_high_calibration",
+        "status": f"ready_for_pro_{reasoning_effort}_calibration",
         "usage_snapshot": usage_snapshot,
         "usage_snapshot_sha256": sha256_bytes(usage_snapshot_bytes),
     }
@@ -294,6 +300,7 @@ def _parser() -> argparse.ArgumentParser:
     usage.add_argument("--kimi-config", type=Path)
     prepare = subparsers.add_parser("prepare")
     prepare.add_argument("--source-commit", required=True)
+    prepare.add_argument("--reasoning-effort", choices=("high", "max"), required=True)
     prepare.add_argument("--usage-snapshot", type=Path, required=True)
     prepare.add_argument("--smoke-result-sha256", required=True)
     prepare.add_argument(
@@ -330,6 +337,7 @@ def main(argv: list[str] | None = None) -> int:
             result = prepare_profile(
                 replicates=replicates,
                 source_commit=args.source_commit,
+                reasoning_effort=args.reasoning_effort,
                 usage_snapshot_path=args.usage_snapshot,
                 smoke_result_sha256=args.smoke_result_sha256,
                 output_path=args.output,

@@ -617,6 +617,7 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
                 ),
                 replicate_id=replicate_id,
                 output_root=atomic_root,
+                reasoning_effort="max",
             )
             atomic_path = atomic_root / "private" / "manifest.json"
             preparation_root = tmp_path / replicate_id / f"o{orientation}" / "transport"
@@ -654,6 +655,7 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
     profile = prepare_profile(
         replicates=replicates,
         source_commit="a" * 40,
+        reasoning_effort="max",
         usage_snapshot_path=usage_snapshot,
         smoke_result_sha256="b" * 64,
         output_path=tmp_path / "profile.json",
@@ -667,6 +669,7 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
     }
     assert len(profile["replicates"]) == 3
     assert all(len(item["orientations"]) == 2 for item in profile["replicates"])
+    assert profile["status"] == "ready_for_pro_max_calibration"
 
 
 def test_unknown_handle_is_machine_detectable_invalid(tmp_path: Path) -> None:
