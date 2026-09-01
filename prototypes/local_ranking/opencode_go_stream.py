@@ -205,6 +205,16 @@ def _extract_stream_response(
                 line=exc.lineno,
                 column=exc.colno,
             )
+        if (
+            not done_received
+            and isinstance(chunk, dict)
+            and set(chunk) == {"choices", "cost"}
+            and chunk.get("choices") == []
+        ):
+            fail(
+                "STREAM_INCOMPLETE",
+                "OpenCode Go billing sidecar arrived before [DONE]",
+            )
         if done_received:
             if (
                 event_index != len(events) - 1

@@ -160,6 +160,15 @@ def test_extract_stream_rejects_cumulative_usage_regression() -> None:
     assert raised.value.code == "INVALID_PROVIDER_RESPONSE"
 
 
+def test_extract_stream_classifies_billing_before_done_as_incomplete() -> None:
+    raw_stream = _successful_stream().replace(_event("[DONE]"), b"")
+
+    with pytest.raises(HarnessError) as raised:
+        _extract_stream_response(raw_stream)
+
+    assert raised.value.code == "STREAM_INCOMPLETE"
+
+
 def test_prepare_stream_request_changes_only_transport_shape(tmp_path) -> None:
     base_protocol = tmp_path / "base.md"
     evaluator_protocol = tmp_path / "evaluator.md"
