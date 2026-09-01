@@ -50,9 +50,9 @@ def _chunk(
 def _successful_stream() -> bytes:
     terminal = _chunk(content="", finish_reason="stop")
     terminal["usage"] = {
-        "completion_tokens": 20,
+        "completion_tokens": 19,
         "prompt_tokens": 10,
-        "total_tokens": 30,
+        "total_tokens": 29,
     }
     usage_enrichment = {
         "choices": [],
@@ -94,7 +94,8 @@ def test_extract_stream_requires_terminal_done_and_rebuilds_json() -> None:
     }
     assert identity == {
         "cost": "0",
-        "created": 1,
+        "created_first": 1,
+        "created_last": 1,
         "finish_reason": "stop",
         "model": "deepseek-v4-flash",
         "provider_response_id": "chatcmpl-stream-test",
@@ -126,6 +127,10 @@ def test_extract_stream_requires_terminal_done_and_rebuilds_json() -> None:
             "PROVIDER_IDENTITY_MISMATCH",
         ),
         (
+            _successful_stream().replace(b'"created":1', b'"created":2', 1),
+            "PROVIDER_IDENTITY_MISMATCH",
+        ),
+        (
             _successful_stream() + _event({"choices": [], "cost": "1"}),
             "INVALID_SSE",
         ),
@@ -138,6 +143,19 @@ def test_extract_stream_rejects_incomplete_or_wrong_terminal_state(
         _extract_stream_response(raw_stream)
 
     assert raised.value.code == expected_code
+
+
+def test_extract_stream_rejects_cumulative_usage_regression() -> None:
+    raw_stream = (
+        _successful_stream()
+        .replace(b'"completion_tokens":20', b'"completion_tokens":18', 1)
+        .replace(b'"total_tokens":30', b'"total_tokens":28', 1)
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        _extract_stream_response(raw_stream)
+
+    assert raised.value.code == "INVALID_PROVIDER_RESPONSE"
 
 
 def test_prepare_stream_request_changes_only_transport_shape(tmp_path) -> None:

@@ -128,17 +128,23 @@ def _merge_usage(
 ) -> dict[str, int]:
     if current is None:
         return incoming
+    if (
+        current["prompt_tokens"] != incoming["prompt_tokens"]
+        or incoming["completion_tokens"] < current["completion_tokens"]
+        or incoming["total_tokens"] < current["total_tokens"]
+    ):
+        fail("INVALID_PROVIDER_RESPONSE", "Cumulative stream usage regressed")
+    merged = dict(incoming)
     core_keys = {"completion_tokens", "prompt_tokens", "total_tokens"}
-    if any(current.get(key) != incoming.get(key) for key in core_keys):
-        fail("INVALID_PROVIDER_RESPONSE", "Stream usage totals changed between chunks")
-    merged = dict(current)
-    for key, value in incoming.items():
-        if key in merged and merged[key] != value:
+    for key, value in current.items():
+        if key in core_keys:
+            continue
+        if key in incoming and incoming[key] != value:
             fail(
                 "INVALID_PROVIDER_RESPONSE",
                 "Stream usage detail changed between chunks",
             )
-        merged[key] = value
+        merged.setdefault(key, value)
     return merged
 
 
@@ -155,7 +161,8 @@ def _extract_stream_response(
     chunks: list[dict[str, Any]] = []
     content_parts: list[str] = []
     response_id: str | None = None
-    created: int | None = None
+    created_first: int | None = None
+    created_last: int | None = None
     usage: dict[str, int] | None = None
     cost: str | None = None
     terminal_count = 0
@@ -221,12 +228,19 @@ def _extract_stream_response(
                 )
             if response_id is None:
                 response_id = chunk_id
-                created = chunk_created
-            elif response_id != chunk_id or created != chunk_created:
+                created_first = chunk_created
+                created_last = chunk_created
+            elif (
+                response_id != chunk_id
+                or created_last is None
+                or chunk_created < created_last
+            ):
                 fail(
                     "PROVIDER_IDENTITY_MISMATCH",
                     "Stream chunk response identity changed",
                 )
+            else:
+                created_last = chunk_created
             choice = choices[0]
             if not isinstance(choice, dict) or choice.get("index") != 0:
                 fail("INVALID_PROVIDER_RESPONSE", "Stream choice is invalid")
@@ -285,7 +299,7 @@ def _extract_stream_response(
             done_received=done_received,
             terminal_count=terminal_count,
         )
-    if response_id is None or created is None:
+    if response_id is None or created_first is None or created_last is None:
         fail("PROVIDER_IDENTITY_MISMATCH", "OpenCode Go stream has no identity")
     content_text = "".join(content_parts)
     if not content_text:
@@ -303,7 +317,8 @@ def _extract_stream_response(
         fail("INVALID_PROVIDER_RESPONSE", "Stream output JSON must be an object")
     identity = {
         "cost": cost,
-        "created": created,
+        "created_first": created_first,
+        "created_last": created_last,
         "finish_reason": "stop",
         "model": MODEL_ID,
         "provider_response_id": response_id,
