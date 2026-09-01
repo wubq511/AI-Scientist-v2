@@ -280,6 +280,61 @@ response IDs, all three pairs at least 22/24 stable, at least two pairs at the o
 and pooled stability at least 69/72. Calibration output remains anonymous spent diagnostic
 evidence and must never be used as a candidate vote.
 
+The approved atomic v2 contract replaces the 24-judgment model response without modifying the
+historical v1.x path. Split one frozen source bundle into 24 single-item public prompts and one
+controller-private manifest with:
+
+```bash
+python -m prototypes.local_ranking.atomic_judge prepare \
+  --bundle <frozen-v1.2-source-bundle.json> \
+  --replicate-id <replicate-id> \
+  --output-root <new-atomic-preparation>
+```
+
+The public prompts contain only query text, visible evidence, and `L1-L3`/`R1-R3` handles. Item,
+paper, segment, bundle, and evaluator identities stay controller-owned. After each physical call,
+preserve and validate its unmodified response with:
+
+```bash
+python -m prototypes.local_ranking.atomic_judge record-attempt \
+  --manifest <atomic-preparation/private/manifest.json> \
+  --call-sequence <1-24> \
+  --attempt-number <1-2> \
+  --response <raw-response> \
+  --output-root <new-call-attempt>
+```
+
+Only machine-detectable invalid output may receive attempt 2, using exact identical request bytes.
+The resolver accepts the first valid response, rejects any retry after a valid response, expands
+handles through the private manifest, and fails after two invalid attempts:
+
+```bash
+python -m prototypes.local_ranking.atomic_judge resolve-orientation \
+  --manifest <atomic-preparation/private/manifest.json> \
+  --attempt <call-attempt-1/attempt.json> \
+  --attempt <call-attempt-2/attempt.json> \
+  --output-root <new-resolved-orientation>
+```
+
+Supply every attempt from all 24 calls; `--attempt` is repeated 24-48 times. Once three fresh
+mirror pairs are complete, aggregate their six resolved traces with:
+
+```bash
+python -m prototypes.local_ranking.atomic_calibration \
+  --replicate r1 <r1-o1-trace> <r1-o2-trace> \
+  --replicate r2 <r2-o1-trace> <r2-o2-trace> \
+  --replicate r3 <r3-o1-trace> <r3-o2-trace> \
+  --output <new-atomic-calibration-result.json>
+```
+
+Atomic v2 keeps only the direct gates: every replicate at least 22/24 mirror-stable, pooled at
+least 69/72, and no all-tie/all-both-bad replicate. The old “at least two replicates reach 23”
+gate is omitted because the retained gates mathematically imply it. First-attempt validity and
+retry rates are diagnostics, not additional admission thresholds. The local prototype does not
+yet bind provider receipts or execute live requests; freeze that adapter and a live execution
+manifest before any model call. See
+`docs/prototypes/local-ranking-atomic-evaluator-contract-v2.0.md` for the approved boundary.
+
 After all four orientations pass, reduce them with:
 
 ```bash

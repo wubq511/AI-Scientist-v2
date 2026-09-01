@@ -34,6 +34,7 @@ blocked_by:
 - [Local-ranking evaluator qualification protocol v1.0](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.md)
 - [Local-ranking evaluator qualification protocol v1.0.1（quote contract correction）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.0.1.md)
 - [Local-ranking evaluator qualification protocol v1.1（segment-reference schema）](../../../prototypes/local-ranking-evaluator-qualification-protocol-v1.1.md)
+- [Local-ranking atomic evaluator contract v2.0（approved adversarial redesign）](../../../prototypes/local-ranking-atomic-evaluator-contract-v2.0.md)
 
 ## Question
 
@@ -66,3 +67,23 @@ Stage A sensitivity gate 已通过：三套 qrels 都选择 E5 为 best single s
 后续对抗性审查确认：已批准 experiment matrix 完整执行，但旧 pointwise synthetic qrels 与旧 holdout 均不能回答 top-3 evidence-set 对 AI ideation 的直接效用，也不能再提供无偏 winner vote。v1.4 operational overlay 已获 Robert 授权并冻结为 fresh direct-payload evaluation：从未使用 eligible candidates 机械选择新的 12 cases（small/medium/large 各 4），重新走 Workshop/corpus/query approval chain；primary 只比较冻结 BM25/E5 top-3，不加入不等预算的 union/full-corpus arm。两个不同 model families 各做两次镜像、fresh、tool-less orientation；统计单位是 12 cases，采用 exact case-level sign-flip，并由 E5 承担非对称 promotion burden。未过门槛只支持保留 BM25 的 parsimony default，不支持宣称 BM25 科学胜出或两者等价。
 
 v1.4 harness 已实现 fresh sampler、operational formal-input path、formal input/selection/protocol/candidate payload hash binding、四路匿名镜像 bundle、`tools: []` judge contract、byte-exact quote validator、position/cross-model unresolved reducer、exact `2^12` randomization、case-cluster bootstrap 与 frozen promotion gates。69 个仓库测试通过；旧 holdout 的真实 BM25/E5 payload 已完成全链机械 dry-run，并被 reducer 强制标为 `spent_diagnostic_only`。下一阶段是在本 commit 后抽取 fresh batch 并完成新的 approval/query/formal-input chain，再交给 Windows 批量生成候选 payload。任何 Kimi/DeepSeek 正式 evaluator 调用仍需先报告 exact prompt size/context feasibility、调用上界与费用并取得单独批准。本 ticket 保持 open；在 fresh formal result 前不能写 Resolution、更新 map 或实现 production ranker。
+
+随后 full-size evaluator ladder 证明 monolithic 24-item response contract 本身不可靠：已观察到漏题、复制错误
+profile identity 与跨 item evidence 污染。这些失败不能区分文献判断能力和长 JSON bookkeeping 能力。Robert 已
+批准 v2 原子化重构及其对抗性审查：一个 logical call 只判断一个 item，模型只输出 winner/scores/omission/
+短 evidence handles/rationale；controller 持有全部 identity 与 provenance。每个 logical call 最多两次
+physical attempts，只对机器可判定 invalid 使用 exact-prompt retry，first valid 自动入账，禁止按 winner 或
+mirror 结果重跑。
+
+v2 删除了首轮 valid-rate、synthetic winner、分块 side flip、重复 evidence support，以及被其他门槛数学蕴含的
+“至少两组 23/24”等无独立保护作用的准入项。保留的 semantic gates 仅为每组至少 `22/24` mirror stable、
+pooled 至少 `69/72`，以及每组至少一个稳定 directional judgment。原子 packet/validator/attempt ledger/
+orientation resolver/calibration aggregator 已实现；16 项 targeted tests 在 Python 3.13/3.14 均通过。Historical
+spent Pro/max 两个 bundles 的 prepare-only dry run 生成 48/48 单题 prompts，public roots 不含 controller
+IDs，同输入重建 byte-identical；单 prompt 8,996–14,503 bytes，总 input bytes 比旧 prompts 增加 4.72%，该成本
+已披露但不作为无科学含义的阻塞门槛。
+
+当前下一阶段不是立即发模型请求：先为 atomic request 冻结 OpenCode Go receipt/response binding、exact
+max-token ceiling、concurrency smoke 与 live execution manifest。完成后才可按 Pro/high → Pro/max 的顺序运行
+spent calibration；首个合格 DeepSeek profile 再与 Kimi K3 使用全新 atomic calls 做 panel qualification。
+Calibration votes 不得复用为 candidate votes，ticket 继续保持 open。
