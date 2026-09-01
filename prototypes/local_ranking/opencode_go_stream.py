@@ -123,6 +123,25 @@ def _validated_cost(value: Any) -> str | None:
     return value
 
 
+def _merge_usage(
+    current: dict[str, int] | None, incoming: dict[str, int]
+) -> dict[str, int]:
+    if current is None:
+        return incoming
+    core_keys = {"completion_tokens", "prompt_tokens", "total_tokens"}
+    if any(current.get(key) != incoming.get(key) for key in core_keys):
+        fail("INVALID_PROVIDER_RESPONSE", "Stream usage totals changed between chunks")
+    merged = dict(current)
+    for key, value in incoming.items():
+        if key in merged and merged[key] != value:
+            fail(
+                "INVALID_PROVIDER_RESPONSE",
+                "Stream usage detail changed between chunks",
+            )
+        merged[key] = value
+    return merged
+
+
 def _extract_stream_response(
     raw_stream: bytes,
 ) -> tuple[
@@ -141,15 +160,14 @@ def _extract_stream_response(
     cost: str | None = None
     terminal_count = 0
     done_received = False
+    post_done_cost_received = False
 
     for event_index, event in enumerate(events):
         if event == "[DONE]":
-            if done_received or event_index != len(events) - 1:
-                fail("INVALID_SSE", "[DONE] must be the final unique SSE data event")
+            if done_received:
+                fail("INVALID_SSE", "[DONE] must be a unique SSE data event")
             done_received = True
             continue
-        if done_received:
-            fail("INVALID_SSE", "OpenCode Go stream continued after [DONE]")
         try:
             chunk = json.loads(event)
         except json.JSONDecodeError as exc:
@@ -160,6 +178,22 @@ def _extract_stream_response(
                 line=exc.lineno,
                 column=exc.colno,
             )
+        if done_received:
+            if (
+                event_index != len(events) - 1
+                or post_done_cost_received
+                or not isinstance(chunk, dict)
+                or set(chunk) != {"choices", "cost"}
+                or chunk.get("choices") != []
+            ):
+                fail(
+                    "INVALID_SSE",
+                    "Only one final billing sidecar may follow [DONE]",
+                )
+            cost = _validated_cost(chunk.get("cost"))
+            post_done_cost_received = True
+            chunks.append(chunk)
+            continue
         if (
             not isinstance(chunk, dict)
             or chunk.get("object") != "chat.completion.chunk"
@@ -237,9 +271,7 @@ def _extract_stream_response(
             )
         if chunk.get("usage") is not None:
             parsed_usage = _usage(chunk)
-            if usage is not None and usage != parsed_usage:
-                fail("INVALID_PROVIDER_RESPONSE", "Stream usage changed between chunks")
-            usage = parsed_usage
+            usage = _merge_usage(usage, parsed_usage)
         if chunk.get("cost") is not None:
             parsed_cost = _validated_cost(chunk.get("cost"))
             if cost is not None and cost != parsed_cost:
@@ -281,6 +313,7 @@ def _extract_stream_response(
         "data_event_count": len(events),
         "done_received": done_received,
         "keepalive_count": keepalive_count,
+        "post_done_cost_received": post_done_cost_received,
     }
     return draft, usage, identity, chunks, diagnostics
 

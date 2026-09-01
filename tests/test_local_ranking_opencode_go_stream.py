@@ -48,9 +48,14 @@ def _chunk(
 
 
 def _successful_stream() -> bytes:
-    usage = {
+    terminal = _chunk(content="", finish_reason="stop")
+    terminal["usage"] = {
+        "completion_tokens": 20,
+        "prompt_tokens": 10,
+        "total_tokens": 30,
+    }
+    usage_enrichment = {
         "choices": [],
-        "cost": "0",
         "created": 1,
         "id": "chatcmpl-stream-test",
         "model": "deepseek-v4-flash",
@@ -58,6 +63,7 @@ def _successful_stream() -> bytes:
         "usage": {
             "completion_tokens": 20,
             "prompt_tokens": 10,
+            "prompt_tokens_details": {"cached_tokens": 0},
             "total_tokens": 30,
         },
     }
@@ -66,9 +72,10 @@ def _successful_stream() -> bytes:
             b": keepalive\n\n",
             _event(_chunk(content='{"value":', role="assistant")),
             _event(_chunk(content="true}")),
-            _event(_chunk(finish_reason="stop")),
-            _event(usage),
+            _event(terminal),
+            _event(usage_enrichment),
             _event("[DONE]"),
+            _event({"choices": [], "cost": "0"}),
         )
     )
 
@@ -80,6 +87,7 @@ def test_extract_stream_requires_terminal_done_and_rebuilds_json() -> None:
 
     assert draft == {"value": True}
     assert usage == {
+        "cached_tokens": 0,
         "completion_tokens": 20,
         "prompt_tokens": 10,
         "total_tokens": 30,
@@ -91,19 +99,20 @@ def test_extract_stream_requires_terminal_done_and_rebuilds_json() -> None:
         "model": "deepseek-v4-flash",
         "provider_response_id": "chatcmpl-stream-test",
     }
-    assert len(chunks) == 4
+    assert len(chunks) == 5
     assert diagnostics == {
         "content_bytes": 14,
-        "data_event_count": 5,
+        "data_event_count": 6,
         "done_received": True,
         "keepalive_count": 1,
+        "post_done_cost_received": True,
     }
 
 
 @pytest.mark.parametrize(
     ("raw_stream", "expected_code"),
     [
-        (_successful_stream().replace(_event("[DONE]"), b""), "STREAM_INCOMPLETE"),
+        (_successful_stream().split(_event("[DONE]"))[0], "STREAM_INCOMPLETE"),
         (
             _successful_stream().replace(
                 b'"finish_reason":"stop"', b'"finish_reason":"other"'
@@ -115,6 +124,10 @@ def test_extract_stream_requires_terminal_done_and_rebuilds_json() -> None:
                 b'"model":"deepseek-v4-flash"', b'"model":"wrong-model"', 1
             ),
             "PROVIDER_IDENTITY_MISMATCH",
+        ),
+        (
+            _successful_stream() + _event({"choices": [], "cost": "1"}),
+            "INVALID_SSE",
         ),
     ],
 )
