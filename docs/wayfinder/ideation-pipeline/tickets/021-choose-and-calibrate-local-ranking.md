@@ -39,6 +39,7 @@ blocked_by:
 - [Local-ranking atomic transport smoke result v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-result-v2.0.md)
 - [Local-ranking atomic Pro/high calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-protocol-v2.0.md)
 - [Local-ranking atomic Pro/high calibration result v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-result-v2.0.md)
+- [Local-ranking atomic Pro/max calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.0.md)
 
 ## Question
 
