@@ -11,6 +11,7 @@ from prototypes.local_ranking.opencode_go_chat import (
     MAX_TOKENS,
     _extract_chat_response,
     prepare as prepare_opencode_go,
+    prepare_synthetic,
 )
 from prototypes.local_ranking.operational_judge import (
     finalize,
@@ -431,6 +432,36 @@ def test_extract_opencode_go_chat_requires_one_finished_json_choice() -> None:
     with pytest.raises(HarnessError) as raised:
         _extract_chat_response(response)
     assert raised.value.code == "PROVIDER_RESPONSE_FAILED"
+
+
+def test_prepare_opencode_go_synthetic_probe_contains_no_project_data(
+    tmp_path,
+) -> None:
+    base_protocol = tmp_path / "base.md"
+    evaluator_protocol = tmp_path / "evaluator.md"
+    base_protocol.write_text("synthetic base protocol\n")
+    evaluator_protocol.write_text("synthetic evaluator protocol\n")
+    output_root = tmp_path / "synthetic"
+
+    manifest = prepare_synthetic(
+        base_protocol_path=base_protocol,
+        evaluator_protocol_path=evaluator_protocol,
+        output_root=output_root,
+    )
+
+    bundle = json.loads((output_root / "input/bundle.json").read_text())
+    request = json.loads((output_root / "request/request.json").read_text())
+    serialized = json.dumps(bundle, sort_keys=True)
+    assert manifest["privacy_class"] == "synthetic_no_interview_or_corpus_content"
+    assert len(bundle["items"]) == 1
+    assert bundle["items"][0]["item_id"] == "synthetic-checksum-query"
+    assert "interview" not in serialized.casefold()
+    assert "workshop" not in serialized.casefold()
+    assert "publisher_abstract" not in serialized
+    assert (
+        request["messages"][0]["content"]
+        == (output_root / "input/prompt.txt").read_text()
+    )
 
 
 def test_four_stable_orientations_promote_large_challenger_effect(tmp_path) -> None:

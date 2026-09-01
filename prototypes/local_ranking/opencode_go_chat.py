@@ -14,13 +14,19 @@ import httpx
 
 from .canonical import canonical_json_bytes, sha256_bytes, write_once
 from .errors import HarnessError, fail
-from .operational_judge import BUNDLE_SCHEMA_VERSION, EVALUATORS
+from .operational_judge import (
+    BUNDLE_SCHEMA_VERSION,
+    EVALUATORS,
+    _draft_contract,
+    _prompt_text,
+)
 
 API_URL = "https://opencode.ai/zen/go/v1/chat/completions"
 MODEL_ID = "deepseek-v4-flash"
 MAX_TOKENS = 32768
 PREPARATION_SCHEMA_VERSION = "local-ranking-opencode-go-chat-preparation-v1.0"
 RECEIPT_SCHEMA_VERSION = "local-ranking-opencode-go-chat-receipt-v1.0"
+SYNTHETIC_MANIFEST_SCHEMA_VERSION = "local-ranking-opencode-go-synthetic-transport-v1.0"
 SAFE_RESPONSE_HEADERS = {"cache-control", "content-type", "retry-after"}
 
 
@@ -105,6 +111,113 @@ def prepare(
     }
     write_once(output_root / "prompt.txt", prompt_bytes)
     write_once(output_root / "request.json", request_bytes)
+    write_once(output_root / "manifest.json", canonical_json_bytes(manifest))
+    return manifest
+
+
+def _synthetic_side(prefix: str, statements: tuple[str, str, str]) -> dict[str, Any]:
+    return {
+        "papers": [
+            {
+                "paper_id": f"synthetic-{prefix}-paper-{index}",
+                "segments": [
+                    {
+                        "content_type": "synthetic_abstract",
+                        "segment_id": f"synthetic-{prefix}-segment-{index}",
+                        "source_start": 0,
+                        "text": statement,
+                    }
+                ],
+                "title": f"Synthetic checksum note {prefix.upper()}{index}",
+            }
+            for index, statement in enumerate(statements, start=1)
+        ]
+    }
+
+
+def prepare_synthetic(
+    *, base_protocol_path: Path, evaluator_protocol_path: Path, output_root: Path
+) -> dict[str, Any]:
+    _, base_protocol_bytes = _read_utf8(base_protocol_path, label="base protocol")
+    _, evaluator_protocol_bytes = _read_utf8(
+        evaluator_protocol_path, label="evaluator protocol"
+    )
+    left = _synthetic_side(
+        "left",
+        (
+            "A checksum computed before storage and recomputed after retrieval detects accidental bit changes when the two values differ.",
+            "The procedure stores the expected checksum separately so one damaged payload cannot silently replace its own comparison value.",
+            "Checksum verification detects corruption but does not restore damaged bytes or identify the exact location of every change.",
+        ),
+    )
+    right = _synthetic_side(
+        "right",
+        (
+            "A filename suffix records the creation date and makes a directory easier to browse in chronological order.",
+            "Alphabetical sorting groups common filename prefixes but does not compare file contents before and after storage.",
+            "A color label lets an operator mark an important file and can be changed manually without reading the file bytes.",
+        ),
+    )
+    synthetic_source = {
+        "left": left,
+        "query": {
+            "kind": "synthetic_transport_probe",
+            "text": "Which evidence set better explains whether a checksum can detect accidental file corruption?",
+        },
+        "right": right,
+    }
+    base_protocol_sha256 = sha256_bytes(base_protocol_bytes)
+    evaluator_protocol_sha256 = sha256_bytes(evaluator_protocol_bytes)
+    bundle = {
+        "bundle_id": "opencode-go-synthetic-transport-orientation-1",
+        "draft_contract": _draft_contract(),
+        "evaluator": EVALUATORS["judge-deepseek"],
+        "evaluator_protocol_sha256": evaluator_protocol_sha256,
+        "items": [
+            {
+                "case_id": "synthetic-checksum-case",
+                "item_id": "synthetic-checksum-query",
+                **synthetic_source,
+            }
+        ],
+        "orientation": 1,
+        "protocol_sha256": base_protocol_sha256,
+        "schema_version": BUNDLE_SCHEMA_VERSION,
+        "source_binding": {
+            "evaluator_protocol_sha256": evaluator_protocol_sha256,
+            "formal_input_sha256": sha256_bytes(canonical_json_bytes(synthetic_source)),
+            "mapping_commitment_sha256": sha256_bytes(
+                canonical_json_bytes({"synthetic_only": True})
+            ),
+            "payload_set_sha256": [
+                sha256_bytes(canonical_json_bytes(left)),
+                sha256_bytes(canonical_json_bytes(right)),
+            ],
+        },
+    }
+    bundle["bundle_sha256"] = sha256_bytes(canonical_json_bytes(bundle))
+    bundle_bytes = canonical_json_bytes(bundle)
+    prompt_bytes = _prompt_text(bundle).encode("utf-8")
+    input_root = output_root / "input"
+    write_once(input_root / "bundle.json", bundle_bytes)
+    write_once(input_root / "prompt.txt", prompt_bytes)
+    request_manifest = prepare(
+        bundle_path=input_root / "bundle.json",
+        prompt_path=input_root / "prompt.txt",
+        output_root=output_root / "request",
+    )
+    request_manifest_bytes = canonical_json_bytes(request_manifest)
+    manifest = {
+        "files": {
+            "input/bundle.json": sha256_bytes(bundle_bytes),
+            "input/prompt.txt": sha256_bytes(prompt_bytes),
+            "request/manifest.json": sha256_bytes(request_manifest_bytes),
+        },
+        "item_count": 1,
+        "privacy_class": "synthetic_no_interview_or_corpus_content",
+        "schema_version": SYNTHETIC_MANIFEST_SCHEMA_VERSION,
+        "status": "ready_for_live_transport_probe",
+    }
     write_once(output_root / "manifest.json", canonical_json_bytes(manifest))
     return manifest
 
@@ -376,6 +489,10 @@ def _parser() -> argparse.ArgumentParser:
     prepare_parser.add_argument("--bundle", type=Path, required=True)
     prepare_parser.add_argument("--prompt", type=Path, required=True)
     prepare_parser.add_argument("--output-root", type=Path, required=True)
+    synthetic_parser = subparsers.add_parser("prepare-synthetic")
+    synthetic_parser.add_argument("--base-protocol", type=Path, required=True)
+    synthetic_parser.add_argument("--evaluator-protocol", type=Path, required=True)
+    synthetic_parser.add_argument("--output-root", type=Path, required=True)
     execute_parser = subparsers.add_parser("execute")
     execute_parser.add_argument("--preparation-root", type=Path, required=True)
     execute_parser.add_argument("--output-root", type=Path, required=True)
@@ -391,6 +508,12 @@ def main(argv: list[str] | None = None) -> int:
             result = prepare(
                 bundle_path=args.bundle,
                 prompt_path=args.prompt,
+                output_root=args.output_root,
+            )
+        elif args.command == "prepare-synthetic":
+            result = prepare_synthetic(
+                base_protocol_path=args.base_protocol,
+                evaluator_protocol_path=args.evaluator_protocol,
                 output_root=args.output_root,
             )
         else:
