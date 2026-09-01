@@ -38,6 +38,7 @@ blocked_by:
 - [Local-ranking atomic transport smoke protocol v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-v2.0.md)
 - [Local-ranking atomic transport smoke result v2.0](../../../prototypes/local-ranking-atomic-transport-smoke-result-v2.0.md)
 - [Local-ranking atomic Pro/high calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-protocol-v2.0.md)
+- [Local-ranking atomic Pro/high calibration result v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-result-v2.0.md)
 
 ## Question
 
@@ -97,3 +98,9 @@ response IDs 唯一，整批 wall 2.911s、总计 793 tokens、receipt cost 合�
 invalid retry state machine 与 early-stop receipts，再按 Pro/high → Pro/max 运行 spent calibration；首个合格
 DeepSeek profile 再与 Kimi K3 使用全新 atomic calls 做 panel qualification。Calibration votes 不得复用为
 candidate votes，ticket 继续保持 open。
+
+Pro/high 已按 frozen manifest 执行 r1 后触发数学早停：两 orientations 均 24/24 first-valid、零 retry，但 mirror
+stable 只有 `20/24`，低于 `22/24`；stable directional 为 14，因此不是全 tie 退化。r2/r3 的 96 calls 未发出。
+48 physical calls 共 340,058 tokens，receipt cost 合计 `0`，但 OpenCode Go usage 从 rolling/weekly/monthly
+`0/18/33%` 上升到 `16/25/36%`。这使 FAIL 能归因于当前 Pro/high atomic semantic stability，而非长输出抄写或
+transport 完整性。下一步按已批准 ladder 冻结全新 Pro/max profile；不得复用 Pro/high votes 或修改 gates。
