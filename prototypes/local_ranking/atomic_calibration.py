@@ -117,7 +117,7 @@ def _winner_index(
             or len(hashes) != selected_number
             or any(not isinstance(value, str) or len(value) != 64 for value in hashes)
             or not isinstance(response_ids, list)
-            or len(response_ids) != selected_number
+            or not 1 <= len(response_ids) <= selected_number
             or any(not isinstance(value, str) or not value for value in response_ids)
             or len(set(response_ids)) != len(response_ids)
             or any(value in provider_response_ids for value in response_ids)

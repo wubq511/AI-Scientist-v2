@@ -24,8 +24,8 @@ from .operational_judge import (
 
 ATOMIC_PACKET_SCHEMA_VERSION = "local-ranking-atomic-judge-packet-v2.0"
 ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.1"
-ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.1"
-ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.1"
+ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.2"
+ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.2"
 ATOMIC_ORIENTATION_RESULT_SCHEMA_VERSION = (
     "local-ranking-atomic-orientation-result-v2.0"
 )
@@ -33,6 +33,9 @@ EXPECTED_ITEM_COUNT = 24
 MAX_PHYSICAL_ATTEMPTS = 2
 ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION = (
     "local-ranking-atomic-opencode-go-receipt-v2.0"
+)
+ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION = (
+    "local-ranking-atomic-opencode-go-execution-v2.0"
 )
 OPENCODE_GO_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
 APPROVED_ATOMIC_MODEL_ALIAS = "opencode-go/deepseek-v4-pro"
@@ -665,6 +668,124 @@ def _validate_execution_receipt(
     return receipt, receipt_bytes
 
 
+def _validate_execution_result(
+    *,
+    result_path: Path,
+    manifest: dict[str, Any],
+    manifest_file_sha256: str,
+    call: dict[str, Any],
+    expected_status: str,
+    evidence_root: Path | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    result, result_bytes = _read_canonical_object(
+        result_path, label="atomic execution result"
+    )
+    _expect_keys(
+        result,
+        {
+            "call_binding",
+            "error",
+            "files",
+            "preparation_manifest_sha256",
+            "receipt_sha256",
+            "request_sha256",
+            "schema_version",
+            "status",
+        },
+        label="atomic execution result",
+    )
+    expected_binding = {
+        "atomic_manifest_sha256": manifest_file_sha256,
+        "call_id": call["call_id"],
+        "kind": "atomic",
+        "orientation": manifest["orientation"],
+        "prompt_sha256": call["prompt_sha256"],
+        "replicate_id": manifest["replicate_id"],
+        "sequence": call["sequence"],
+    }
+    files = result.get("files")
+    request_sha256 = result.get("request_sha256")
+    preparation_sha256 = result.get("preparation_manifest_sha256")
+    if (
+        result.get("schema_version") != ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION
+        or result.get("status") != expected_status
+        or result.get("call_binding") != expected_binding
+        or not isinstance(files, dict)
+        or not files
+        or any(
+            not isinstance(name, str)
+            or not name
+            or Path(name).name != name
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            for name, digest in files.items()
+        )
+        or not isinstance(request_sha256, str)
+        or len(request_sha256) != 64
+        or not isinstance(preparation_sha256, str)
+        or len(preparation_sha256) != 64
+    ):
+        fail(
+            "INVALID_EXECUTION_RESULT",
+            "Execution result does not bind this atomic call",
+        )
+    resolved_evidence_root = (
+        result_path.parent if evidence_root is None else evidence_root
+    )
+    for name, digest in files.items():
+        evidence_path = resolved_evidence_root / name
+        try:
+            evidence_bytes = evidence_path.read_bytes()
+        except OSError as exc:
+            fail(
+                "MISSING_ARTIFACT",
+                "Execution result evidence is missing",
+                file=name,
+                error=str(exc),
+            )
+        if sha256_bytes(evidence_bytes) != digest:
+            fail("HASH_MISMATCH", "Execution result evidence changed", file=name)
+    error = result.get("error")
+    receipt_sha256 = result.get("receipt_sha256")
+    if expected_status == "pass":
+        if (
+            error is not None
+            or not isinstance(receipt_sha256, str)
+            or len(receipt_sha256) != 64
+            or files.get("receipt.json") != receipt_sha256
+            or "response.json" not in files
+        ):
+            fail("INVALID_EXECUTION_RESULT", "Successful execution result is invalid")
+    elif (
+        not isinstance(error, dict)
+        or not isinstance(error.get("code"), str)
+        or not error.get("code")
+        or not isinstance(error.get("message"), str)
+        or not error.get("message")
+        or receipt_sha256 is not None
+        or "receipt.json" in files
+        or "response.json" in files
+    ):
+        fail("INVALID_EXECUTION_RESULT", "Failed execution result is invalid")
+    return result, result_bytes
+
+
+def _copy_execution_evidence(
+    *, result: dict[str, Any], source_root: Path, output_root: Path
+) -> None:
+    for name in sorted(result["files"]):
+        try:
+            data = (source_root / name).read_bytes()
+        except OSError as exc:
+            fail(
+                "MISSING_ARTIFACT",
+                "Execution evidence disappeared before recording",
+                file=name,
+                error=str(exc),
+            )
+        write_once(output_root / "execution-evidence" / name, data)
+
+
 def record_attempt(
     *,
     manifest_path: Path,
@@ -672,6 +793,7 @@ def record_attempt(
     attempt_number: int,
     response_path: Path,
     execution_receipt_path: Path,
+    execution_result_path: Path,
     output_root: Path,
 ) -> dict[str, Any]:
     if (
@@ -701,12 +823,28 @@ def record_attempt(
         manifest_file_sha256=manifest_file_sha256,
         call=call,
     )
+    execution_result, execution_result_bytes = _validate_execution_result(
+        result_path=execution_result_path,
+        manifest=manifest,
+        manifest_file_sha256=manifest_file_sha256,
+        call=call,
+        expected_status="pass",
+    )
+    if (
+        execution_result["receipt_sha256"] != sha256_bytes(receipt_bytes)
+        or execution_result["request_sha256"] != receipt["request_sha256"]
+        or execution_result["files"].get("response.json")
+        != sha256_bytes(response_bytes)
+    ):
+        fail("HASH_MISMATCH", "Execution result and receipt do not match")
     outcome = {
         "attempt_number": attempt_number,
         "call_id": call["call_id"],
         "case_id": call["case_id"],
         "evaluator": manifest["evaluator"],
         "execution_receipt_sha256": sha256_bytes(receipt_bytes),
+        "execution_result_sha256": sha256_bytes(execution_result_bytes),
+        "execution_status": "pass",
         "item_id": call["item_id"],
         "judgment": judgment,
         "orientation": manifest["orientation"],
@@ -722,6 +860,71 @@ def record_attempt(
     }
     write_once(output_root / "raw-response.bin", response_bytes)
     write_once(output_root / "execution-receipt.json", receipt_bytes)
+    write_once(output_root / "execution-result.json", execution_result_bytes)
+    _copy_execution_evidence(
+        result=execution_result,
+        source_root=execution_result_path.parent,
+        output_root=output_root,
+    )
+    write_json_once(output_root / "attempt.json", outcome)
+    return outcome
+
+
+def record_failed_attempt(
+    *,
+    manifest_path: Path,
+    call_sequence: int,
+    attempt_number: int,
+    execution_result_path: Path,
+    output_root: Path,
+) -> dict[str, Any]:
+    if (
+        isinstance(attempt_number, bool)
+        or not isinstance(attempt_number, int)
+        or attempt_number not in range(1, MAX_PHYSICAL_ATTEMPTS + 1)
+    ):
+        fail("ATTEMPT_LIMIT_EXCEEDED", "Physical attempt number must be 1 or 2")
+    manifest, artifact_root, calls = _load_manifest(manifest_path)
+    manifest_file_sha256 = sha256_bytes(manifest_path.read_bytes())
+    call = calls.get(call_sequence)
+    if call is None:
+        fail("UNKNOWN_LOGICAL_CALL", "Logical call sequence is not in the manifest")
+    _load_call_packet(artifact_root=artifact_root, call=call)
+    execution_result, execution_result_bytes = _validate_execution_result(
+        result_path=execution_result_path,
+        manifest=manifest,
+        manifest_file_sha256=manifest_file_sha256,
+        call=call,
+        expected_status="fail",
+    )
+    validation = {"error": execution_result["error"], "status": "fail"}
+    outcome = {
+        "attempt_number": attempt_number,
+        "call_id": call["call_id"],
+        "case_id": call["case_id"],
+        "evaluator": manifest["evaluator"],
+        "execution_receipt_sha256": None,
+        "execution_result_sha256": sha256_bytes(execution_result_bytes),
+        "execution_status": "fail",
+        "item_id": call["item_id"],
+        "judgment": None,
+        "orientation": manifest["orientation"],
+        "packet_sha256": call["packet_sha256"],
+        "prompt_sha256": call["prompt_sha256"],
+        "provider_response_id": None,
+        "raw_response_sha256": None,
+        "replicate_id": manifest["replicate_id"],
+        "request_sha256": execution_result["request_sha256"],
+        "schema_version": ATOMIC_ATTEMPT_SCHEMA_VERSION,
+        "status": "invalid",
+        "validation": validation,
+    }
+    write_once(output_root / "execution-result.json", execution_result_bytes)
+    _copy_execution_evidence(
+        result=execution_result,
+        source_root=execution_result_path.parent,
+        output_root=output_root,
+    )
     write_json_once(output_root / "attempt.json", outcome)
     return outcome
 
@@ -744,6 +947,8 @@ def _validate_attempt(
             "case_id",
             "evaluator",
             "execution_receipt_sha256",
+            "execution_result_sha256",
+            "execution_status",
             "item_id",
             "judgment",
             "orientation",
@@ -776,34 +981,68 @@ def _validate_attempt(
         or attempt.get("prompt_sha256") != call["prompt_sha256"]
     ):
         fail("ATTEMPT_IDENTITY_MISMATCH", "Atomic attempt identity is invalid")
-    raw_path = attempt_path.parent / "raw-response.bin"
-    receipt_path = attempt_path.parent / "execution-receipt.json"
-    try:
-        raw_bytes = raw_path.read_bytes()
-    except OSError as exc:
-        fail("MISSING_ARTIFACT", "Atomic raw response is missing", error=str(exc))
-    if sha256_bytes(raw_bytes) != attempt.get("raw_response_sha256"):
-        fail("HASH_MISMATCH", "Atomic raw response hash changed")
-    receipt, receipt_bytes = _validate_execution_receipt(
-        receipt_path=receipt_path,
-        response_bytes=raw_bytes,
+    _load_call_packet(artifact_root=artifact_root, call=call)
+    execution_status = attempt.get("execution_status")
+    if execution_status not in {"pass", "fail"}:
+        fail("ATTEMPT_IDENTITY_MISMATCH", "Atomic execution status is invalid")
+    result_path = attempt_path.parent / "execution-result.json"
+    execution_result, execution_result_bytes = _validate_execution_result(
+        result_path=result_path,
         manifest=manifest,
         manifest_file_sha256=sha256_bytes(canonical_json_bytes(manifest)),
         call=call,
+        expected_status=execution_status,
+        evidence_root=attempt_path.parent / "execution-evidence",
     )
-    if (
-        sha256_bytes(receipt_bytes) != attempt.get("execution_receipt_sha256")
-        or receipt["identity"]["provider_response_id"]
-        != attempt.get("provider_response_id")
-        or receipt["request_sha256"] != attempt.get("request_sha256")
-    ):
-        fail("HASH_MISMATCH", "Atomic execution receipt binding changed")
-    _load_call_packet(artifact_root=artifact_root, call=call)
-    judgment, validation = _assess_response(
-        response_bytes=raw_bytes,
-        handle_map=call["evidence_handle_map"],
-    )
-    expected_status = "valid" if judgment is not None else "invalid"
+    if sha256_bytes(execution_result_bytes) != attempt.get(
+        "execution_result_sha256"
+    ) or execution_result["request_sha256"] != attempt.get("request_sha256"):
+        fail("HASH_MISMATCH", "Atomic execution result binding changed")
+    if execution_status == "pass":
+        raw_path = attempt_path.parent / "raw-response.bin"
+        receipt_path = attempt_path.parent / "execution-receipt.json"
+        try:
+            raw_bytes = raw_path.read_bytes()
+        except OSError as exc:
+            fail("MISSING_ARTIFACT", "Atomic raw response is missing", error=str(exc))
+        if sha256_bytes(raw_bytes) != attempt.get("raw_response_sha256"):
+            fail("HASH_MISMATCH", "Atomic raw response hash changed")
+        receipt, receipt_bytes = _validate_execution_receipt(
+            receipt_path=receipt_path,
+            response_bytes=raw_bytes,
+            manifest=manifest,
+            manifest_file_sha256=sha256_bytes(canonical_json_bytes(manifest)),
+            call=call,
+        )
+        if (
+            sha256_bytes(receipt_bytes) != attempt.get("execution_receipt_sha256")
+            or receipt["identity"]["provider_response_id"]
+            != attempt.get("provider_response_id")
+            or receipt["request_sha256"] != attempt.get("request_sha256")
+            or execution_result["receipt_sha256"] != sha256_bytes(receipt_bytes)
+        ):
+            fail("HASH_MISMATCH", "Atomic execution receipt binding changed")
+        judgment, validation = _assess_response(
+            response_bytes=raw_bytes,
+            handle_map=call["evidence_handle_map"],
+        )
+        expected_status = "valid" if judgment is not None else "invalid"
+    else:
+        if any(
+            attempt.get(key) is not None
+            for key in (
+                "execution_receipt_sha256",
+                "provider_response_id",
+                "raw_response_sha256",
+            )
+        ):
+            fail(
+                "ATTEMPT_VALIDATION_MISMATCH",
+                "Failed execution attempt contains response identity",
+            )
+        judgment = None
+        validation = {"error": execution_result["error"], "status": "fail"}
+        expected_status = "invalid"
     if (
         attempt.get("status") != expected_status
         or attempt.get("judgment") != judgment
@@ -880,7 +1119,11 @@ def resolve_orientation(
                 )
             selected = entries[1]
         total_attempts += len(entries)
-        entry_response_ids = [entry[0]["provider_response_id"] for entry in entries]
+        entry_response_ids = [
+            entry[0]["provider_response_id"]
+            for entry in entries
+            if entry[0]["provider_response_id"] is not None
+        ]
         if any(
             response_id in provider_response_ids for response_id in entry_response_ids
         ):
@@ -955,7 +1198,14 @@ def _parser() -> argparse.ArgumentParser:
     attempt_parser.add_argument("--attempt-number", type=int, required=True)
     attempt_parser.add_argument("--response", type=Path, required=True)
     attempt_parser.add_argument("--execution-receipt", type=Path, required=True)
+    attempt_parser.add_argument("--execution-result", type=Path, required=True)
     attempt_parser.add_argument("--output-root", type=Path, required=True)
+    failed_parser = subparsers.add_parser("record-failed-attempt")
+    failed_parser.add_argument("--manifest", type=Path, required=True)
+    failed_parser.add_argument("--call-sequence", type=int, required=True)
+    failed_parser.add_argument("--attempt-number", type=int, required=True)
+    failed_parser.add_argument("--execution-result", type=Path, required=True)
+    failed_parser.add_argument("--output-root", type=Path, required=True)
     resolve_parser = subparsers.add_parser("resolve-orientation")
     resolve_parser.add_argument("--manifest", type=Path, required=True)
     resolve_parser.add_argument("--attempt", action="append", type=Path, required=True)
@@ -992,6 +1242,7 @@ def main(argv: list[str] | None = None) -> int:
                 attempt_number=args.attempt_number,
                 response_path=args.response,
                 execution_receipt_path=args.execution_receipt,
+                execution_result_path=args.execution_result,
                 output_root=args.output_root,
             )
             displayed_result = {
@@ -1000,6 +1251,25 @@ def main(argv: list[str] | None = None) -> int:
                     "attempt_number",
                     "call_id",
                     "raw_response_sha256",
+                    "schema_version",
+                    "status",
+                    "validation",
+                )
+            }
+        elif args.command == "record-failed-attempt":
+            result = record_failed_attempt(
+                manifest_path=args.manifest,
+                call_sequence=args.call_sequence,
+                attempt_number=args.attempt_number,
+                execution_result_path=args.execution_result,
+                output_root=args.output_root,
+            )
+            displayed_result = {
+                key: result[key]
+                for key in (
+                    "attempt_number",
+                    "call_id",
+                    "execution_result_sha256",
                     "schema_version",
                     "status",
                     "validation",

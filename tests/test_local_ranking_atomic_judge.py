@@ -1,20 +1,26 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
+import httpx
 import pytest
 
 from prototypes.local_ranking.atomic_calibration import aggregate
 from prototypes.local_ranking.atomic_judge import (
     ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
     ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION,
     prepare_atomic,
+    record_failed_attempt,
     resolve_orientation,
 )
 from prototypes.local_ranking.atomic_judge import (
     record_attempt as _record_attempt,
 )
+from prototypes.local_ranking.atomic_opencode_go import prepare_atomic_transport
+from prototypes.local_ranking.atomic_runner import run_orientation
 from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
 from prototypes.local_ranking.errors import HarnessError
 from prototypes.local_ranking.operational_judge import BUNDLE_SCHEMA_VERSION
@@ -110,6 +116,59 @@ def _valid_response(*, winner: str = "left") -> dict:
     }
 
 
+def _sse_event(value: object) -> bytes:
+    payload = (
+        "[DONE]" if value == "[DONE]" else json.dumps(value, separators=(",", ":"))
+    )
+    return f"data: {payload}\n\n".encode()
+
+
+def _semantic_stream(*, response_id: str, response: dict) -> bytes:
+    model = "deepseek-v4-pro"
+    base = {
+        "created": 1,
+        "id": response_id,
+        "model": model,
+        "object": "chat.completion.chunk",
+    }
+    content = json.dumps(response, separators=(",", ":"))
+    return b"".join(
+        (
+            _sse_event(
+                {
+                    **base,
+                    "choices": [
+                        {
+                            "delta": {"content": content, "role": "assistant"},
+                            "finish_reason": None,
+                            "index": 0,
+                        }
+                    ],
+                }
+            ),
+            _sse_event(
+                {
+                    **base,
+                    "choices": [
+                        {
+                            "delta": {"content": ""},
+                            "finish_reason": "stop",
+                            "index": 0,
+                        }
+                    ],
+                    "usage": {
+                        "completion_tokens": 50,
+                        "prompt_tokens": 100,
+                        "total_tokens": 150,
+                    },
+                }
+            ),
+            _sse_event("[DONE]"),
+            _sse_event({"choices": [], "cost": "0"}),
+        )
+    )
+
+
 def record_attempt(**kwargs):
     manifest_path = kwargs["manifest_path"]
     response_path = kwargs["response_path"]
@@ -154,10 +213,75 @@ def record_attempt(**kwargs):
         },
         "usage": None,
     }
-    receipt_path = _write(
-        output_root.parent / f"{output_root.name}-receipt.json", receipt
+    execution_root = output_root.parent / f"{output_root.name}-execution-source"
+    receipt_path = _write(execution_root / "receipt.json", receipt)
+    (execution_root / "response.json").write_bytes(response_bytes)
+    execution_result = {
+        "call_binding": receipt["call_binding"],
+        "error": None,
+        "files": {
+            "receipt.json": sha256_bytes(receipt_path.read_bytes()),
+            "response.json": sha256_bytes(response_bytes),
+        },
+        "preparation_manifest_sha256": "a" * 64,
+        "receipt_sha256": sha256_bytes(receipt_path.read_bytes()),
+        "request_sha256": "b" * 64,
+        "schema_version": ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
+        "status": "pass",
+    }
+    execution_result_path = _write(
+        execution_root / "execution-result.json", execution_result
     )
-    return _record_attempt(execution_receipt_path=receipt_path, **kwargs)
+    return _record_attempt(
+        execution_receipt_path=receipt_path,
+        execution_result_path=execution_result_path,
+        **kwargs,
+    )
+
+
+def _failed_attempt(
+    *,
+    manifest_path: Path,
+    call_sequence: int,
+    attempt_number: int,
+    output_root: Path,
+) -> dict:
+    manifest = json.loads(manifest_path.read_bytes())
+    call = manifest["calls"][call_sequence - 1]
+    execution_root = output_root.parent / f"{output_root.name}-execution-source"
+    status_path = execution_root / "http-status.txt"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_bytes(b"503\n")
+    result = {
+        "call_binding": {
+            "atomic_manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
+            "call_id": call["call_id"],
+            "kind": "atomic",
+            "orientation": manifest["orientation"],
+            "prompt_sha256": call["prompt_sha256"],
+            "replicate_id": manifest["replicate_id"],
+            "sequence": call["sequence"],
+        },
+        "error": {
+            "code": "OPENCODE_GO_STREAM_HTTP_FAILED",
+            "details": {"status_code": 503},
+            "message": "Synthetic provider failure",
+        },
+        "files": {"http-status.txt": sha256_bytes(b"503\n")},
+        "preparation_manifest_sha256": "a" * 64,
+        "receipt_sha256": None,
+        "request_sha256": "b" * 64,
+        "schema_version": ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
+        "status": "fail",
+    }
+    result_path = _write(execution_root / "execution-result.json", result)
+    return record_failed_attempt(
+        manifest_path=manifest_path,
+        call_sequence=call_sequence,
+        attempt_number=attempt_number,
+        execution_result_path=result_path,
+        output_root=output_root,
+    )
 
 
 def test_prepare_atomic_removes_controller_owned_id_copying(tmp_path: Path) -> None:
@@ -362,6 +486,118 @@ def test_two_invalid_attempts_exhaust_one_logical_call(tmp_path: Path) -> None:
         )
 
     assert raised.value.code == "LOGICAL_CALL_EXHAUSTED"
+
+
+def test_transport_failure_counts_as_first_physical_attempt(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    manifest = prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    attempt_paths = []
+    failed_root = tmp_path / "attempts" / "call-001" / "attempt-1"
+    failed = _failed_attempt(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        attempt_number=1,
+        output_root=failed_root,
+    )
+    assert failed["status"] == "invalid"
+    assert failed["provider_response_id"] is None
+    attempt_paths.append(failed_root / "attempt.json")
+    for call in manifest["calls"]:
+        attempt_number = 2 if call["sequence"] == 1 else 1
+        response = _write(
+            tmp_path / f"response-{call['sequence']:03d}.json", _valid_response()
+        )
+        attempt_root = (
+            tmp_path / "attempts" / call["call_id"] / f"attempt-{attempt_number}"
+        )
+        record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=call["sequence"],
+            attempt_number=attempt_number,
+            response_path=response,
+            output_root=attempt_root,
+        )
+        attempt_paths.append(attempt_root / "attempt.json")
+
+    trace = resolve_orientation(
+        manifest_path=manifest_path,
+        attempt_paths=attempt_paths,
+        output_root=tmp_path / "resolved",
+    )
+
+    assert trace["attempt_summary"]["retried_call_count"] == 1
+    assert len(trace["selected_attempts"][0]["provider_response_ids"]) == 1
+
+
+def test_orientation_runner_retries_only_invalid_response(tmp_path: Path) -> None:
+    atomic_root = tmp_path / "atomic"
+    manifest = prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=atomic_root,
+    )
+    manifest_path = atomic_root / "private" / "manifest.json"
+    preparation_root = tmp_path / "transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=manifest_path,
+        output_root=preparation_root,
+        max_concurrency=4,
+    )
+    lock = threading.Lock()
+    request_count = 0
+    first_item_seen = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count, first_item_seen
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        with lock:
+            request_count += 1
+            response_id = f"runner-response-{request_count:03d}"
+            is_first_item = "query 0?" in prompt
+            if is_first_item:
+                first_item_seen += 1
+                invalid = first_item_seen == 1
+            else:
+                invalid = False
+        response = {"winner": "left"} if invalid else _valid_response()
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_semantic_stream(response_id=response_id, response=response),
+        )
+
+    result = run_orientation(
+        atomic_manifest_path=manifest_path,
+        preparation_root=preparation_root,
+        output_root=tmp_path / "run",
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result["run_result"]["status"] == "pass"
+    assert request_count == 25
+    assert result["trace"]["attempt_summary"] == {
+        "first_attempt_valid_count": 23,
+        "invalid_attempt_count": 1,
+        "retried_call_count": 1,
+        "total_physical_attempts": 25,
+    }
+    assert manifest["call_count"] == 24
+
+    replay = run_orientation(
+        atomic_manifest_path=manifest_path,
+        preparation_root=preparation_root,
+        output_root=tmp_path / "run",
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+    assert replay == result
+    assert request_count == 25
 
 
 def test_unknown_handle_is_machine_detectable_invalid(tmp_path: Path) -> None:

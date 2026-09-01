@@ -304,6 +304,12 @@ Pro/max 仍达不到 gates，失败就更能归因于 rubric 含糊、证据确�
 实时 smoke 的 commit、preparation hashes、quota snapshot、receipts、latency/usage/cost 和 PASS/FAIL 另写入冻结的
 transport smoke protocol/result，不能由本地 mock PASS 代替。
 
+Semantic orientation runner 随后补齐 physical-failure ledger：HTTP、SSE、截断或非 JSON failure 也生成 canonical
+`execution-result.json` 并计入最多两次，而不是在产生 model-owned JSON 前从 attempt history 消失。Runner 只对
+invalid calls 发出第二次 exact request，valid 后禁止 retry；中断后若 execution result 完整，可从复制的 transport
+evidence 重建缺失 ledger 而不再次调用；若请求可能已发出但 execution result 未完成，则 fail closed，避免重复
+计费。完成的 orientation 可只读 replay，不会再次访问 API。对应 targeted tests 已增至 24/24。
+
 实时 `transport-smoke-001` 随后按冻结 protocol 一次 PASS：4/4 receipts 有效且 response IDs 唯一，整批
 wall 2.911 秒、total 793 tokens、receipt cost 合计 `0`，因此 semantic scheduler max concurrency 冻结为 4。
 完整 evidence 见 [atomic transport smoke result v2.0](local-ranking-atomic-transport-smoke-result-v2.0.md)。

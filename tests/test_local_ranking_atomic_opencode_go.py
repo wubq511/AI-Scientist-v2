@@ -178,3 +178,30 @@ def test_preparation_fails_closed_after_request_tampering(tmp_path: Path) -> Non
         _validate_preparation(root)
 
     assert raised.value.code == "HASH_MISMATCH"
+
+
+def test_failed_physical_call_writes_replayable_execution_result(
+    tmp_path: Path,
+) -> None:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"temporarily unavailable")
+
+    output_root = tmp_path / "output"
+    with pytest.raises(HarnessError) as raised:
+        execute_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            output_root=output_root,
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    result = json.loads((output_root / "execution-result.json").read_bytes())
+    assert raised.value.code == "OPENCODE_GO_STREAM_HTTP_FAILED"
+    assert result["status"] == "fail"
+    assert result["receipt_sha256"] is None
+    assert result["error"]["code"] == raised.value.code
+    assert "http-status.txt" in result["files"]

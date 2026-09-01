@@ -29,6 +29,7 @@ from .opencode_go_chat import SAFE_RESPONSE_HEADERS, _api_key, _utc_now
 from .opencode_go_stream import _extract_stream_response
 
 PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v2.0"
+EXECUTION_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-execution-v2.0"
 SMOKE_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-smoke-v2.0"
 ATOMIC_MAX_TOKENS = 16_384
 MAX_CONCURRENCY = 4
@@ -310,6 +311,88 @@ def _validate_preparation(
     return manifest, manifest_bytes, by_sequence
 
 
+def _call_binding(*, manifest: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "atomic_manifest_sha256": manifest["atomic_manifest_sha256"],
+        "call_id": call["call_id"],
+        "kind": manifest["kind"],
+        "orientation": call["orientation"],
+        "prompt_sha256": call["prompt_sha256"],
+        "replicate_id": call["replicate_id"],
+        "sequence": call["sequence"],
+    }
+
+
+def _execution_files(output_root: Path) -> dict[str, str]:
+    allowed = {
+        "chunks.jsonl",
+        "finished-at.txt",
+        "http-status.txt",
+        "receipt.json",
+        "response-headers.json",
+        "response.json",
+        "started-at.txt",
+        "stream-body.sse",
+        "stream-validation-error.json",
+        "transport-error.json",
+    }
+    result = {}
+    for name in sorted(allowed):
+        path = output_root / name
+        if path.is_file():
+            result[name] = sha256_bytes(path.read_bytes())
+    return result
+
+
+def _write_execution_result(
+    *,
+    output_root: Path,
+    manifest: dict[str, Any],
+    manifest_bytes: bytes,
+    call: dict[str, Any],
+    request_bytes: bytes,
+    status: str,
+    error: dict[str, Any] | None,
+) -> dict[str, Any]:
+    receipt_path = output_root / "receipt.json"
+    receipt_sha256 = (
+        sha256_bytes(receipt_path.read_bytes()) if receipt_path.is_file() else None
+    )
+    result = {
+        "call_binding": _call_binding(manifest=manifest, call=call),
+        "error": error,
+        "files": _execution_files(output_root),
+        "preparation_manifest_sha256": sha256_bytes(manifest_bytes),
+        "receipt_sha256": receipt_sha256,
+        "request_sha256": sha256_bytes(request_bytes),
+        "schema_version": EXECUTION_RESULT_SCHEMA_VERSION,
+        "status": status,
+    }
+    write_once(output_root / "execution-result.json", canonical_json_bytes(result))
+    return result
+
+
+def _fail_execution(
+    *,
+    output_root: Path,
+    manifest: dict[str, Any],
+    manifest_bytes: bytes,
+    call: dict[str, Any],
+    request_bytes: bytes,
+    error: HarnessError,
+) -> None:
+    _write_execution_result(
+        output_root=output_root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+        call=call,
+        request_bytes=request_bytes,
+        status="fail",
+        error=error.as_dict(),
+    )
+    raise error
+
+
 def execute_call(
     *,
     preparation_root: Path,
@@ -371,19 +454,42 @@ def execute_call(
             output_root / "transport-error.json",
             canonical_json_bytes({"error_type": transport_error}),
         )
-        fail(
-            "OPENCODE_GO_STREAM_TRANSPORT_FAILED",
-            "Atomic OpenCode Go request failed",
-            error=transport_error,
+        _fail_execution(
+            output_root=output_root,
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+            call=call,
+            request_bytes=request_bytes,
+            error=HarnessError(
+                "OPENCODE_GO_STREAM_TRANSPORT_FAILED",
+                "Atomic OpenCode Go request failed",
+                {"error": transport_error},
+            ),
         )
     if status_code != 200:
-        fail(
-            "OPENCODE_GO_STREAM_HTTP_FAILED",
-            "Atomic OpenCode Go request returned a non-success status",
-            status_code=status_code,
+        _fail_execution(
+            output_root=output_root,
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+            call=call,
+            request_bytes=request_bytes,
+            error=HarnessError(
+                "OPENCODE_GO_STREAM_HTTP_FAILED",
+                "Atomic OpenCode Go request returned a non-success status",
+                {"status_code": status_code},
+            ),
         )
     if "text/event-stream" not in safe_headers.get("content-type", ""):
-        fail("INVALID_SSE", "Atomic response is not text/event-stream")
+        _fail_execution(
+            output_root=output_root,
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+            call=call,
+            request_bytes=request_bytes,
+            error=HarnessError(
+                "INVALID_SSE", "Atomic response is not text/event-stream"
+            ),
+        )
     request = json.loads(request_bytes)
     try:
         draft, usage, identity, chunks, diagnostics = _extract_stream_response(
@@ -394,7 +500,14 @@ def execute_call(
             output_root / "stream-validation-error.json",
             canonical_json_bytes(exc.as_dict()),
         )
-        raise
+        _fail_execution(
+            output_root=output_root,
+            manifest=manifest,
+            manifest_bytes=manifest_bytes,
+            call=call,
+            request_bytes=request_bytes,
+            error=exc,
+        )
     response_bytes = canonical_json_bytes(draft)
     chunks_bytes = b"".join(canonical_json_bytes(chunk) for chunk in chunks)
     write_once(output_root / "chunks.jsonl", chunks_bytes)
@@ -409,15 +522,7 @@ def execute_call(
         "stream-body.sse": raw_stream,
     }
     receipt = {
-        "call_binding": {
-            "atomic_manifest_sha256": manifest["atomic_manifest_sha256"],
-            "call_id": call["call_id"],
-            "kind": manifest["kind"],
-            "orientation": call["orientation"],
-            "prompt_sha256": call["prompt_sha256"],
-            "replicate_id": call["replicate_id"],
-            "sequence": call["sequence"],
-        },
+        "call_binding": _call_binding(manifest=manifest, call=call),
         "diagnostics": diagnostics,
         "endpoint": OPENCODE_GO_ENDPOINT,
         "files": {name: sha256_bytes(data) for name, data in sorted(files.items())},
@@ -438,6 +543,15 @@ def execute_call(
         "usage": usage,
     }
     write_once(output_root / "receipt.json", canonical_json_bytes(receipt))
+    _write_execution_result(
+        output_root=output_root,
+        manifest=manifest,
+        manifest_bytes=manifest_bytes,
+        call=call,
+        request_bytes=request_bytes,
+        status="pass",
+        error=None,
+    )
     return receipt
 
 

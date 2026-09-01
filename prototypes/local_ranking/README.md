@@ -320,12 +320,34 @@ python -m prototypes.local_ranking.atomic_judge record-attempt \
   --attempt-number <1-2> \
   --response <transport-attempt/response.json> \
   --execution-receipt <transport-attempt/receipt.json> \
+  --execution-result <transport-attempt/execution-result.json> \
   --output-root <new-call-attempt>
 ```
 
 Only machine-detectable invalid output may receive attempt 2, using exact identical request bytes.
 The resolver accepts the first valid response, rejects any retry after a valid response, expands
-handles through the private manifest, and fails after two invalid attempts:
+handles through the private manifest, and fails after two invalid attempts.
+
+For a formal orientation, use the bounded runner instead of issuing calls manually. It executes
+at most four calls concurrently, records HTTP/SSE/non-JSON failures as spent physical attempts,
+retries only invalid calls once with identical request bytes, refuses to resend an ambiguous
+partial attempt after interruption, and replays a completed run without new API calls:
+
+```bash
+python -m prototypes.local_ranking.atomic_runner \
+  --atomic-manifest <atomic-preparation/private/manifest.json> \
+  --preparation-root <atomic-transport-preparation> \
+  --output-root <new-orientation-run> \
+  --kimi-config <kimi-config-with-opencode-go-key>
+```
+
+Every physical execution writes an immutable `execution-result.json`; the attempt ledger copies
+all referenced transport evidence. Provider failure, truncation, or malformed JSON therefore
+counts toward the same two-attempt ceiling instead of silently disappearing before retry.
+After interruption, a complete execution result can rebuild its missing ledger without another
+request; evidence that ends before the execution result remains ambiguous and fails closed.
+
+The lower-level resolver remains available for replay and audit:
 
 ```bash
 python -m prototypes.local_ranking.atomic_judge resolve-orientation \
