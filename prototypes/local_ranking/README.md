@@ -378,6 +378,29 @@ to prove the frozen concurrency against four transport-only probes; their answer
 ranking gates. See
 `docs/prototypes/local-ranking-atomic-evaluator-contract-v2.0.md` for the approved boundary.
 
+Before the first semantic call, capture the authenticated quota state and freeze all six atomic
+and transport manifests into one profile-level budget:
+
+```bash
+python -m prototypes.local_ranking.atomic_profile snapshot-usage \
+  --output <new-usage-snapshot.json> \
+  --kimi-config <kimi-config-with-opencode-go-key>
+
+python -m prototypes.local_ranking.atomic_profile prepare \
+  --source-commit <full-commit-sha> \
+  --usage-snapshot <usage-snapshot.json> \
+  --smoke-result-sha256 <transport-smoke-result-sha256> \
+  --replicate r1 <r1-o1-atomic> <r1-o1-prep> <r1-o2-atomic> <r1-o2-prep> \
+  --replicate r2 <r2-o1-atomic> <r2-o1-prep> <r2-o2-atomic> <r2-o2-prep> \
+  --replicate r3 <r3-o1-atomic> <r3-o1-prep> <r3-o2-atomic> <r3-o2-prep> \
+  --output <new-profile-manifest.json>
+```
+
+The profile manifest fails closed unless all six inputs bind one Pro/high evaluator, one frozen
+source per orientation, concurrency 4, the 16,384-token ceiling, and the exact bounded retry
+policy. Its budget is 144 logical and at most 288 physical calls; early stop can reduce use but
+cannot authorize additional calls.
+
 After all four orientations pass, reduce them with:
 
 ```bash

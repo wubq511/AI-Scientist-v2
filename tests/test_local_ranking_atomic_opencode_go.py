@@ -15,6 +15,7 @@ from prototypes.local_ranking.atomic_opencode_go import (
     prepare_smoke,
     run_smoke,
 )
+from prototypes.local_ranking.atomic_profile import snapshot_usage
 from prototypes.local_ranking.canonical import canonical_json_bytes
 from prototypes.local_ranking.errors import HarnessError
 
@@ -205,3 +206,37 @@ def test_failed_physical_call_writes_replayable_execution_result(
     assert result["receipt_sha256"] is None
     assert result["error"]["code"] == raised.value.code
     assert "http-status.txt" in result["files"]
+
+
+def test_usage_snapshot_records_quota_without_credential(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/usage"):
+            assert request.headers["authorization"] == "Bearer test-key"
+            return httpx.Response(
+                200,
+                json={
+                    "usage": {
+                        period: {
+                            "percent": 12,
+                            "resetsAt": "2026-09-02T00:00:00Z",
+                            "status": "ok",
+                        }
+                        for period in ("rolling", "weekly", "monthly")
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"data": [{"id": "deepseek-v4-pro"}]},
+        )
+
+    output_path = tmp_path / "usage.json"
+    snapshot = snapshot_usage(
+        output_path=output_path,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert snapshot["status"] == "pass"
+    assert snapshot["model_present"] is True
+    assert "test-key" not in output_path.read_text()

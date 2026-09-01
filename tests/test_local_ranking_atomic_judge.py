@@ -20,6 +20,10 @@ from prototypes.local_ranking.atomic_judge import (
     record_attempt as _record_attempt,
 )
 from prototypes.local_ranking.atomic_opencode_go import prepare_atomic_transport
+from prototypes.local_ranking.atomic_profile import (
+    USAGE_SNAPSHOT_SCHEMA_VERSION,
+    prepare_profile,
+)
 from prototypes.local_ranking.atomic_runner import run_orientation
 from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
 from prototypes.local_ranking.errors import HarnessError
@@ -598,6 +602,71 @@ def test_orientation_runner_retries_only_invalid_response(tmp_path: Path) -> Non
     )
     assert replay == result
     assert request_count == 25
+
+
+def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> None:
+    replicates = []
+    for replicate_index in range(1, 4):
+        replicate_id = f"r{replicate_index}"
+        entry: dict[str, Path | str] = {"replicate_id": replicate_id}
+        for orientation in (1, 2):
+            atomic_root = tmp_path / replicate_id / f"o{orientation}" / "atomic"
+            prepare_atomic(
+                bundle_path=_source_bundle(
+                    tmp_path / f"source-o{orientation}.json", orientation=orientation
+                ),
+                replicate_id=replicate_id,
+                output_root=atomic_root,
+            )
+            atomic_path = atomic_root / "private" / "manifest.json"
+            preparation_root = tmp_path / replicate_id / f"o{orientation}" / "transport"
+            prepare_atomic_transport(
+                atomic_manifest_path=atomic_path,
+                output_root=preparation_root,
+                max_concurrency=4,
+            )
+            entry[f"orientation_{orientation}_atomic"] = atomic_path
+            entry[f"orientation_{orientation}_preparation"] = preparation_root
+        replicates.append(entry)
+    usage_snapshot = _write(
+        tmp_path / "usage.json",
+        {
+            "captured_at": "2026-09-01T00:00:00Z",
+            "model_id": "deepseek-v4-pro",
+            "model_present": True,
+            "models_http_status": 200,
+            "models_url": "https://opencode.ai/zen/go/v1/models",
+            "schema_version": USAGE_SNAPSHOT_SCHEMA_VERSION,
+            "status": "pass",
+            "usage": {
+                period: {
+                    "percent": 10,
+                    "resetsAt": "2026-09-02T00:00:00Z",
+                    "status": "ok",
+                }
+                for period in ("rolling", "weekly", "monthly")
+            },
+            "usage_http_status": 200,
+            "usage_url": "https://opencode.ai/zen/go/v1/usage",
+        },
+    )
+
+    profile = prepare_profile(
+        replicates=replicates,
+        source_commit="a" * 40,
+        usage_snapshot_path=usage_snapshot,
+        smoke_result_sha256="b" * 64,
+        output_path=tmp_path / "profile.json",
+    )
+
+    assert profile["budget"] == {
+        "logical_calls": 144,
+        "max_concurrency": 4,
+        "max_physical_calls": 288,
+        "max_tokens_per_call": 16_384,
+    }
+    assert len(profile["replicates"]) == 3
+    assert all(len(item["orientations"]) == 2 for item in profile["replicates"])
 
 
 def test_unknown_handle_is_machine_detectable_invalid(tmp_path: Path) -> None:
