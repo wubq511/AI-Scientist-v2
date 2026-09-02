@@ -680,6 +680,13 @@ def _transport_request_builder(schema_version: Any) -> Any:
     )
 
 
+def _decode_utf8(data: bytes, *, code: str, label: str) -> str:
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        fail(code, f"{label} is not UTF-8", offset=exc.start)
+
+
 def _validate_transport_manifest_shape(
     manifest: dict[str, Any], *, code: str
 ) -> dict[int, dict[str, Any]]:
@@ -795,7 +802,7 @@ def _validate_transport_call_files(
         request_path, label="prepared request"
     )
     expected_request = request_builder(
-        prompt=prompt_bytes.decode("utf-8"),
+        prompt=_decode_utf8(prompt_bytes, code="INVALID_UTF8", label="Prepared prompt"),
         reasoning_effort=reasoning_effort,
     )
     if (
@@ -1368,6 +1375,7 @@ def _bind_current_preparation(
     prepared_call = prepared_calls.get(call["sequence"])
     if (
         preparation["atomic_manifest_sha256"] != manifest_file_sha256
+        or preparation["evaluator"] != manifest["evaluator"]
         or prepared_call is None
         or prepared_call["call_id"] != call["call_id"]
         or prepared_call["orientation"] != manifest["orientation"]
@@ -1466,6 +1474,7 @@ def _validate_attempt_input_evidence(
         or copied.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
         or copied["kind"] != "atomic"
         or copied["atomic_manifest_sha256"] != manifest_file_sha256
+        or copied["evaluator"] != manifest["evaluator"]
     ):
         fail(
             code,
@@ -1491,7 +1500,7 @@ def _validate_attempt_input_evidence(
             error=str(exc),
         )
     expected_request = _request(
-        prompt=prompt_bytes.decode("utf-8"),
+        prompt=_decode_utf8(prompt_bytes, code=code, label="Attempt input prompt"),
         reasoning_effort=copied["evaluator"]["reasoning_effort"],
     )
     if (

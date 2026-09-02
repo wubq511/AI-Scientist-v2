@@ -21,8 +21,11 @@ from .atomic_judge import (
     PREPARATION_SCHEMA_VERSION,
     RETRY_POLICY,
     SMOKE_CALL_COUNT,
+    STREAM_ERROR_EVIDENCE_FILE,
     SUBMIT_JUDGMENT_TOOL,
     SUBMIT_JUDGMENT_TOOL_NAME,
+    TOOL_RESULT_EVIDENCE_FILES,
+    TRANSPORT_ERROR_EVIDENCE_FILE,
     _call_binding,
     _load_call_packet,
     _load_manifest,
@@ -213,17 +216,9 @@ def prepare_smoke(
 
 
 def _execution_files(output_root: Path) -> dict[str, str]:
-    allowed = {
-        "chunks.jsonl",
-        "finished-at.txt",
-        "http-status.txt",
-        "receipt.json",
-        "response-headers.json",
-        "response.json",
-        "started-at.txt",
-        "stream-body.sse",
-        "stream-validation-error.json",
-        "transport-error.json",
+    allowed = TOOL_RESULT_EVIDENCE_FILES | {
+        STREAM_ERROR_EVIDENCE_FILE,
+        TRANSPORT_ERROR_EVIDENCE_FILE,
     }
     result = {}
     for name in sorted(allowed):

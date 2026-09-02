@@ -343,8 +343,9 @@ python -m prototypes.local_ranking.atomic_judge record-attempt \
 
 `--preparation-root` is required for the current family and forbidden for spent families: the
 recorder re-validates the transport preparation, binds its manifest hash plus the per-call request
-hash into the attempt, and copies the preparation manifest, the call's prompt bytes, and the
-frozen request into an `input-evidence/` directory that replay re-verifies hash-for-hash.
+hash and exact effective evaluator into the attempt, and copies the preparation manifest, the
+call's prompt bytes, and the frozen request into an `input-evidence/` directory that replay
+re-verifies hash-for-hash. Non-UTF-8 prepared or copied prompts fail with a typed harness error.
 
 Only machine-detectable invalid output may receive attempts 2-4, using exact identical request bytes.
 The resolver accepts the first valid response, rejects any retry after a valid response, expands

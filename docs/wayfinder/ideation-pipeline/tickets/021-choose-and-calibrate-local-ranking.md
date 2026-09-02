@@ -277,3 +277,14 @@ resolve 停在 RETRY_REQUIRED/call-021；legacy v2.1 transport 保持 diagnostic
 prepare 全部 bytes 一致；proof 5 三个 hash 原样保留。Ticket 继续 open；fresh `pro-max-calibration-003-tool-output`
 仍需 Codex 独立复核并冻结 Windows execution bundle、profile hash、调用前 usage、执行顺序与 r1 budget 后，再向
 Robert 单独申请授权。
+
+Codex 对 `5a915d0` / `4772e1f` 完成独立 post-implementation review。Kimi 报告的双解释器 251 tests、真实
+smoke/call-021/v2.2 replay、proof hashes、targeted/full Ruff、Black、compileall、diff-check 与 clean-tree 均可复现；
+另在 detached `739ea57` 基线上独立复现 E3：只有 `http-status.txt` 的 failed result 会被旧 recorder 接受并复制，补齐了
+Kimi red run 中由旧函数签名 `TypeError` 遮蔽的 failure-subset 实证。Standards/Spec 审查发现三个小缺口并由 Codex 直接
+修复：transport preparation 的 evaluator 曾可与 atomic evaluator 不同却被 recorder/replay 接受；prepared/copied prompt
+若非 UTF-8 会泄漏原生 `UnicodeDecodeError`；writer `_execution_files` 仍手写一份与 shared policy 重复的 allowlist。
+新增四条 red/green 回归测试，record/replay 现在都要求 evaluator exact equal，非 UTF-8 prompt 返回 typed fail-closed，
+writer allowlist 由 shared success/failure constants 推导。修复后双解释器各 255 tests passed，真实 replay 与三个 frozen
+hashes 仍不变。v2.3.2 至此通过 Standards 与 Spec 两轴验收，可进入 formal 003 的 prepare-only 冻结阶段；live calls 仍未
+授权。

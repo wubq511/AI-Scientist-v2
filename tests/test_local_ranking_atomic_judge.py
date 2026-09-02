@@ -20,6 +20,7 @@ from prototypes.local_ranking.atomic_judge import (
     CANARY_ATOMIC_PREPARATION_SCHEMA_VERSIONS,
     SUBMIT_JUDGMENT_TOOL,
     _legacy_prompt_text,
+    _request,
     _validate_attempt,
     prepare_atomic,
     record_failed_attempt,
@@ -2001,6 +2002,20 @@ def _recorded_current_attempt(tmp_path: Path) -> tuple[Path, Path, Path]:
     return manifest_path, output_root, _transport_root_for(manifest_path)
 
 
+def _rewrite_transport_effort(preparation_root: Path, effort: str) -> None:
+    manifest_path = preparation_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["evaluator"]["reasoning_effort"] = effort
+    for call in manifest["calls"]:
+        prompt = (preparation_root / call["prompt_path"]).read_text()
+        request_bytes = canonical_json_bytes(
+            _request(prompt=prompt, reasoning_effort=effort)
+        )
+        (preparation_root / call["request_path"]).write_bytes(request_bytes)
+        call["request_sha256"] = sha256_bytes(request_bytes)
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+
+
 def test_record_attempt_requires_preparation_root_for_the_current_family(
     tmp_path: Path,
 ) -> None:
@@ -2248,6 +2263,41 @@ def test_record_attempt_rejects_a_foreign_preparation(tmp_path: Path) -> None:
     assert raised.value.code == "INVALID_PREPARATION"
 
 
+def test_record_attempt_rejects_transport_evaluator_mismatch(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    preparation_root = _ensure_transport(manifest_path)
+    _rewrite_transport_effort(preparation_root, "max")
+    response = _write(tmp_path / "response.json", _valid_response())
+    receipt_path, result_path, _ = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=tmp_path / "evidence",
+        preparation_root=preparation_root,
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=preparation_root,
+        )
+
+    assert raised.value.code == "INVALID_PREPARATION"
+    assert not (tmp_path / "attempt").exists()
+
+
 @pytest.mark.parametrize("field", ["preparation_manifest_sha256", "request_sha256"])
 def test_record_attempt_rejects_forged_transport_hashes(
     tmp_path: Path, field: str
@@ -2336,6 +2386,44 @@ def test_record_attempt_rejects_tampered_prepared_input(
 
     assert raised.value.code == "HASH_MISMATCH"
     assert manifest["call_count"] == 24
+
+
+def test_record_attempt_fails_closed_on_non_utf8_prepared_prompt(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    execution_root = tmp_path / "evidence"
+    receipt_path, result_path, root = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=execution_root,
+    )
+    assert root is not None
+    transport = json.loads((root / "manifest.json").read_bytes())
+    (root / transport["calls"][0]["prompt_path"]).write_bytes(b"\xff")
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_UTF8"
+    assert not (tmp_path / "attempt").exists()
 
 
 @pytest.mark.parametrize("kind", ["transport", "http", "non_sse", "extractor"])
@@ -2737,6 +2825,7 @@ def test_validate_attempt_rejects_tampered_execution_metadata(tmp_path: Path) ->
     [
         ("missing-request", "INVALID_INPUT_EVIDENCE"),
         ("tampered-prompt", "INVALID_INPUT_EVIDENCE"),
+        ("non-utf8-prompt", "INVALID_INPUT_EVIDENCE"),
         ("tampered-manifest", "INVALID_INPUT_EVIDENCE"),
         ("extra-input-file", "INVALID_INPUT_EVIDENCE"),
     ],
@@ -2751,6 +2840,8 @@ def test_validate_attempt_rejects_broken_input_evidence(
     elif tamper == "tampered-prompt":
         prompt_path = input_evidence / "prompt.txt"
         prompt_path.write_bytes(prompt_path.read_bytes() + b"drift")
+    elif tamper == "non-utf8-prompt":
+        (input_evidence / "prompt.txt").write_bytes(b"\xff")
     elif tamper == "tampered-manifest":
         manifest_bytes = (input_evidence / "manifest.json").read_bytes()
         pretty = json.dumps(json.loads(manifest_bytes), indent=2).encode()
@@ -2769,6 +2860,62 @@ def test_validate_attempt_rejects_broken_input_evidence(
         )
 
     assert raised.value.code == expected_code
+
+
+def test_validate_attempt_rejects_coherent_input_evaluator_mismatch(
+    tmp_path: Path,
+) -> None:
+    manifest_path, output_root, _ = _recorded_current_attempt(tmp_path)
+    input_root = output_root / "input-evidence"
+    copied_manifest = json.loads((input_root / "manifest.json").read_bytes())
+    copied_manifest["evaluator"]["reasoning_effort"] = "max"
+    prompt = (input_root / "prompt.txt").read_text()
+    request_bytes = canonical_json_bytes(
+        _request(prompt=prompt, reasoning_effort="max")
+    )
+    request_sha256 = sha256_bytes(request_bytes)
+    copied_manifest["calls"][0]["request_sha256"] = request_sha256
+    preparation_bytes = canonical_json_bytes(copied_manifest)
+    preparation_sha256 = sha256_bytes(preparation_bytes)
+    (input_root / "manifest.json").write_bytes(preparation_bytes)
+    (input_root / "request.json").write_bytes(request_bytes)
+
+    receipt_path = output_root / "execution-receipt.json"
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt["preparation_manifest_sha256"] = preparation_sha256
+    receipt["request_sha256"] = request_sha256
+    receipt_bytes = canonical_json_bytes(receipt)
+    receipt_path.write_bytes(receipt_bytes)
+    (output_root / "execution-evidence" / "receipt.json").write_bytes(receipt_bytes)
+
+    result_path = output_root / "execution-result.json"
+    result = json.loads(result_path.read_bytes())
+    result["preparation_manifest_sha256"] = preparation_sha256
+    result["request_sha256"] = request_sha256
+    result["receipt_sha256"] = sha256_bytes(receipt_bytes)
+    result["files"]["receipt.json"] = sha256_bytes(receipt_bytes)
+    result_bytes = canonical_json_bytes(result)
+    result_path.write_bytes(result_bytes)
+
+    attempt_path = output_root / "attempt.json"
+    attempt = json.loads(attempt_path.read_bytes())
+    attempt["preparation_manifest_sha256"] = preparation_sha256
+    attempt["request_sha256"] = request_sha256
+    attempt["execution_receipt_sha256"] = sha256_bytes(receipt_bytes)
+    attempt["execution_result_sha256"] = sha256_bytes(result_bytes)
+    attempt_path.write_bytes(canonical_json_bytes(attempt))
+    manifest = json.loads(manifest_path.read_bytes())
+    calls_by_id = {call["call_id"]: call for call in manifest["calls"]}
+
+    with pytest.raises(HarnessError) as raised:
+        _validate_attempt(
+            attempt_path=attempt_path,
+            manifest=manifest,
+            artifact_root=manifest_path.parent.parent,
+            calls_by_id=calls_by_id,
+        )
+
+    assert raised.value.code == "INVALID_INPUT_EVIDENCE"
 
 
 def test_orientation_runner_recovers_completed_execution_without_resending(
