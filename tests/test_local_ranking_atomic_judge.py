@@ -12,6 +12,8 @@ from prototypes.local_ranking.atomic_judge import (
     ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
     ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
     ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION,
+    ATOMIC_PREPARATION_SCHEMA_VERSION,
+    SUBMIT_JUDGMENT_TOOL,
     prepare_atomic,
     record_failed_attempt,
     resolve_orientation,
@@ -135,7 +137,7 @@ def _semantic_stream(*, response_id: str, response: dict) -> bytes:
         "model": model,
         "object": "chat.completion.chunk",
     }
-    content = json.dumps(response, separators=(",", ":"))
+    arguments = json.dumps(response, separators=(",", ":"))
     return b"".join(
         (
             _sse_event(
@@ -143,7 +145,20 @@ def _semantic_stream(*, response_id: str, response: dict) -> bytes:
                     **base,
                     "choices": [
                         {
-                            "delta": {"content": content, "role": "assistant"},
+                            "delta": {
+                                "role": "assistant",
+                                "tool_calls": [
+                                    {
+                                        "function": {
+                                            "arguments": arguments,
+                                            "name": "submit_judgment",
+                                        },
+                                        "id": f"call-{response_id}",
+                                        "index": 0,
+                                        "type": "function",
+                                    }
+                                ],
+                            },
                             "finish_reason": None,
                             "index": 0,
                         }
@@ -155,8 +170,8 @@ def _semantic_stream(*, response_id: str, response: dict) -> bytes:
                     **base,
                     "choices": [
                         {
-                            "delta": {"content": ""},
-                            "finish_reason": "stop",
+                            "delta": {},
+                            "finish_reason": "tool_calls",
                             "index": 0,
                         }
                     ],
@@ -173,7 +188,7 @@ def _semantic_stream(*, response_id: str, response: dict) -> bytes:
     )
 
 
-def record_attempt(**kwargs):
+def record_attempt(legacy: bool = False, **kwargs):
     manifest_path = kwargs["manifest_path"]
     response_path = kwargs["response_path"]
     output_root = kwargs["output_root"]
@@ -181,6 +196,43 @@ def record_attempt(**kwargs):
     call = manifest["calls"][kwargs["call_sequence"] - 1]
     response_bytes = response_path.read_bytes()
     response_id = "test-" + sha256_bytes(str(output_root).encode())[:24]
+    if legacy:
+        identity = {
+            "cost": "0",
+            "created_first": 1,
+            "created_last": 1,
+            "finish_reason": "stop",
+            "model": "deepseek-v4-pro",
+            "provider_response_id": response_id,
+        }
+        qualification = {
+            "json_object_accepted": True,
+            "reasoning_effort_requested": manifest["evaluator"]["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        }
+        receipt_schema_version = "local-ranking-atomic-opencode-go-receipt-v2.0"
+        result_schema_version = "local-ranking-atomic-opencode-go-execution-v2.0"
+    else:
+        identity = {
+            "cost": "0",
+            "created_first": 1,
+            "created_last": 1,
+            "finish_reason": "tool_calls",
+            "model": "deepseek-v4-pro",
+            "provider_response_id": response_id,
+            "tool_call_id": f"tool-{response_id}",
+        }
+        qualification = {
+            "forced_tool_call_accepted": True,
+            "reasoning_effort_requested": manifest["evaluator"]["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        }
+        receipt_schema_version = ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
+        result_schema_version = ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION
     receipt = {
         "call_binding": {
             "atomic_manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
@@ -195,28 +247,20 @@ def record_attempt(**kwargs):
         "endpoint": "https://opencode.ai/zen/go/v1/chat/completions",
         "files": {"response.json": sha256_bytes(response_bytes)},
         "http_status": 200,
-        "identity": {
-            "cost": "0",
-            "created_first": 1,
-            "created_last": 1,
-            "finish_reason": "stop",
-            "model": "deepseek-v4-pro",
-            "provider_response_id": response_id,
-        },
+        "identity": identity,
         "preparation_manifest_sha256": "a" * 64,
         "provider": "opencode-go",
         "request_sha256": "b" * 64,
-        "schema_version": ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
+        "schema_version": receipt_schema_version,
         "status": "pass",
-        "transport_qualification": {
-            "json_object_accepted": True,
-            "reasoning_effort_requested": manifest["evaluator"]["reasoning_effort"],
-            "reasoning_execution_proven": False,
-            "stream_completed": True,
-            "streaming_requested": True,
-        },
+        "transport_qualification": qualification,
         "usage": None,
     }
+    if not legacy:
+        receipt["tool"] = {
+            "name": "submit_judgment",
+            "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
+        }
     execution_root = output_root.parent / f"{output_root.name}-execution-source"
     receipt_path = _write(execution_root / "receipt.json", receipt)
     (execution_root / "response.json").write_bytes(response_bytes)
@@ -230,7 +274,7 @@ def record_attempt(**kwargs):
         "preparation_manifest_sha256": "a" * 64,
         "receipt_sha256": sha256_bytes(receipt_path.read_bytes()),
         "request_sha256": "b" * 64,
-        "schema_version": ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
+        "schema_version": result_schema_version,
         "status": "pass",
     }
     execution_result_path = _write(
@@ -467,6 +511,7 @@ def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -
         )
         attempt_root = tmp_path / "attempts" / call["call_id"] / "attempt-1"
         record_attempt(
+            legacy=True,
             manifest_path=manifest_path,
             call_sequence=call["sequence"],
             attempt_number=1,
@@ -474,10 +519,13 @@ def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -
             output_root=attempt_root,
         )
         attempt_path = attempt_root / "attempt.json"
-        if call["sequence"] == 1:
-            legacy_attempt = json.loads(attempt_path.read_bytes())
-            legacy_attempt["schema_version"] = "local-ranking-atomic-attempt-v2.3"
-            attempt_path.write_bytes(canonical_json_bytes(legacy_attempt))
+        legacy_attempt = json.loads(attempt_path.read_bytes())
+        legacy_attempt["schema_version"] = (
+            "local-ranking-atomic-attempt-v2.3"
+            if call["sequence"] == 1
+            else "local-ranking-atomic-attempt-v2.4"
+        )
+        attempt_path.write_bytes(canonical_json_bytes(legacy_attempt))
         attempt_paths.append(attempt_path)
 
     trace = resolve_orientation(
@@ -488,6 +536,127 @@ def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -
 
     assert trace["status"] == "pass"
     assert trace["attempt_summary"]["total_physical_attempts"] == 24
+    attempt = json.loads(attempt_paths[0].read_bytes())
+    assert attempt["schema_version"] == "local-ranking-atomic-attempt-v2.3"
+    legacy_receipt = json.loads(
+        (attempt_paths[0].parent / "execution-receipt.json").read_bytes()
+    )
+    assert legacy_receipt["schema_version"] == (
+        "local-ranking-atomic-opencode-go-receipt-v2.0"
+    )
+    assert legacy_receipt["identity"]["finish_reason"] == "stop"
+
+
+def test_new_writers_emit_only_tool_transport_schema_versions(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    manifest = prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+
+    outcome = record_attempt(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        attempt_number=1,
+        response_path=response,
+        output_root=tmp_path / "attempt",
+    )
+
+    assert manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION
+    assert outcome["schema_version"] == "local-ranking-atomic-attempt-v2.5"
+    receipt = json.loads((tmp_path / "attempt" / "execution-receipt.json").read_bytes())
+    assert receipt["schema_version"] == ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
+    assert receipt["identity"]["finish_reason"] == "tool_calls"
+    assert receipt["identity"]["tool_call_id"]
+    assert receipt["tool"] == {
+        "name": "submit_judgment",
+        "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
+    }
+    result = json.loads((tmp_path / "attempt" / "execution-result.json").read_bytes())
+    assert result["schema_version"] == ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION
+
+
+def test_record_attempt_rejects_receipt_outside_tool_finish_allowlist(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    attempt_root = tmp_path / "attempt"
+
+    record_attempt(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        attempt_number=1,
+        response_path=response,
+        output_root=attempt_root,
+    )
+    receipt_path = (
+        attempt_root.parent / f"{attempt_root.name}-execution-source" / ("receipt.json")
+    )
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt["identity"]["finish_reason"] = "length"
+    receipt_path.write_bytes(canonical_json_bytes(receipt))
+
+    with pytest.raises(HarnessError) as raised_after_drift:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=receipt_path.parent / "execution-result.json",
+            output_root=tmp_path / "attempt-drifted",
+        )
+
+    assert raised_after_drift.value.code == "INVALID_EXECUTION_RECEIPT"
+
+
+def test_record_attempt_rejects_receipt_with_wrong_tool_schema(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    attempt_root = tmp_path / "attempt"
+
+    record_attempt(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        attempt_number=1,
+        response_path=response,
+        output_root=attempt_root,
+    )
+    receipt_path = (
+        attempt_root.parent / f"{attempt_root.name}-execution-source" / ("receipt.json")
+    )
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt["tool"]["schema_sha256"] = "0" * 64
+    receipt_path.write_bytes(canonical_json_bytes(receipt))
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=receipt_path.parent / "execution-result.json",
+            output_root=tmp_path / "attempt-drifted",
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RECEIPT"
 
 
 def test_four_invalid_attempts_exhaust_one_logical_call(tmp_path: Path) -> None:
@@ -934,3 +1103,74 @@ def test_resolved_atomic_traces_feed_calibration_end_to_end(tmp_path: Path) -> N
     assert result["status"] == "pass"
     assert result["pooled_stable_count"] == 72
     assert result["attempt_diagnostics"]["total_physical_attempts"] == 144
+
+
+def test_prepare_atomic_prompt_requires_exactly_one_tool_call(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    manifest = prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+
+    first = manifest["calls"][0]
+    prompt = (prepared / first["prompt_path"]).read_text()
+    assert manifest["schema_version"] == "local-ranking-atomic-preparation-v2.4"
+    assert "No external or retrieval tools are available" in prompt
+    assert "submit_judgment" in prompt
+    assert "Call submit_judgment exactly once" in prompt
+    assert "No tools are available" not in prompt
+    assert "Return exactly one JSON object" not in prompt
+    assert "response_format" not in prompt
+
+
+def test_repeated_atomic_prepare_is_byte_identical(tmp_path: Path) -> None:
+    source = _source_bundle(tmp_path / "source.json")
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    first = prepare_atomic(
+        bundle_path=source, replicate_id="r1", output_root=first_root
+    )
+    second = prepare_atomic(
+        bundle_path=source, replicate_id="r1", output_root=second_root
+    )
+
+    assert first == second
+    first_files = sorted(
+        path.relative_to(first_root) for path in first_root.rglob("*") if path.is_file()
+    )
+    second_files = sorted(
+        path.relative_to(second_root)
+        for path in second_root.rglob("*")
+        if path.is_file()
+    )
+    assert first_files == second_files
+    for relative in first_files:
+        assert (first_root / relative).read_bytes() == (
+            second_root / relative
+        ).read_bytes()
+
+    first_transport = tmp_path / "first-transport"
+    second_transport = tmp_path / "second-transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=first_root / "private" / "manifest.json",
+        output_root=first_transport,
+    )
+    prepare_atomic_transport(
+        atomic_manifest_path=second_root / "private" / "manifest.json",
+        output_root=second_transport,
+    )
+    transport_files = sorted(
+        path.relative_to(first_transport)
+        for path in first_transport.rglob("*")
+        if path.is_file()
+    )
+    assert transport_files == sorted(
+        path.relative_to(second_transport)
+        for path in second_transport.rglob("*")
+        if path.is_file()
+    )
+    for relative in transport_files:
+        assert (first_transport / relative).read_bytes() == (
+            second_transport / relative
+        ).read_bytes()

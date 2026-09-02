@@ -9,6 +9,7 @@ from prototypes.local_ranking.errors import HarnessError
 from prototypes.local_ranking.opencode_go_chat import prepare_synthetic
 from prototypes.local_ranking.opencode_go_stream import (
     _extract_stream_response,
+    _extract_stream_tool_response,
     _validate_preparation,
     prepare,
 )
@@ -322,3 +323,285 @@ def test_prepare_stream_request_binds_pro_high_profile(tmp_path) -> None:
     assert request["reasoning_effort"] == "high"
     assert manifest["model"] == "deepseek-v4-pro"
     assert validated[2]["model"] == "deepseek-v4-pro"
+
+
+def _tool_chunk(
+    *,
+    delta: dict,
+    finish_reason: str | None = None,
+    response_id: str = "chatcmpl-tool-test",
+    model: str = "deepseek-v4-pro",
+) -> dict:
+    return {
+        "choices": [
+            {
+                "delta": delta,
+                "finish_reason": finish_reason,
+                "index": 0,
+            }
+        ],
+        "created": 1,
+        "id": response_id,
+        "model": model,
+        "object": "chat.completion.chunk",
+    }
+
+
+def _tool_stream(
+    *,
+    arguments: str = '{"value":true}',
+    tool_name: str = "submit_judgment",
+    tool_call_id: str = "call-tool-001",
+    finish_reason: str = "tool_calls",
+    content: str | None = None,
+    reasoning: str | None = None,
+) -> bytes:
+    midpoint = len(arguments) // 2
+    first_delta: dict = {
+        "role": "assistant",
+        "tool_calls": [
+            {
+                "function": {
+                    "arguments": arguments[:midpoint],
+                    "name": tool_name[:7],
+                },
+                "id": tool_call_id,
+                "index": 0,
+                "type": "function",
+            }
+        ],
+    }
+    if content is not None:
+        first_delta["content"] = content
+    if reasoning is not None:
+        first_delta["reasoning_content"] = reasoning
+    second_delta = {
+        "tool_calls": [
+            {
+                "function": {
+                    "arguments": arguments[midpoint:],
+                    "name": tool_name[7:],
+                },
+                "index": 0,
+            }
+        ]
+    }
+    terminal = _tool_chunk(delta={}, finish_reason=finish_reason)
+    terminal["usage"] = {
+        "completion_tokens": 5,
+        "prompt_tokens": 10,
+        "total_tokens": 15,
+    }
+    return b"".join(
+        (
+            _event(_tool_chunk(delta=first_delta)),
+            _event(_tool_chunk(delta=second_delta)),
+            _event(terminal),
+            _event("[DONE]"),
+            _event({"choices": [], "cost": "0"}),
+        )
+    )
+
+
+def _extract_tool(raw_stream: bytes):
+    return _extract_stream_tool_response(
+        raw_stream,
+        expected_model="deepseek-v4-pro",
+        tool_name="submit_judgment",
+    )
+
+
+def test_extract_tool_stream_joins_fragmented_call_and_isolates_content() -> None:
+    arguments, usage, identity, chunks, diagnostics = _extract_tool(
+        _tool_stream(content="noise", reasoning="private reasoning")
+    )
+
+    assert arguments == {"value": True}
+    assert usage == {"completion_tokens": 5, "prompt_tokens": 10, "total_tokens": 15}
+    assert identity == {
+        "cost": "0",
+        "created_first": 1,
+        "created_last": 1,
+        "finish_reason": "tool_calls",
+        "model": "deepseek-v4-pro",
+        "provider_response_id": "chatcmpl-tool-test",
+        "tool_call_id": "call-tool-001",
+    }
+    assert len(chunks) == 4
+    assert diagnostics == {
+        "arguments_bytes": 14,
+        "content_bytes": 5,
+        "data_event_count": 5,
+        "done_received": True,
+        "keepalive_count": 0,
+        "post_done_cost_received": True,
+        "reasoning_bytes": 17,
+    }
+
+
+def test_extract_tool_stream_accepts_stop_finish_reason() -> None:
+    arguments, _, identity, _, _ = _extract_tool(_tool_stream(finish_reason="stop"))
+
+    assert arguments == {"value": True}
+    assert identity["finish_reason"] == "stop"
+
+
+@pytest.mark.parametrize(
+    ("raw_stream", "expected_code"),
+    [
+        (_tool_stream(tool_name="submit_judgm3nt"), "INVALID_TOOL_CALL"),
+        (_tool_stream(arguments='{"value":'), "INVALID_TOOL_CALL"),
+        (_tool_stream(arguments="[1]"), "INVALID_TOOL_CALL"),
+        (_tool_stream(arguments=""), "INVALID_TOOL_CALL"),
+        (_tool_stream(finish_reason="length"), "PROVIDER_RESPONSE_FAILED"),
+        (_tool_stream().split(_event("[DONE]"))[0], "STREAM_INCOMPLETE"),
+        (
+            _tool_stream().replace(b'"index":0', b'"index":1', 1),
+            "INVALID_TOOL_CALL",
+        ),
+    ],
+)
+def test_extract_tool_stream_fails_closed(
+    raw_stream: bytes, expected_code: str
+) -> None:
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(raw_stream)
+
+    assert raised.value.code == expected_code
+
+
+def test_extract_tool_stream_rejects_conflicting_tool_call_id() -> None:
+    first = _tool_chunk(
+        delta={
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "function": {"arguments": '{"value":', "name": "submit_"},
+                    "id": "call-tool-001",
+                    "index": 0,
+                    "type": "function",
+                }
+            ],
+        }
+    )
+    second = _tool_chunk(
+        delta={
+            "tool_calls": [
+                {
+                    "function": {"arguments": "true}", "name": "judgment"},
+                    "id": "call-other",
+                    "index": 0,
+                }
+            ]
+        }
+    )
+    terminal = _tool_chunk(delta={}, finish_reason="tool_calls")
+    terminal["usage"] = {
+        "completion_tokens": 5,
+        "prompt_tokens": 10,
+        "total_tokens": 15,
+    }
+    raw_stream = b"".join(
+        (
+            _event(first),
+            _event(second),
+            _event(terminal),
+            _event("[DONE]"),
+            _event({"choices": [], "cost": "0"}),
+        )
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(raw_stream)
+
+    assert raised.value.code == "INVALID_TOOL_CALL"
+
+
+def test_extract_tool_stream_requires_a_tool_call() -> None:
+    content_only = _chunk(
+        content='{"value":true}', model="deepseek-v4-pro", role="assistant"
+    )
+    terminal = _chunk(content="", finish_reason="stop", model="deepseek-v4-pro")
+    terminal["usage"] = {
+        "completion_tokens": 5,
+        "prompt_tokens": 10,
+        "total_tokens": 15,
+    }
+    raw_stream = b"".join(
+        (
+            _event(content_only),
+            _event(terminal),
+            _event("[DONE]"),
+            _event({"choices": [], "cost": "0"}),
+        )
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(raw_stream)
+
+    assert raised.value.code == "INVALID_TOOL_CALL"
+
+
+def test_extract_tool_stream_rejects_refusal_and_terminal_continuation() -> None:
+    refusal = _tool_chunk(delta={"refusal": "cannot answer"})
+    second = _tool_chunk(
+        delta={
+            "tool_calls": [
+                {
+                    "function": {"arguments": "true}", "name": "judgment"},
+                    "index": 0,
+                }
+            ]
+        }
+    )
+    terminal = _tool_chunk(delta={}, finish_reason="tool_calls")
+    terminal["usage"] = {
+        "completion_tokens": 5,
+        "prompt_tokens": 10,
+        "total_tokens": 15,
+    }
+    refusal_stream = b"".join(
+        (
+            _event(refusal),
+            _event(second),
+            _event(terminal),
+            _event("[DONE]"),
+            _event({"choices": [], "cost": "0"}),
+        )
+    )
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(refusal_stream)
+    assert raised.value.code == "PROVIDER_RESPONSE_FAILED"
+
+    terminal_extra = _tool_chunk(
+        delta={"tool_calls": [{"function": {"arguments": "{}"}, "index": 0}]},
+    )
+    continued = _tool_stream().replace(
+        _event("[DONE]"), _event(terminal_extra) + _event("[DONE]"), 1
+    )
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(continued)
+    assert raised.value.code == "INVALID_PROVIDER_RESPONSE"
+
+
+def test_extract_tool_stream_rejects_non_string_reasoning() -> None:
+    bad_reasoning = _tool_chunk(delta={"role": "assistant", "reasoning_content": 5})
+    terminal = _tool_chunk(delta={}, finish_reason="tool_calls")
+    terminal["usage"] = {
+        "completion_tokens": 5,
+        "prompt_tokens": 10,
+        "total_tokens": 15,
+    }
+    raw_stream = b"".join(
+        (
+            _event(bad_reasoning),
+            _event(terminal),
+            _event("[DONE]"),
+            _event({"choices": [], "cost": "0"}),
+        )
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(raw_stream)
+
+    assert raised.value.code == "INVALID_PROVIDER_RESPONSE"

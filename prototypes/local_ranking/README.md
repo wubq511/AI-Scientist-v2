@@ -293,9 +293,12 @@ python -m prototypes.local_ranking.atomic_judge prepare \
 ```
 
 The public prompts contain only query text, visible evidence, and `L1-L3`/`R1-R3` handles. Item,
-paper, segment, bundle, and evaluator identities stay controller-owned. After each physical call,
-prepare immutable OpenCode Go requests. The adapter freezes `deepseek-v4-pro`, JSON-object SSE,
-`max_tokens=16384`, concurrency 1-4, request hashes, and the bounded retry policy:
+paper, segment, bundle, and evaluator identities stay controller-owned. Prompts state that no
+external or retrieval tools are available and require exactly one `submit_judgment` tool call.
+After each physical call, prepare immutable OpenCode Go requests. The adapter freezes
+`deepseek-v4-pro`, one forced `submit_judgment` function tool with a closed six-field schema (no
+`response_format`), `max_tokens=16384`, concurrency 1-4, request hashes, and the bounded retry
+policy:
 
 ```bash
 python -m prototypes.local_ranking.atomic_opencode_go prepare-atomic \
@@ -309,6 +312,14 @@ python -m prototypes.local_ranking.atomic_opencode_go execute-call \
   --output-root <new-transport-attempt> \
   --kimi-config <kimi-config-with-opencode-go-key>
 ```
+
+Execution streams the SSE body, joins fragmented `tool_calls[0]` ID/name/arguments by index, and
+accepts only one index-0 `submit_judgment` call whose arguments parse without repair; ordinary
+`content` and `reasoning_content` are preserved as raw evidence only and never supply judgment
+fields. `finish_reason` must be `tool_calls` or `stop`; multiple/wrong/missing calls, malformed
+arguments, refusal, or terminal continuation fail closed. The canonical `response.json` is built
+only from the validated-parse tool arguments, and the v3.0 receipt binds the request, tool schema,
+tool-call identity, raw/derived evidence hashes, usage, and cost.
 
 After each physical call, preserve and validate its unmodified response together with the exact
 provider receipt:
@@ -375,9 +386,23 @@ retry rates are diagnostics, not additional admission thresholds. The local prot
 accept an attempt without an exact request/response/provider-receipt binding, and provider response
 IDs must be unique across the six traces. Before semantic calls, use `prepare-smoke` and `run-smoke`
 to prove the frozen concurrency against four transport-only probes; their answers never enter the
-ranking gates. See
-`docs/prototypes/local-ranking-atomic-evaluator-contract-v2.0.md` and the v2.2 bounded-retry
-correction for the approved boundary.
+ranking gates. A single forced-tool synthetic probe (the v2.3 canary's first authorized call) uses
+`prepare-smoke`, one `execute-call`, and then:
+
+```bash
+python -m prototypes.local_ranking.atomic_opencode_go validate-smoke-call \
+  --preparation-root <smoke-transport-preparation> \
+  --call-sequence <1-4> \
+  --execution-root <single-smoke-execution>
+```
+
+The probe is valid only when the executed call's canonical `response.json` equals the exact
+prescribed `submit_judgment` arguments for that smoke call. The bounded v2.3 canary then retries
+the spent `pro-max-calibration-002/r1/o1/call-021` with identical request bytes (at most four
+sequential attempts, first-valid stop) through `execute-call` plus `record-attempt`; every canary
+output is `spent_transport_only` and never becomes a semantic vote. See
+`docs/prototypes/local-ranking-atomic-evaluator-contract-v2.0.md`, the v2.2 bounded-retry
+correction, and the v2.3 tool-output contract for the approved boundary.
 
 Before the first semantic call, capture the authenticated quota state and freeze all six atomic
 and transport manifests into one profile-level budget:

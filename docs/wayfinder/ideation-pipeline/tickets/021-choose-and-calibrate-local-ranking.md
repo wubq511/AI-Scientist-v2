@@ -167,3 +167,16 @@ Primary canary 通过后必须从 clean commit fresh 运行 `pro-max-calibration
 fallback 再失败就停止该 provider/model evaluator profile，不继续 prompt-only grammar、修复 malformed JSON、解析
 reasoning 或提高 retry ceiling。当前授权只覆盖 primary implementation 与上述 disposable 最多 5-call canary；不授权
 Kimi Code 自行运行 fresh calibration、fallback、额外 retry 或任何其他模型调用。
+
+v2.3 primary 实现已由 Kimi Code/Kimi K3 完成（commit `fix: submit atomic judgments via tool calls`）：atomic
+prompt 改为声明无 external/retrieval tools 且要求恰好一次 `submit_judgment` 调用；request 删除
+`response_format`，冻结唯一 forced function tool 与 contract §4 的 closed schema；tool-mode SSE extractor 按
+index 拼接 fragmented tool-call ID/name/arguments，只接受 index-0 `submit_judgment`，arguments 不做任何修复直接
+解析为一个 JSON object，`finish_reason` 只允许 `tool_calls`/`stop`，content/reasoning 仅保留为 raw evidence，
+不供应或覆盖 judgment fields；canonical `response.json` 只由 tool arguments 生成，receipt v3.0 绑定 tool
+schema、tool-call ID、request、raw/derived evidence、usage 与 cost。新 writers 只写 v2.3 合同版本（atomic
+preparation v2.4、attempt v2.5、orientation trace v2.5 / result v2.3、transport preparation v3.0、receipt v3.0 /
+execution v2.1）；legacy v2.2-era preparation/attempt/receipt/execution evidence 仍可被 resolver 重验。
+`atomic_runner.py` 与 profile/aggregator 代码不变，retry/resume/early-stop 语义不退化。实现 commit、完整验证与
+prepare-only hash 冻结完成后，按 v2.3 第 6 节直接执行 synthetic → spent `call-021` 最多 5-call canary，全部输出
+`spent_transport_only`；无论 PASS/FAIL 都在 fresh calibration 前停止并交回 Codex 复核。

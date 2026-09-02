@@ -374,6 +374,271 @@ def _extract_stream_response(
     return draft, usage, identity, chunks, diagnostics
 
 
+def _extract_stream_tool_response(
+    raw_stream: bytes,
+    *,
+    expected_model: str,
+    tool_name: str,
+) -> tuple[
+    dict[str, Any],
+    dict[str, int] | None,
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
+    events, keepalive_count = _sse_data_events(raw_stream)
+    chunks: list[dict[str, Any]] = []
+    content_parts: list[str] = []
+    reasoning_bytes = 0
+    response_id: str | None = None
+    created_first: int | None = None
+    created_last: int | None = None
+    usage: dict[str, int] | None = None
+    cost: str | None = None
+    terminal_count = 0
+    terminal_reason: str | None = None
+    done_received = False
+    post_done_cost_received = False
+    tool_call_seen = False
+    tool_call_id: str | None = None
+    tool_name_parts: list[str] = []
+    argument_parts: list[str] = []
+
+    for event_index, event in enumerate(events):
+        if event == "[DONE]":
+            if done_received:
+                fail("INVALID_SSE", "[DONE] must be a unique SSE data event")
+            done_received = True
+            continue
+        try:
+            chunk = json.loads(event)
+        except json.JSONDecodeError as exc:
+            fail(
+                "INVALID_SSE",
+                "OpenCode Go SSE data is not JSON",
+                event_index=event_index,
+                line=exc.lineno,
+                column=exc.colno,
+            )
+        if (
+            not done_received
+            and isinstance(chunk, dict)
+            and set(chunk) == {"choices", "cost"}
+            and chunk.get("choices") == []
+        ):
+            fail(
+                "STREAM_INCOMPLETE",
+                "OpenCode Go billing sidecar arrived before [DONE]",
+            )
+        if done_received:
+            if (
+                event_index != len(events) - 1
+                or post_done_cost_received
+                or not isinstance(chunk, dict)
+                or set(chunk) != {"choices", "cost"}
+                or chunk.get("choices") != []
+            ):
+                fail(
+                    "INVALID_SSE",
+                    "Only one final billing sidecar may follow [DONE]",
+                )
+            cost = _validated_cost(chunk.get("cost"))
+            post_done_cost_received = True
+            chunks.append(chunk)
+            continue
+        if (
+            not isinstance(chunk, dict)
+            or chunk.get("object") != "chat.completion.chunk"
+        ):
+            fail("INVALID_PROVIDER_RESPONSE", "OpenCode Go stream chunk is invalid")
+        chunks.append(chunk)
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or len(choices) > 1:
+            fail("INVALID_PROVIDER_RESPONSE", "Stream chunk choices are invalid")
+        chunk_id = chunk.get("id")
+        chunk_model = chunk.get("model")
+        chunk_created = chunk.get("created")
+        if choices:
+            if (
+                not isinstance(chunk_id, str)
+                or not chunk_id
+                or chunk_model != expected_model
+                or isinstance(chunk_created, bool)
+                or not isinstance(chunk_created, int)
+                or chunk_created < 0
+            ):
+                fail(
+                    "PROVIDER_IDENTITY_MISMATCH",
+                    "Content stream chunk identity is invalid",
+                )
+            if response_id is None:
+                response_id = chunk_id
+                created_first = chunk_created
+                created_last = chunk_created
+            elif (
+                response_id != chunk_id
+                or created_last is None
+                or chunk_created < created_last
+            ):
+                fail(
+                    "PROVIDER_IDENTITY_MISMATCH",
+                    "Stream chunk response identity changed",
+                )
+            else:
+                created_last = chunk_created
+            choice = choices[0]
+            if not isinstance(choice, dict) or choice.get("index") != 0:
+                fail("INVALID_PROVIDER_RESPONSE", "Stream choice is invalid")
+            finish_reason = choice.get("finish_reason")
+            if finish_reason not in {None, "stop", "tool_calls"}:
+                fail(
+                    "PROVIDER_RESPONSE_FAILED",
+                    "OpenCode Go tool stream did not finish normally",
+                    finish_reason=finish_reason,
+                )
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                fail("INVALID_PROVIDER_RESPONSE", "Stream delta is invalid")
+            if delta.get("role") not in {None, "assistant"}:
+                fail("INVALID_PROVIDER_RESPONSE", "Stream delta role is invalid")
+            if delta.get("refusal") not in {None, ""}:
+                fail("PROVIDER_RESPONSE_FAILED", "Stream returned a refusal")
+            content = delta.get("content")
+            if content is not None and not isinstance(content, str):
+                fail("INVALID_PROVIDER_RESPONSE", "Stream content delta is invalid")
+            reasoning_content = delta.get("reasoning_content")
+            if reasoning_content is not None and not isinstance(reasoning_content, str):
+                fail("INVALID_PROVIDER_RESPONSE", "Stream reasoning delta is invalid")
+            raw_tool_calls = delta.get("tool_calls")
+            if raw_tool_calls is not None:
+                if not isinstance(raw_tool_calls, list):
+                    fail("INVALID_TOOL_CALL", "Stream tool-call delta is invalid")
+                for entry in raw_tool_calls:
+                    if not isinstance(entry, dict):
+                        fail("INVALID_TOOL_CALL", "Stream tool-call entry is invalid")
+                    index = entry.get("index")
+                    if (
+                        isinstance(index, bool)
+                        or not isinstance(index, int)
+                        or index != 0
+                    ):
+                        fail(
+                            "INVALID_TOOL_CALL",
+                            "Only one index-0 tool call is accepted",
+                        )
+                    tool_call_seen = True
+                    entry_id = entry.get("id")
+                    if entry_id is not None:
+                        if not isinstance(entry_id, str):
+                            fail("INVALID_TOOL_CALL", "Tool-call ID is invalid")
+                        if entry_id:
+                            if tool_call_id is not None and tool_call_id != entry_id:
+                                fail(
+                                    "INVALID_TOOL_CALL",
+                                    "Tool-call ID changed between fragments",
+                                )
+                            tool_call_id = entry_id
+                    entry_type = entry.get("type")
+                    if entry_type is not None and entry_type != "function":
+                        fail("INVALID_TOOL_CALL", "Tool-call type is invalid")
+                    function = entry.get("function")
+                    if function is not None:
+                        if not isinstance(function, dict):
+                            fail("INVALID_TOOL_CALL", "Tool-call function is invalid")
+                        name_part = function.get("name")
+                        if name_part is not None:
+                            if not isinstance(name_part, str):
+                                fail("INVALID_TOOL_CALL", "Tool-call name is invalid")
+                            tool_name_parts.append(name_part)
+                        arguments_part = function.get("arguments")
+                        if arguments_part is not None:
+                            if not isinstance(arguments_part, str):
+                                fail(
+                                    "INVALID_TOOL_CALL",
+                                    "Tool-call arguments fragment is invalid",
+                                )
+                            argument_parts.append(arguments_part)
+            if terminal_count and (content or reasoning_content or raw_tool_calls):
+                fail(
+                    "INVALID_PROVIDER_RESPONSE",
+                    "Stream output continued after the terminal chunk",
+                )
+            if content:
+                content_parts.append(content)
+            if reasoning_content:
+                reasoning_bytes += len(reasoning_content.encode("utf-8"))
+            if finish_reason in {"stop", "tool_calls"}:
+                terminal_count += 1
+                terminal_reason = finish_reason
+        elif chunk.get("usage") is None and chunk.get("cost") is None:
+            fail(
+                "INVALID_PROVIDER_RESPONSE",
+                "Empty-choice stream chunk has no usage or cost evidence",
+            )
+        if chunk.get("usage") is not None:
+            parsed_usage = _usage(chunk)
+            usage = _merge_usage(usage, parsed_usage)
+        if chunk.get("cost") is not None:
+            parsed_cost = _validated_cost(chunk.get("cost"))
+            if cost is not None and cost != parsed_cost:
+                fail("INVALID_PROVIDER_RESPONSE", "Stream cost changed between chunks")
+            cost = parsed_cost
+
+    if not done_received or terminal_count != 1:
+        fail(
+            "STREAM_INCOMPLETE",
+            "OpenCode Go stream lacks one normal terminal chunk and [DONE]",
+            done_received=done_received,
+            terminal_count=terminal_count,
+        )
+    if response_id is None or created_first is None or created_last is None:
+        fail("PROVIDER_IDENTITY_MISMATCH", "OpenCode Go stream has no identity")
+    if not tool_call_seen or tool_call_id is None:
+        fail("INVALID_TOOL_CALL", "OpenCode Go stream returned no tool call")
+    joined_name = "".join(tool_name_parts)
+    if joined_name != tool_name:
+        fail(
+            "INVALID_TOOL_CALL",
+            "OpenCode Go stream returned a wrong tool call",
+            expected=tool_name,
+            actual=joined_name,
+        )
+    arguments_text = "".join(argument_parts)
+    if not arguments_text:
+        fail("INVALID_TOOL_CALL", "Tool call arguments are missing")
+    try:
+        arguments = json.loads(arguments_text)
+    except json.JSONDecodeError as exc:
+        fail(
+            "INVALID_TOOL_CALL",
+            "Tool call arguments are not valid JSON",
+            line=exc.lineno,
+            column=exc.colno,
+        )
+    if not isinstance(arguments, dict):
+        fail("INVALID_TOOL_CALL", "Tool call arguments must be one JSON object")
+    content_text = "".join(content_parts)
+    identity = {
+        "cost": cost,
+        "created_first": created_first,
+        "created_last": created_last,
+        "finish_reason": terminal_reason,
+        "model": expected_model,
+        "provider_response_id": response_id,
+        "tool_call_id": tool_call_id,
+    }
+    diagnostics = {
+        "arguments_bytes": len(arguments_text.encode("utf-8")),
+        "content_bytes": len(content_text.encode("utf-8")),
+        "data_event_count": len(events),
+        "done_received": done_received,
+        "keepalive_count": keepalive_count,
+        "post_done_cost_received": post_done_cost_received,
+        "reasoning_bytes": reasoning_bytes,
+    }
+    return arguments, usage, identity, chunks, diagnostics
+
+
 def _validate_preparation(
     *, preparation_root: Path
 ) -> tuple[dict[str, Any], bytes, dict[str, Any], bytes, str, bytes]:

@@ -23,25 +23,104 @@ from .operational_judge import (
 )
 
 ATOMIC_PACKET_SCHEMA_VERSION = "local-ranking-atomic-judge-packet-v2.0"
-ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.3"
-LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS = {"local-ranking-atomic-preparation-v2.2"}
-ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.4"
-LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS = {"local-ranking-atomic-attempt-v2.3"}
-ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.4"
+ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.4"
+LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS = {
+    "local-ranking-atomic-preparation-v2.2",
+    "local-ranking-atomic-preparation-v2.3",
+}
+ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.5"
+LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS = {
+    "local-ranking-atomic-attempt-v2.3",
+    "local-ranking-atomic-attempt-v2.4",
+}
+ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.5"
 ATOMIC_ORIENTATION_RESULT_SCHEMA_VERSION = (
-    "local-ranking-atomic-orientation-result-v2.2"
+    "local-ranking-atomic-orientation-result-v2.3"
 )
 EXPECTED_ITEM_COUNT = 24
 MAX_PHYSICAL_ATTEMPTS = 4
 ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION = (
+    "local-ranking-atomic-opencode-go-receipt-v3.0"
+)
+LEGACY_ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSIONS = {
     "local-ranking-atomic-opencode-go-receipt-v2.0"
-)
+}
 ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION = (
-    "local-ranking-atomic-opencode-go-execution-v2.0"
+    "local-ranking-atomic-opencode-go-execution-v2.1"
 )
+LEGACY_ATOMIC_EXECUTION_RESULT_SCHEMA_VERSIONS = {
+    "local-ranking-atomic-opencode-go-execution-v2.0"
+}
 OPENCODE_GO_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
 APPROVED_ATOMIC_MODEL_ALIAS = "opencode-go/deepseek-v4-pro"
 APPROVED_ATOMIC_EFFORTS = {"high", "max"}
+SUBMIT_JUDGMENT_TOOL_NAME = "submit_judgment"
+_SCORE_SCHEMA_FIELDS = (
+    "coverage_diversity",
+    "direct_support",
+    "query_usefulness",
+    "specificity",
+)
+SUBMIT_JUDGMENT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "catastrophic_omission_side": {
+            "type": "string",
+            "enum": ["left", "right", "neither"],
+        },
+        "evidence_handles": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": ["L1", "L2", "L3", "R1", "R2", "R3"],
+            },
+        },
+        "left_scores": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                field: {"type": "integer", "enum": [0, 1, 2]}
+                for field in _SCORE_SCHEMA_FIELDS
+            },
+            "required": list(_SCORE_SCHEMA_FIELDS),
+        },
+        "rationale": {"type": "string"},
+        "right_scores": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                field: {"type": "integer", "enum": [0, 1, 2]}
+                for field in _SCORE_SCHEMA_FIELDS
+            },
+            "required": list(_SCORE_SCHEMA_FIELDS),
+        },
+        "winner": {
+            "type": "string",
+            "enum": ["left", "right", "tie", "both_bad"],
+        },
+    },
+    "required": [
+        "catastrophic_omission_side",
+        "evidence_handles",
+        "left_scores",
+        "rationale",
+        "right_scores",
+        "winner",
+    ],
+}
+SUBMIT_JUDGMENT_TOOL = {
+    "type": "function",
+    "function": {
+        "name": SUBMIT_JUDGMENT_TOOL_NAME,
+        "description": "Submit the final blind evidence-set judgment for this single item.",
+        "parameters": SUBMIT_JUDGMENT_SCHEMA,
+    },
+}
+SUBMIT_JUDGMENT_TOOL_CHOICE = {
+    "type": "function",
+    "function": {"name": SUBMIT_JUDGMENT_TOOL_NAME},
+}
 RESPONSE_KEYS = {
     "catastrophic_omission_side",
     "evidence_handles",
@@ -206,12 +285,14 @@ def _public_packet(
 def _prompt_text(packet: dict[str, Any]) -> str:
     packet_json = canonical_json_bytes(packet).decode("utf-8")
     return (
-        "You are a blind setwise evidence evaluator. No tools are available. "
-        "Use only the embedded single-item packet; do not use external facts or prior conversations.\n\n"
+        "You are a blind setwise evidence evaluator. No external or retrieval tools "
+        "are available; the only available tool is submit_judgment, which you must use "
+        "to submit the final judgment for this single item. Use only the embedded "
+        "single-item packet; do not use external facts or prior conversations.\n\n"
         "Compare the complete left and right top-3 evidence sets for the query. Judge direct "
         "support, usefulness for AI ideation, coverage/diversity, specificity, and catastrophic "
         "omissions. Do not reward length, fluency, or familiarity by themselves.\n\n"
-        "Return exactly one JSON object and no Markdown. Root keys must be exactly "
+        "Call submit_judgment exactly once. Its arguments must contain exactly "
         "catastrophic_omission_side, evidence_handles, left_scores, rationale, right_scores, "
         "winner. Each score object must contain coverage_diversity, direct_support, "
         "query_usefulness, specificity with integer 0, 1, or 2. winner must be left, right, "
@@ -555,9 +636,48 @@ def _validate_execution_receipt(
     receipt, receipt_bytes = _read_canonical_object(
         receipt_path, label="atomic execution receipt"
     )
-    _expect_keys(
-        receipt,
-        {
+    evaluator = manifest["evaluator"]
+    schema_version = receipt.get("schema_version")
+    if schema_version == ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION:
+        expected_receipt_keys = {
+            "call_binding",
+            "diagnostics",
+            "endpoint",
+            "files",
+            "http_status",
+            "identity",
+            "preparation_manifest_sha256",
+            "provider",
+            "request_sha256",
+            "schema_version",
+            "status",
+            "tool",
+            "transport_qualification",
+            "usage",
+        }
+        expected_identity_keys = {
+            "cost",
+            "created_first",
+            "created_last",
+            "finish_reason",
+            "model",
+            "provider_response_id",
+            "tool_call_id",
+        }
+        expected_qualification = {
+            "forced_tool_call_accepted": True,
+            "reasoning_effort_requested": evaluator["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        }
+        allowed_finish_reasons = {"stop", "tool_calls"}
+        expected_tool = {
+            "name": SUBMIT_JUDGMENT_TOOL_NAME,
+            "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
+        }
+    elif schema_version in LEGACY_ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSIONS:
+        expected_receipt_keys = {
             "call_binding",
             "diagnostics",
             "endpoint",
@@ -571,7 +691,32 @@ def _validate_execution_receipt(
             "status",
             "transport_qualification",
             "usage",
-        },
+        }
+        expected_identity_keys = {
+            "cost",
+            "created_first",
+            "created_last",
+            "finish_reason",
+            "model",
+            "provider_response_id",
+        }
+        expected_qualification = {
+            "json_object_accepted": True,
+            "reasoning_effort_requested": evaluator["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        }
+        allowed_finish_reasons = {"stop"}
+        expected_tool = None
+    else:
+        fail(
+            "INVALID_EXECUTION_RECEIPT",
+            "Atomic execution receipt schema is unsupported",
+        )
+    _expect_keys(
+        receipt,
+        expected_receipt_keys,
         label="atomic execution receipt",
     )
     binding = receipt.get("call_binding")
@@ -595,14 +740,7 @@ def _validate_execution_receipt(
         fail("INVALID_EXECUTION_RECEIPT", "Provider identity is missing")
     _expect_keys(
         identity,
-        {
-            "cost",
-            "created_first",
-            "created_last",
-            "finish_reason",
-            "model",
-            "provider_response_id",
-        },
+        expected_identity_keys,
         label="atomic receipt provider identity",
     )
     qualification = receipt.get("transport_qualification")
@@ -610,24 +748,17 @@ def _validate_execution_receipt(
         fail("INVALID_EXECUTION_RECEIPT", "Transport qualification is missing")
     _expect_keys(
         qualification,
-        {
-            "json_object_accepted",
-            "reasoning_effort_requested",
-            "reasoning_execution_proven",
-            "stream_completed",
-            "streaming_requested",
-        },
+        set(expected_qualification),
         label="atomic receipt transport qualification",
     )
     files = receipt.get("files")
     response_sha256 = sha256_bytes(response_bytes)
     provider_response_id = identity.get("provider_response_id")
+    tool_call_id = identity.get("tool_call_id")
     request_sha256 = receipt.get("request_sha256")
     preparation_sha256 = receipt.get("preparation_manifest_sha256")
-    evaluator = manifest["evaluator"]
     if (
-        receipt.get("schema_version") != ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
-        or receipt.get("status") != "pass"
+        receipt.get("status") != "pass"
         or receipt.get("provider") != "opencode-go"
         or receipt.get("endpoint") != OPENCODE_GO_ENDPOINT
         or receipt.get("http_status") != 200
@@ -654,18 +785,16 @@ def _validate_execution_receipt(
             "replicate_id": manifest["replicate_id"],
             "sequence": call["sequence"],
         }
-        or identity.get("finish_reason") != "stop"
+        or identity.get("finish_reason") not in allowed_finish_reasons
         or identity.get("model") != evaluator["model_alias"].rsplit("/", 1)[-1]
         or not isinstance(provider_response_id, str)
         or not provider_response_id
-        or qualification
-        != {
-            "json_object_accepted": True,
-            "reasoning_effort_requested": evaluator["reasoning_effort"],
-            "reasoning_execution_proven": False,
-            "stream_completed": True,
-            "streaming_requested": True,
-        }
+        or qualification != expected_qualification
+        or (expected_tool is not None and receipt.get("tool") != expected_tool)
+        or (
+            expected_tool is not None
+            and (not isinstance(tool_call_id, str) or not tool_call_id)
+        )
     ):
         fail(
             "INVALID_EXECUTION_RECEIPT",
@@ -713,7 +842,11 @@ def _validate_execution_result(
     request_sha256 = result.get("request_sha256")
     preparation_sha256 = result.get("preparation_manifest_sha256")
     if (
-        result.get("schema_version") != ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION
+        result.get("schema_version")
+        not in {
+            ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
+            *LEGACY_ATOMIC_EXECUTION_RESULT_SCHEMA_VERSIONS,
+        }
         or result.get("status") != expected_status
         or result.get("call_binding") != expected_binding
         or not isinstance(files, dict)

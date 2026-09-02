@@ -15,6 +15,9 @@ from .atomic_judge import (
     ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
     MAX_PHYSICAL_ATTEMPTS,
     OPENCODE_GO_ENDPOINT,
+    SUBMIT_JUDGMENT_TOOL,
+    SUBMIT_JUDGMENT_TOOL_CHOICE,
+    SUBMIT_JUDGMENT_TOOL_NAME,
     _load_call_packet,
     _load_manifest,
 )
@@ -26,10 +29,10 @@ from .canonical import (
 )
 from .errors import HarnessError, fail
 from .opencode_go_chat import SAFE_RESPONSE_HEADERS, _api_key, _utc_now
-from .opencode_go_stream import _extract_stream_response
+from .opencode_go_stream import _extract_stream_tool_response
 
-PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v2.1"
-EXECUTION_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-execution-v2.0"
+PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v3.0"
+EXECUTION_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-execution-v2.1"
 SMOKE_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-smoke-v2.0"
 ATOMIC_MAX_TOKENS = 16_384
 MAX_CONCURRENCY = 4
@@ -49,8 +52,9 @@ def _request(*, prompt: str, reasoning_effort: str) -> dict[str, Any]:
         "messages": [{"content": prompt, "role": "user"}],
         "model": APPROVED_ATOMIC_MODEL_ALIAS.rsplit("/", 1)[-1],
         "reasoning_effort": reasoning_effort,
-        "response_format": {"type": "json_object"},
         "stream": True,
+        "tool_choice": SUBMIT_JUDGMENT_TOOL_CHOICE,
+        "tools": [SUBMIT_JUDGMENT_TOOL],
     }
 
 
@@ -150,11 +154,34 @@ def prepare_atomic_transport(
     )
 
 
+def _smoke_probe_arguments(call_id: str) -> dict[str, Any]:
+    scores = {
+        "coverage_diversity": 1,
+        "direct_support": 1,
+        "query_usefulness": 1,
+        "specificity": 1,
+    }
+    return {
+        "catastrophic_omission_side": "neither",
+        "evidence_handles": ["L1", "R1"],
+        "left_scores": scores,
+        "rationale": (
+            f"Transport-only synthetic probe {call_id}; no evidence was judged."
+        ),
+        "right_scores": dict(scores),
+        "winner": "tie",
+    }
+
+
 def _smoke_prompt(call_id: str) -> bytes:
+    probe = _smoke_probe_arguments(call_id)
     return (
-        "This is a transport-only JSON probe. Return exactly one JSON object and no "
-        f'Markdown. Root keys must be exactly probe_id and status. probe_id must be "{call_id}" '
-        'and status must be "ok".'
+        "This is a transport-only tool-call probe. No external or retrieval tools are "
+        "available; the only available tool is submit_judgment, which submits one blind "
+        "evidence-set judgment. Call submit_judgment exactly once with these exact "
+        'argument values: winner "tie", catastrophic_omission_side "neither", '
+        'evidence_handles ["L1", "R1"], every left_scores and right_scores field set '
+        f'to integer 1, and rationale "{probe["rationale"]}". Do not add any other text.'
     ).encode()
 
 
@@ -492,8 +519,10 @@ def execute_call(
         )
     request = json.loads(request_bytes)
     try:
-        draft, usage, identity, chunks, diagnostics = _extract_stream_response(
-            raw_stream, expected_model=request["model"]
+        draft, usage, identity, chunks, diagnostics = _extract_stream_tool_response(
+            raw_stream,
+            expected_model=request["model"],
+            tool_name=SUBMIT_JUDGMENT_TOOL_NAME,
         )
     except HarnessError as exc:
         write_once(
@@ -533,8 +562,12 @@ def execute_call(
         "request_sha256": sha256_bytes(request_bytes),
         "schema_version": ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
         "status": "pass",
+        "tool": {
+            "name": SUBMIT_JUDGMENT_TOOL_NAME,
+            "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
+        },
         "transport_qualification": {
-            "json_object_accepted": True,
+            "forced_tool_call_accepted": True,
             "reasoning_effort_requested": request["reasoning_effort"],
             "reasoning_execution_proven": False,
             "stream_completed": True,
@@ -557,8 +590,26 @@ def execute_call(
 
 def _validate_smoke_response(path: Path, *, expected_call_id: str) -> None:
     response, _ = _read_canonical_object(path, label="smoke response")
-    if response != {"probe_id": expected_call_id, "status": "ok"}:
+    if response != _smoke_probe_arguments(expected_call_id):
         fail("INVALID_SMOKE_RESPONSE", "Transport smoke response schema is invalid")
+
+
+def validate_smoke_call(
+    *, preparation_root: Path, call_sequence: int, execution_root: Path
+) -> dict[str, Any]:
+    manifest, _, calls = _validate_preparation(preparation_root)
+    if manifest["kind"] != "smoke":
+        fail("INVALID_PREPARATION", "validate-smoke-call requires a smoke preparation")
+    call = calls.get(call_sequence)
+    if call is None:
+        fail("UNKNOWN_LOGICAL_CALL", "Prepared call sequence does not exist")
+    response_path = execution_root / "response.json"
+    _validate_smoke_response(response_path, expected_call_id=call["call_id"])
+    return {
+        "call_id": call["call_id"],
+        "response_sha256": sha256_bytes(response_path.read_bytes()),
+        "status": "pass",
+    }
 
 
 def run_smoke(
@@ -667,6 +718,10 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--output-root", type=Path, required=True)
     run.add_argument("--api-key-env", default="OPENCODE_GO_API_KEY")
     run.add_argument("--kimi-config", type=Path)
+    validate = subparsers.add_parser("validate-smoke-call")
+    validate.add_argument("--preparation-root", type=Path, required=True)
+    validate.add_argument("--call-sequence", type=int, required=True)
+    validate.add_argument("--execution-root", type=Path, required=True)
     return parser
 
 
@@ -692,6 +747,12 @@ def main(argv: list[str] | None = None) -> int:
                 output_root=args.output_root,
                 api_key_env=args.api_key_env,
                 kimi_config_path=args.kimi_config,
+            )
+        elif args.command == "validate-smoke-call":
+            result = validate_smoke_call(
+                preparation_root=args.preparation_root,
+                call_sequence=args.call_sequence,
+                execution_root=args.execution_root,
             )
         else:
             result = run_smoke(

@@ -8,15 +8,22 @@ from pathlib import Path
 import httpx
 import pytest
 
+from prototypes.local_ranking.atomic_judge import (
+    SUBMIT_JUDGMENT_SCHEMA,
+    SUBMIT_JUDGMENT_TOOL,
+    SUBMIT_JUDGMENT_TOOL_CHOICE,
+)
 from prototypes.local_ranking.atomic_opencode_go import (
     ATOMIC_MAX_TOKENS,
+    _smoke_probe_arguments,
     _validate_preparation,
     execute_call,
     prepare_smoke,
     run_smoke,
+    validate_smoke_call,
 )
 from prototypes.local_ranking.atomic_profile import snapshot_usage
-from prototypes.local_ranking.canonical import canonical_json_bytes
+from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
 from prototypes.local_ranking.errors import HarnessError
 
 
@@ -27,9 +34,10 @@ def _event(value: object) -> bytes:
     return f"data: {payload}\n\n".encode()
 
 
-def _stream(*, response_id: str, content: dict) -> bytes:
+def _stream(
+    *, response_id: str, arguments: dict, finish_reason: str = "tool_calls"
+) -> bytes:
     model = "deepseek-v4-pro"
-    content_text = json.dumps(content, separators=(",", ":"))
     base = {
         "created": 1,
         "id": response_id,
@@ -40,7 +48,22 @@ def _stream(*, response_id: str, content: dict) -> bytes:
         **base,
         "choices": [
             {
-                "delta": {"content": content_text, "role": "assistant"},
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "arguments": json.dumps(
+                                    arguments, separators=(",", ":")
+                                ),
+                                "name": "submit_judgment",
+                            },
+                            "id": f"call-{response_id}",
+                            "index": 0,
+                            "type": "function",
+                        }
+                    ],
+                },
                 "finish_reason": None,
                 "index": 0,
             }
@@ -50,8 +73,8 @@ def _stream(*, response_id: str, content: dict) -> bytes:
         **base,
         "choices": [
             {
-                "delta": {"content": ""},
-                "finish_reason": "stop",
+                "delta": {},
+                "finish_reason": finish_reason,
                 "index": 0,
             }
         ],
@@ -82,10 +105,22 @@ def test_smoke_preparation_freezes_profile_token_ceiling_and_concurrency(
     assert manifest["evaluator"]["model_alias"] == "opencode-go/deepseek-v4-pro"
     for call in manifest["calls"]:
         request = json.loads((tmp_path / "input" / call["request_path"]).read_bytes())
-        assert request["max_tokens"] == 16_384
-        assert request["reasoning_effort"] == "high"
-        assert request["stream"] is True
-        assert request["response_format"] == {"type": "json_object"}
+        assert request == {
+            "max_tokens": 16_384,
+            "messages": [
+                {
+                    "content": (tmp_path / "input" / call["prompt_path"]).read_text(),
+                    "role": "user",
+                }
+            ],
+            "model": "deepseek-v4-pro",
+            "reasoning_effort": "high",
+            "stream": True,
+            "tool_choice": SUBMIT_JUDGMENT_TOOL_CHOICE,
+            "tools": [SUBMIT_JUDGMENT_TOOL],
+        }
+        assert request["tools"][0]["function"]["parameters"] == SUBMIT_JUDGMENT_SCHEMA
+        assert "response_format" not in request
 
 
 def test_execute_call_writes_bound_receipt(tmp_path: Path) -> None:
@@ -95,12 +130,13 @@ def test_execute_call_writes_bound_receipt(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         assert body["model"] == "deepseek-v4-pro"
+        assert body["tool_choice"] == SUBMIT_JUDGMENT_TOOL_CHOICE
         return httpx.Response(
             200,
             headers={"content-type": "text/event-stream"},
             content=_stream(
                 response_id="response-001",
-                content={"probe_id": "smoke-001", "status": "ok"},
+                arguments=_smoke_probe_arguments("smoke-001"),
             ),
         )
 
@@ -122,7 +158,26 @@ def test_execute_call_writes_bound_receipt(tmp_path: Path) -> None:
         "sequence": 1,
     }
     assert receipt["identity"]["provider_response_id"] == "response-001"
-    assert receipt["transport_qualification"]["reasoning_execution_proven"] is False
+    assert receipt["identity"]["finish_reason"] == "tool_calls"
+    assert receipt["identity"]["tool_call_id"] == "call-response-001"
+    assert receipt["tool"] == {
+        "name": "submit_judgment",
+        "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
+    }
+    assert receipt["transport_qualification"] == {
+        "forced_tool_call_accepted": True,
+        "reasoning_effort_requested": "high",
+        "reasoning_execution_proven": False,
+        "stream_completed": True,
+        "streaming_requested": True,
+    }
+
+    validated = validate_smoke_call(
+        preparation_root=preparation_root,
+        call_sequence=1,
+        execution_root=tmp_path / "output",
+    )
+    assert validated["status"] == "pass"
 
 
 def test_run_smoke_executes_four_calls_concurrently(tmp_path: Path) -> None:
@@ -151,7 +206,7 @@ def test_run_smoke_executes_four_calls_concurrently(tmp_path: Path) -> None:
             headers={"content-type": "text/event-stream"},
             content=_stream(
                 response_id=f"response-{call_id}",
-                content={"probe_id": call_id, "status": "ok"},
+                arguments=_smoke_probe_arguments(call_id),
             ),
         )
 
@@ -240,3 +295,83 @@ def test_usage_snapshot_records_quota_without_credential(tmp_path: Path) -> None
     assert snapshot["status"] == "pass"
     assert snapshot["model_present"] is True
     assert "test-key" not in output_path.read_text()
+
+
+def test_execute_call_fails_closed_on_wrong_tool_name(tmp_path: Path) -> None:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        stream = _stream(
+            response_id="response-001",
+            arguments=_smoke_probe_arguments("smoke-001"),
+        ).replace(b"submit_judgment", b"other_function")
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=stream,
+        )
+
+    output_root = tmp_path / "output"
+    with pytest.raises(HarnessError) as raised:
+        execute_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            output_root=output_root,
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert raised.value.code == "INVALID_TOOL_CALL"
+    result = json.loads((output_root / "execution-result.json").read_bytes())
+    assert result["status"] == "fail"
+    assert result["error"]["code"] == "INVALID_TOOL_CALL"
+    assert not (output_root / "response.json").exists()
+    stream_error = json.loads(
+        (output_root / "stream-validation-error.json").read_bytes()
+    )
+    assert stream_error["code"] == "INVALID_TOOL_CALL"
+
+
+def test_validate_smoke_call_rejects_drifted_probe_response(tmp_path: Path) -> None:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        arguments = _smoke_probe_arguments("smoke-001")
+        arguments["winner"] = "left"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_stream(response_id="response-001", arguments=arguments),
+        )
+
+    output_root = tmp_path / "output"
+    execute_call(
+        preparation_root=preparation_root,
+        call_sequence=1,
+        output_root=output_root,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=output_root,
+        )
+
+    assert raised.value.code == "INVALID_SMOKE_RESPONSE"
+
+
+def test_repeated_prepare_is_byte_identical(tmp_path: Path) -> None:
+    first = prepare_smoke(output_root=tmp_path / "first")
+    second = prepare_smoke(output_root=tmp_path / "second")
+
+    assert first == second
+    for call in first["calls"]:
+        for key in ("prompt_path", "request_path"):
+            assert (tmp_path / "first" / call[key]).read_bytes() == (
+                tmp_path / "second" / call[key]
+            ).read_bytes()
