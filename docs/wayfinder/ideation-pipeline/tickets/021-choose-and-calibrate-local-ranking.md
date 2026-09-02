@@ -44,6 +44,7 @@ blocked_by:
 - [Local-ranking atomic Pro/max calibration protocol v2.1](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.1.md)
 - [Local-ranking atomic bounded-retry contract correction v2.2](../../../prototypes/local-ranking-atomic-bounded-retry-contract-v2.2.md)
 - [Local-ranking atomic Pro/max mechanical continuation protocol v2.2](../../../prototypes/local-ranking-atomic-pro-max-continuation-protocol-v2.2.md)
+- [Local-ranking atomic Pro/max mechanical continuation result v2.2](../../../prototypes/local-ranking-atomic-pro-max-continuation-result-v2.2.md)
 
 ## Question
 
@@ -141,3 +142,13 @@ Mechanical continuation 已在调用前冻结：修正 commit `510f6c2`，amende
 `e69acf34a7214c3f763780a6d67b90bbd99f116fa3977d3aed3cb9a4128b8b7f`，新旧 `call-021` request SHA-256
 均为 `0916cfca6f3fca8a00c48c9b728af82e9395a98187cf673d511bc0b204998cdb`。调用前 usage 为
 `9/32/40%`。当前只授权 attempt 3，invalid 才允许 attempt 4；其他 23 题不得重发。
+
+Continuation 已按 scope 完成：只新增 `call-021` attempts 3/4，其他 23 题未重发；两次均为 200/SSE pass，
+分别消耗 15,615/8,083 tokens，但仍只生成损坏 JSON，validator 均为 `INVALID_SCHEMA`。原 run 加 continuation
+共 27 calls / 207,216 tokens / 27 unique response IDs，usage 从 `9/32/40%` 到 `10/32/40%`。四次上限已耗尽，
+未发 attempt 5，未运行 o2/r2/r3；Pro/max 在当前 JSON-object transport 下仍为 operational incomplete。
+
+继续相同 request 已无合理信息增益。若要继续 DeepSeek，下一步必须作为新合同先做一个 spent `call-021`
+canary：去掉 provider `response_format=json_object`，但保持同一 packet/rubric/model/max/本地六字段 validator，
+只测试 prompt-enforced JSON 是否能避免 finalization 退化；失败则停止 DeepSeek Pro/max，转向其他模型族。该
+fallback 尚未获本 result 授权，不能伪装成第 5 次普通 retry。

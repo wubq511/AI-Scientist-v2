@@ -1,7 +1,9 @@
 # Local-ranking atomic Pro/max mechanical continuation protocol v2.2
 
 Protocol date: 2026-09-02（Asia/Shanghai）  
-Status: **Frozen before `call-021` attempt 3**
+Status: **Executed; four attempts exhausted, result incomplete**
+
+Result: [Pro/max mechanical continuation result v2.2](local-ranking-atomic-pro-max-continuation-result-v2.2.md)
 
 ## 1. Authorized scope
 
@@ -80,4 +82,3 @@ The atomic manifests stay unchanged; only transport manifests encode the amended
 The combined resolver must prove consecutive attempts 1..N, first-valid selection, no retry after valid, exact manifest /
 prompt / request / response / receipt bindings, and globally unique provider response IDs. A valid combined trace then permits
 fresh r1/o2. Only the mirror pair result may decide whether r2 is allowed.
-
