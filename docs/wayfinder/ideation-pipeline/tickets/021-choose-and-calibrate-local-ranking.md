@@ -339,3 +339,27 @@ bulk compute 与 credential-free offline replay，Mac 承担 remote-provider aut
 `r1/o2` 同额 ceiling、r1 pair reduction、usage-after 与 Windows offline replay；总上限 48 logical / 192 physical，
 concurrency 4。任一 orientation incomplete/ambiguous/evidence failure 都停止；r1 结果无论 PASS/FAIL 都交回 Codex，r2/r3 与
 fallback 仍未授权。具体执行按 handoff 交给 Kimi，live calls 只能由 frozen `atomic_runner` 发出。
+
+Formal 003 r1 live 已由 Kimi Code/Kimi K3 按 amendment v1.0（commit `25beeb2`，SHA `566e10b8…7789`）执行完毕并停止，
+全程未用 subagent、零授权外调用。Preflight 全绿：HEAD=`17583c8` 干净、runtime `*.py` 与 `8ea6443` diff 为空、
+amendment/archive/profile/ledger/freeze-summary 五 hash 复核一致、六个 live 输出路径初始均不存在；fresh extraction
+的 `verify-bundle.py` 五步 PASS（输出 SHA `3c25ccd4…6e96a`）；live usage-before（SHA `05b0f1f0…3dbd`）三 period
+均 ok。`r1/o1` 24 logical 全部 first-attempt valid、零 retry、24 个 provider response ID 全唯一（trace SHA
+`9ae53999…4da7a`，run-result SHA `4df123e8…c904`）；随后无凭证 offline resume gate 返回同一 completed run-result，
+证明 completed run 在 credential lookup 前即可从 evidence 解析。`r1/o2` 25 physical / 24 logical：`call-021`
+attempt-1 被 deterministic validator 判 invalid（`PROVIDER_RESPONSE_FAILED`，`finish_reason=length`，tool stream
+未正常完成，无 response ID/receipt），exact same request 重试 attempt-2 valid，其余 23 题 first-valid（trace SHA
+`d151e780…6cebd`，run-result SHA `c385b263…f61c`）。r1 pair：stable_count=20/24 低于 22 阈值，
+stable_directional_count=13（非全 tie 退化），decision=`stop_profile_failed`——合同明示的合法终止态；unstable 为
+lr-dev-02/04/05-focused 与 lr-hol-06-focused；pair SHA `5e26f1e7…7dfd`。跨 orientation 48/48 response ID 唯一性由
+pair fail-closed 校验通过。r1 合计 48 logical / 49 physical（上限 48/192），receipt tokens 合计 339,148
+（prompt 151,664 / completion 187,484 / reasoning 163,195；receipt schema 无 cost 字段，如实记 null）；usage 从
+rolling/weekly/monthly `7/36/42%` 升至 `12/42/45%`（after SHA `adc7d730…7356`）。execution summary（canonical，SHA
+`c31c3285…a607`）含 per-attempt validity、全部 hashes、failures 与 deviations=[]，不含任何 endpoint/secret 字符串。
+Credential-free output archive（SHA `00ecfc5d…9f44`，3,291,324 bytes，1,183 文件）已传 Windows 新子目录、SHA 核对后
+短路径解包，用 prep 阶段已验证的 frozen bundle/runtime 离线 replay：两路 orientation 无凭证 re-enter runner 均返回与
+evidence 一致的 completed run-result，fresh scratch 重生成 pair 逐字节一致；Windows verifier 输出 SHA
+`befaa484…929f` 已回传 `controller/`。值得注意：Pro/max r1 的 mirror stable 20/24 与 Pro/high r1 的 20/24 相同
+（directional 13 vs 14），FAIL 同样归因于 atomic semantic stability 而非 transport/contract——两次 fresh run 的
+49 个 physical calls 中只有 1 次确定性重试，transport 完整性零失败。Ticket 继续 open；r1 证据交回 Codex 独立复核，
+r2/r3/fallback/new canary 均未授权。
