@@ -312,3 +312,20 @@ preparation 与 profile 在 Windows Python 3.13.7 UTF-8 下重新生成逐字节
 archive（`2afcac12…faab`）因 verify-bundle.py 的 cwd 缺陷与 Windows MAX_PATH 限制在首次验证中暴露后被 v2 取代，v1
 从未通过验证、已在 Windows 删除。Mac 双解释器 255/255、lint/format/compileall/diff-check 全绿。Ticket 继续 open；
 prepare-only 证据待 Codex 独立复核后，r1 live calls 才由 Robert 单独授权。
+
+Codex 未启动子 agent，直接完成 formal 003 prepare-only 独立复核。重算 freeze summary、usage、profile、四个 prerequisites、
+12 个 manifests、archive、ledger 与 Windows verifier hashes 均与报告一致；bundle 中 144 个 requests 全部固定为
+`deepseek-v4-pro/max`、`max_tokens=16384`、stream、单一 forced `submit_judgment` tool，且无 `response_format`。在 fresh
+macOS Python 3.13.7 环境中仅用 bundle 内六个 wheels 重新执行 verifier，ledger 双 Pass、六组 preparation validation、
+六组 preparation/profile byte-identical regeneration 全部通过；ambient 3.14.6 全量 255 tests passed。bundle 的
+`prototypes/`、`tests/` 与 commit `326f928` 逐字节一致，formal input 与 controller copy 逐字节一致，路径与内容扫描未发现
+credential、`.env`、Kimi config、private key 或 model output。Codex 还通过既有 SSH 做只读远端核对：Windows 当前 archive、
+verifier output、ledger 三个 SHA 与 Mac 冻结值一致。最终 v2 没有与失败 v1 混用；v1 重传 deviation 已充分披露，判定为
+非阻塞。Prepare-only 因此 PASS，未发送任何 model-producing request。
+
+Live execution 尚不能直接授权：current runner 只从本机 environment 或 Kimi config 取得 API key，而 frozen Windows bundle
+不含 credential，现有合同也没有冻结安全的 Windows live credential delivery。该缺口不影响已完成的 preparation，但在真正
+调用前必须选择执行拓扑。Codex 的 first-principles 建议是由 Mac 从 exact immutable bundle 发 authenticated remote API
+requests，Windows 只接收无 secret outputs 做离线 replay/verification；远端模型推理不使用 Windows 算力，因此这比向 Windows
+分发 credential 更直接，也不改变 prompt、request bytes、model、sample、retry 或 semantic gates。该拓扑调整属于合同变化，
+须 Robert 明确批准后另写窄 amendment；在此之前 r1 仍未授权。
