@@ -286,8 +286,10 @@ Primary 实现修改以下 8 个 tracked files：
 - repeated prepare 对相同 input 产生 byte-identical manifests/requests；
 - full suite、Black、Ruff、compileall 与 `git diff --check`。
 
-实现交付只到 code/tests/docs/prepare-only fixtures。不得创建 live output directory，不得读取凭据，不得发送
-synthetic、spent 或 formal model call。
+Primary implementation 的 tracked source/docs commit 只包含上述 8 个文件。该 commit 形成且第 6 节前置检查通过后，
+implementation agent 可使用既有 credential loader 执行第 6 节授权的 synthetic 与 spent canary，并在新的 private
+output directories 保存 evidence；不得覆写 legacy/frozen artifacts，也不得把 credential 值打印到日志或文件。
+Canary 阶段不得继续修改 source contract、实现或 tests；formal/fallback calls 仍然禁止。
 
 ## 11. 明确拒绝
 
