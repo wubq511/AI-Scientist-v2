@@ -43,6 +43,7 @@ blocked_by:
 - [Local-ranking atomic rationale contract correction v2.1](../../../prototypes/local-ranking-atomic-rationale-contract-v2.1.md)
 - [Local-ranking atomic Pro/max calibration protocol v2.1](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.1.md)
 - [Local-ranking atomic bounded-retry contract correction v2.2](../../../prototypes/local-ranking-atomic-bounded-retry-contract-v2.2.md)
+- [Local-ranking atomic Pro/max mechanical continuation protocol v2.2](../../../prototypes/local-ranking-atomic-pro-max-continuation-protocol-v2.2.md)
 
 ## Question
 
@@ -135,3 +136,8 @@ first-valid 和 valid 后禁重试全部不变；attempt 4 仍 invalid 就永久
 orientation 2 尚未执行，amendment 不可能由 mirror PASS/FAIL 驱动。下一步保留原 v2.1 incomplete evidence，
 以 hash-bound v2.2 continuation 只发 `call-021` attempt 3，必要时 attempt 4，再将旧、新 attempts 一起重验为
 combined orientation trace。
+
+Mechanical continuation 已在调用前冻结：修正 commit `510f6c2`，amended profile SHA-256
+`e69acf34a7214c3f763780a6d67b90bbd99f116fa3977d3aed3cb9a4128b8b7f`，新旧 `call-021` request SHA-256
+均为 `0916cfca6f3fca8a00c48c9b728af82e9395a98187cf673d511bc0b204998cdb`。调用前 usage 为
+`9/32/40%`。当前只授权 attempt 3，invalid 才允许 attempt 4；其他 23 题不得重发。
