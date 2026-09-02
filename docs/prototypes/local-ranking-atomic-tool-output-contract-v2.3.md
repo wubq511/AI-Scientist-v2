@@ -1,7 +1,7 @@
 # Local-ranking atomic tool-output contract v2.3
 
 Contract date: 2026-09-02（Asia/Shanghai）  
-Status: **Robert approved; frozen before implementation**  
+Status: **Robert approved; frozen for implementation and bounded canary execution**  
 Supersedes: only the Pro/max atomic response-submission transport; v2.2 retry、rubric、packet 与 semantic gates 不变
 
 ## 1. 决策
@@ -168,10 +168,17 @@ Transport-invalid 和 semantic-validator-invalid 都可以按 v2.2 policy 做 ex
 
 ## 6. Canary 与调用授权边界
 
-本合同批准实现和 prepare-only validation，**不授权实现代理直接发 live canary**。实现完成、测试通过并由 Codex
-复核后，再单独报告 exact request hashes、usage snapshot 与调用上界，取得调用授权。
+Robert 于 2026-09-02 明确授权承担 primary implementation 的 Kimi Code/Kimi K3 agent，在以下前置条件全部满足后，
+无需再次等待 Codex 或用户 checkpoint，即可直接执行本节限定的最多 5 个 live physical calls：
 
-获调用授权后的顺序固定为：
+- exact contract implementation 已完成，完整 tests、Black、Ruff、compileall 与 diff check 全部通过；
+- 实现已形成一个 coherent clean commit，`HEAD` 与该 commit 一致且 tracked working tree clean；
+- prepare-only manifests 与 exact request bytes 从该 commit 生成，全部 bindings/hashes 已验证；
+- 调用前 usage snapshot 已记录；
+- implementation agent 已记录 commit SHA、request/manifest hashes、准确命令、provider/model/effort/max tokens、
+  timestamps 与 evidence paths，且不把 secret 写入源码、日志或交接文档。
+
+调用顺序固定为：
 
 1. 一个不含 interview/corpus data 的 synthetic forced-tool transport probe；
 2. synthetic valid 后，使用 spent `pro-max-calibration-002/r1/o1/call-021` 做 stress canary；
@@ -179,6 +186,17 @@ Transport-invalid 和 semantic-validator-invalid 都可以按 v2.2 policy 做 ex
 4. synthetic 最多 1 call，stress 最多 4 calls，总上界 5 physical calls；
 5. 两类 canary 均为 `spent_transport_only`，不得产生或复用 semantic vote；
 6. synthetic invalid 时不发送 stress canary；stress 四次 exhausted 时不创建正式 profile。
+
+Synthetic 必须先于 stress 执行；stress attempts 也必须串行执行，因为下一次 retry 只有在前一次机器判定 invalid 后
+才有授权。该最多 5-call delegation 在 canary PASS 或 FAIL 时立即结束。Implementation agent 必须保留 raw evidence，
+回报 implementation SHA、验证结果、manifest/request hashes、调用前后 usage、response IDs、tokens/cost、validator
+outcomes 与 evidence hashes/paths，然后停止并交回 Codex 复核。
+
+本授权**不包括** fresh `pro-max-calibration-003-tool-output`、JSON-example fallback、第五次 stress attempt、任何额外
+canary、模型族变更，或对 rubric、packet、model、effort、token ceiling、retry 与 semantic gates 的修改。Synthetic
+invalid 或 stress exhausted 时，implementation agent 不得自行设计替代方案；canary PASS 时也必须在 full fresh
+calibration 前停止。独立复核保留在高成本 scientific evidence 边界，而不是放在用于验证本实现的 disposable canary
+之前；复核后可继续使用同一个 Kimi Code session，无需更换 agent。
 
 不新增 first-attempt-valid-rate gate。Primary tool transport 的最小 scale gate 只是：synthetic valid，且 spent
 `call-021` 在既有四次上限内产生一个完整 valid judgment。真正的跨 24-item operational evidence由下一步 fresh

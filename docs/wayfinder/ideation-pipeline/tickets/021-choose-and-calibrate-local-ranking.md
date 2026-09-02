@@ -157,9 +157,13 @@ fallback 尚未获本 result 授权，不能伪装成第 5 次普通 retry。
 Robert 随后批准 v2.3 tool-output redesign。Pro/max reasoning/max tokens/rubric/packet/retry/gates 保持不变；primary
 删除 `response_format=json_object`，强制唯一 `submit_judgment` function call，由 tool arguments 承载六字段，
 controller 保留但不解析 reasoning/content，并沿用本地 closed-schema/handle validator。实现完成后先做 1-call
-synthetic 与 spent `call-021` 最多 4-call canary；两者均不产生 vote，且 live calls 仍需实现复核后的单独授权。
+synthetic 与 spent `call-021` 最多 4-call canary；两者均不产生 vote。Robert 于 2026-09-02 进一步明确授权 primary
+implementation 的 Kimi Code/Kimi K3 agent：在实现、完整验证、clean commit、prepare-only hash verification 与
+调用前 usage snapshot 全部完成后，可不经中间 checkpoint，按 synthetic → spent `call-021` 的顺序直接执行最多
+5 个 live physical calls；synthetic invalid、stress exhausted 或 canary PASS 时都必须立即停止并交回 Codex 复核。
 
 Primary canary 通过后必须从 clean commit fresh 运行 `pro-max-calibration-003-tool-output`，不得用新 `call-021`
 拼接旧 23 votes。若 tool canary 机器失败，唯一 fallback 是带两份左右镜像完整 examples 的 JSON-object 合同；
 fallback 再失败就停止该 provider/model evaluator profile，不继续 prompt-only grammar、修复 malformed JSON、解析
-reasoning 或提高 retry ceiling。当前只授权合同与实现交接，尚未授权 Kimi Code 发出任何模型调用。
+reasoning 或提高 retry ceiling。当前授权只覆盖 primary implementation 与上述 disposable 最多 5-call canary；不授权
+Kimi Code 自行运行 fresh calibration、fallback、额外 retry 或任何其他模型调用。
