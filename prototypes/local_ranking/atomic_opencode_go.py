@@ -4,7 +4,6 @@ import argparse
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -14,15 +13,24 @@ from .atomic_judge import (
     APPROVED_ATOMIC_EFFORTS,
     APPROVED_ATOMIC_MODEL_ALIAS,
     ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    ATOMIC_MAX_TOKENS,
     ATOMIC_PREPARATION_SCHEMA_VERSION,
     ATOMIC_RESPONSE_SUBMISSION,
-    MAX_PHYSICAL_ATTEMPTS,
+    CANARY_PREPARATION_SCHEMA_VERSIONS,
     OPENCODE_GO_ENDPOINT,
+    PREPARATION_SCHEMA_VERSION,
+    RETRY_POLICY,
+    SMOKE_CALL_COUNT,
     SUBMIT_JUDGMENT_TOOL,
-    SUBMIT_JUDGMENT_TOOL_CHOICE,
     SUBMIT_JUDGMENT_TOOL_NAME,
+    _call_binding,
     _load_call_packet,
     _load_manifest,
+    _read_canonical_object,
+    _request,
+    _validate_preparation,
+    _validate_tool_success_evidence,
+    _validated_concurrency,
 )
 from .canonical import (
     canonical_json_bytes,
@@ -34,66 +42,9 @@ from .errors import HarnessError, fail
 from .opencode_go_chat import SAFE_RESPONSE_HEADERS, _api_key, _utc_now
 from .opencode_go_stream import _extract_stream_tool_response
 
-PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v3.1"
-CANARY_PREPARATION_SCHEMA_VERSIONS = {
-    "local-ranking-atomic-opencode-go-preparation-v3.0"
-}
-LEGACY_PREPARATION_SCHEMA_VERSIONS = {
-    "local-ranking-atomic-opencode-go-preparation-v2.1"
-}
 EXECUTION_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-execution-v2.1"
 SMOKE_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-smoke-v2.0"
-SMOKE_RECEIPT_EVIDENCE_FILES = frozenset(
-    {
-        "chunks.jsonl",
-        "finished-at.txt",
-        "http-status.txt",
-        "response-headers.json",
-        "response.json",
-        "started-at.txt",
-        "stream-body.sse",
-    }
-)
-SMOKE_RESULT_EVIDENCE_FILES = SMOKE_RECEIPT_EVIDENCE_FILES | {"receipt.json"}
-ATOMIC_MAX_TOKENS = 16_384
 MAX_CONCURRENCY = 4
-SMOKE_CALL_COUNT = 4
-RETRY_POLICY = {
-    "error_feedback": False,
-    "max_physical_attempts": MAX_PHYSICAL_ATTEMPTS,
-    "retry_after_valid": False,
-    "same_prompt": True,
-    "trigger": "deterministic_invalid_only",
-}
-
-
-def _request(*, prompt: str, reasoning_effort: str) -> dict[str, Any]:
-    return {
-        "max_tokens": ATOMIC_MAX_TOKENS,
-        "messages": [{"content": prompt, "role": "user"}],
-        "model": APPROVED_ATOMIC_MODEL_ALIAS.rsplit("/", 1)[-1],
-        "reasoning_effort": reasoning_effort,
-        "stream": True,
-        "tool_choice": SUBMIT_JUDGMENT_TOOL_CHOICE,
-        "tools": [SUBMIT_JUDGMENT_TOOL],
-    }
-
-
-def _legacy_request(*, prompt: str, reasoning_effort: str) -> dict[str, Any]:
-    return {
-        "max_tokens": ATOMIC_MAX_TOKENS,
-        "messages": [{"content": prompt, "role": "user"}],
-        "model": APPROVED_ATOMIC_MODEL_ALIAS.rsplit("/", 1)[-1],
-        "reasoning_effort": reasoning_effort,
-        "response_format": {"type": "json_object"},
-        "stream": True,
-    }
-
-
-def _validated_concurrency(value: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        fail("INVALID_CONCURRENCY", "Atomic concurrency must be between 1 and 4")
-    return value
 
 
 def _write_preparation(
@@ -259,154 +210,6 @@ def prepare_smoke(
         raw_calls=raw_calls,
         max_concurrency=max_concurrency,
     )
-
-
-def _read_canonical_object(path: Path, *, label: str) -> tuple[dict[str, Any], bytes]:
-    try:
-        data = path.read_bytes()
-        value = json.loads(data)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        fail("INVALID_ARTIFACT", f"{label} is unreadable JSON", error=str(exc))
-    if not isinstance(value, dict) or canonical_json_bytes(value) != data:
-        fail("NON_CANONICAL_INPUT", f"{label} must be one canonical JSON object")
-    return value, data
-
-
-def _validate_preparation(
-    preparation_root: Path,
-) -> tuple[dict[str, Any], bytes, dict[int, dict[str, Any]]]:
-    manifest, manifest_bytes = _read_canonical_object(
-        preparation_root / "manifest.json", label="atomic transport manifest"
-    )
-    base_keys = {
-        "atomic_manifest_sha256",
-        "call_count",
-        "calls",
-        "endpoint",
-        "evaluator",
-        "kind",
-        "max_concurrency",
-        "max_tokens",
-        "retry_policy",
-        "schema_version",
-        "status",
-    }
-    schema_version = manifest.get("schema_version")
-    request_builder = _request
-    if schema_version == PREPARATION_SCHEMA_VERSION:
-        expected_keys = {*base_keys, "response_submission"}
-    elif schema_version in CANARY_PREPARATION_SCHEMA_VERSIONS:
-        expected_keys = base_keys
-    elif schema_version in LEGACY_PREPARATION_SCHEMA_VERSIONS:
-        expected_keys = base_keys
-        request_builder = _legacy_request
-    else:
-        fail(
-            "INVALID_PREPARATION",
-            "Atomic transport preparation schema is unsupported",
-        )
-    evaluator = manifest.get("evaluator")
-    kind = manifest.get("kind")
-    calls = manifest.get("calls")
-    expected_count = 24 if kind == "atomic" else SMOKE_CALL_COUNT
-    if (
-        set(manifest) != expected_keys
-        or (
-            schema_version == PREPARATION_SCHEMA_VERSION
-            and manifest.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
-        )
-        or manifest.get("status") != "ready_for_execution"
-        or manifest.get("endpoint") != OPENCODE_GO_ENDPOINT
-        or manifest.get("max_tokens") != ATOMIC_MAX_TOKENS
-        or manifest.get("retry_policy") != RETRY_POLICY
-        or kind not in {"atomic", "smoke"}
-        or not isinstance(evaluator, dict)
-        or set(evaluator) != {"harness", "model_alias", "provider", "reasoning_effort"}
-        or evaluator.get("harness") != "opencode-go-chat-completions"
-        or evaluator.get("model_alias") != APPROVED_ATOMIC_MODEL_ALIAS
-        or evaluator.get("provider") != "opencode-go"
-        or evaluator.get("reasoning_effort") not in APPROVED_ATOMIC_EFFORTS
-        or not isinstance(calls, list)
-        or manifest.get("call_count") != expected_count
-        or len(calls) != expected_count
-    ):
-        fail("INVALID_PREPARATION", "Atomic transport manifest is incompatible")
-    _validated_concurrency(manifest.get("max_concurrency"))
-    atomic_sha = manifest.get("atomic_manifest_sha256")
-    if (
-        kind == "atomic" and (not isinstance(atomic_sha, str) or len(atomic_sha) != 64)
-    ) or (kind == "smoke" and atomic_sha is not None):
-        fail("INVALID_PREPARATION", "Atomic manifest binding is invalid")
-    by_sequence: dict[int, dict[str, Any]] = {}
-    for call in calls:
-        if not isinstance(call, dict) or set(call) != {
-            "call_id",
-            "orientation",
-            "prompt_path",
-            "prompt_sha256",
-            "replicate_id",
-            "request_path",
-            "request_sha256",
-            "sequence",
-        }:
-            fail("INVALID_PREPARATION", "Prepared call schema is invalid")
-        sequence = call.get("sequence")
-        expected_id = (
-            f"call-{sequence:03d}"
-            if kind == "atomic" and isinstance(sequence, int)
-            else f"smoke-{sequence:03d}" if isinstance(sequence, int) else None
-        )
-        if (
-            isinstance(sequence, bool)
-            or not isinstance(sequence, int)
-            or sequence not in range(1, expected_count + 1)
-            or sequence in by_sequence
-            or call.get("call_id") != expected_id
-            or (kind == "atomic")
-            != (
-                call.get("orientation") in {1, 2}
-                and isinstance(call.get("replicate_id"), str)
-                and bool(call.get("replicate_id"))
-            )
-        ):
-            fail("INVALID_PREPARATION", "Prepared call identity is invalid")
-        prompt_path = resolve_repo_relative(
-            preparation_root, call["prompt_path"], label="prepared prompt path"
-        )
-        request_path = resolve_repo_relative(
-            preparation_root, call["request_path"], label="prepared request path"
-        )
-        try:
-            prompt_bytes = prompt_path.read_bytes()
-        except OSError as exc:
-            fail("MISSING_ARTIFACT", "Prepared prompt is missing", error=str(exc))
-        request, request_bytes = _read_canonical_object(
-            request_path, label="prepared request"
-        )
-        expected_request = request_builder(
-            prompt=prompt_bytes.decode("utf-8"),
-            reasoning_effort=evaluator["reasoning_effort"],
-        )
-        if (
-            sha256_bytes(prompt_bytes) != call.get("prompt_sha256")
-            or sha256_bytes(request_bytes) != call.get("request_sha256")
-            or request != expected_request
-        ):
-            fail("HASH_MISMATCH", "Prepared prompt or request changed")
-        by_sequence[sequence] = call
-    return manifest, manifest_bytes, by_sequence
-
-
-def _call_binding(*, manifest: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "atomic_manifest_sha256": manifest["atomic_manifest_sha256"],
-        "call_id": call["call_id"],
-        "kind": manifest["kind"],
-        "orientation": call["orientation"],
-        "prompt_sha256": call["prompt_sha256"],
-        "replicate_id": call["replicate_id"],
-        "sequence": call["sequence"],
-    }
 
 
 def _execution_files(output_root: Path) -> dict[str, str]:
@@ -656,60 +459,6 @@ def execute_call(
     return receipt
 
 
-def _validated_smoke_usage(value: Any) -> None:
-    if not isinstance(value, dict) or not {
-        "completion_tokens",
-        "prompt_tokens",
-        "total_tokens",
-    }.issubset(value):
-        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt usage is incomplete")
-    for key, token_count in value.items():
-        if (
-            key
-            not in {
-                "cached_tokens",
-                "completion_tokens",
-                "prompt_tokens",
-                "reasoning_tokens",
-                "total_tokens",
-            }
-            or isinstance(token_count, bool)
-            or not isinstance(token_count, int)
-            or token_count < 0
-        ):
-            fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt usage is invalid")
-    if value["total_tokens"] != value["prompt_tokens"] + value["completion_tokens"]:
-        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt token usage is inconsistent")
-
-
-def _smoke_evidence_files(*, execution_root: Path, files: Any, label: str) -> None:
-    if (
-        not isinstance(files, dict)
-        or not files
-        or any(
-            not isinstance(name, str)
-            or not name
-            or Path(name).name != name
-            or not isinstance(digest, str)
-            or len(digest) != 64
-            for name, digest in files.items()
-        )
-    ):
-        fail("INVALID_SMOKE_EVIDENCE", f"{label} file hashes are invalid")
-    for name, digest in files.items():
-        try:
-            data = (execution_root / name).read_bytes()
-        except OSError as exc:
-            fail(
-                "MISSING_ARTIFACT",
-                f"{label} evidence is missing",
-                file=name,
-                error=str(exc),
-            )
-        if sha256_bytes(data) != digest:
-            fail("HASH_MISMATCH", f"{label} evidence changed", file=name)
-
-
 def validate_smoke_call(
     *, preparation_root: Path, call_sequence: int, execution_root: Path
 ) -> dict[str, Any]:
@@ -744,6 +493,7 @@ def validate_smoke_call(
     )
     result, _ = _read_canonical_object(result_path, label="smoke execution result")
     evaluator = manifest["evaluator"]
+    expected_model = evaluator["model_alias"].rsplit("/", 1)[-1]
     expected_binding = _call_binding(manifest=manifest, call=call)
     if (
         set(receipt)
@@ -786,87 +536,6 @@ def validate_smoke_call(
         }
     ):
         fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt does not bind this call")
-    identity = receipt["identity"]
-    if not isinstance(identity, dict) or set(identity) != {
-        "cost",
-        "created_first",
-        "created_last",
-        "finish_reason",
-        "model",
-        "provider_response_id",
-        "tool_call_id",
-    }:
-        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt provider identity is invalid")
-    created_first = identity.get("created_first")
-    created_last = identity.get("created_last")
-    if (
-        identity.get("finish_reason") not in {"stop", "tool_calls"}
-        or identity.get("model") != evaluator["model_alias"].rsplit("/", 1)[-1]
-        or not isinstance(identity.get("provider_response_id"), str)
-        or not identity["provider_response_id"]
-        or not isinstance(identity.get("tool_call_id"), str)
-        or not identity["tool_call_id"]
-        or isinstance(created_first, bool)
-        or not isinstance(created_first, int)
-        or created_first < 0
-        or isinstance(created_last, bool)
-        or not isinstance(created_last, int)
-        or created_last < created_first
-    ):
-        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt provider identity is invalid")
-    cost = identity.get("cost")
-    try:
-        parsed_cost = Decimal(cost) if isinstance(cost, str) else Decimal("NaN")
-    except InvalidOperation:
-        parsed_cost = Decimal("NaN")
-    if not parsed_cost.is_finite() or parsed_cost < 0:
-        fail(
-            "INVALID_SMOKE_EVIDENCE",
-            "Smoke receipt cost must be a finite non-negative decimal string",
-        )
-    usage = receipt.get("usage")
-    if usage is None:
-        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt usage is missing")
-    _validated_smoke_usage(usage)
-    diagnostics = receipt["diagnostics"]
-    if (
-        not isinstance(diagnostics, dict)
-        or set(diagnostics)
-        != {
-            "arguments_bytes",
-            "content_bytes",
-            "data_event_count",
-            "done_received",
-            "keepalive_count",
-            "post_done_cost_received",
-            "reasoning_bytes",
-        }
-        or diagnostics.get("done_received") is not True
-        or not isinstance(diagnostics.get("post_done_cost_received"), bool)
-        or any(
-            isinstance(diagnostics[key], bool)
-            or not isinstance(diagnostics[key], int)
-            or diagnostics[key] < 0
-            for key in (
-                "arguments_bytes",
-                "content_bytes",
-                "data_event_count",
-                "keepalive_count",
-                "reasoning_bytes",
-            )
-        )
-    ):
-        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt diagnostics are invalid")
-    _smoke_evidence_files(
-        execution_root=execution_root, files=receipt.get("files"), label="Smoke receipt"
-    )
-    if set(receipt["files"]) != SMOKE_RECEIPT_EVIDENCE_FILES:
-        fail(
-            "INVALID_SMOKE_EVIDENCE",
-            "Smoke receipt must declare the exact raw and derived evidence set",
-        )
-    if receipt["files"].get("response.json") != sha256_bytes(response_bytes):
-        fail("HASH_MISMATCH", "Smoke receipt does not bind this response")
     if (
         set(result)
         != {
@@ -889,53 +558,19 @@ def validate_smoke_call(
         fail("INVALID_SMOKE_EVIDENCE", "Smoke execution result does not bind this call")
     if result.get("receipt_sha256") != sha256_bytes(receipt_bytes):
         fail("HASH_MISMATCH", "Smoke execution result and receipt do not match")
-    _smoke_evidence_files(
-        execution_root=execution_root,
-        files=result.get("files"),
-        label="Smoke execution result",
+    _validate_tool_success_evidence(
+        evidence_root=execution_root,
+        receipt=receipt,
+        result=result,
+        expected_model=expected_model,
+        code="INVALID_SMOKE_EVIDENCE",
     )
-    if set(result["files"]) != SMOKE_RESULT_EVIDENCE_FILES:
-        fail(
-            "INVALID_SMOKE_EVIDENCE",
-            "Smoke execution result must declare the exact evidence set",
-        )
-    if result["files"].get("receipt.json") != sha256_bytes(receipt_bytes) or result[
-        "files"
-    ].get("response.json") != sha256_bytes(response_bytes):
-        fail("HASH_MISMATCH", "Smoke execution result does not bind this evidence")
-    request_path = resolve_repo_relative(
-        preparation_root, call["request_path"], label="prepared request path"
-    )
-    request = json.loads(request_path.read_bytes())
-    try:
-        (
-            rebuilt_response,
-            rebuilt_usage,
-            rebuilt_identity,
-            rebuilt_chunks,
-            rebuilt_diagnostics,
-        ) = _extract_stream_tool_response(
-            (execution_root / "stream-body.sse").read_bytes(),
-            expected_model=request["model"],
-            tool_name=SUBMIT_JUDGMENT_TOOL_NAME,
-        )
-    except HarnessError as exc:
-        fail(
-            "INVALID_SMOKE_EVIDENCE",
-            "Smoke raw stream does not replay as a valid tool response",
-            error=exc.as_dict(),
-        )
-    if canonical_json_bytes(rebuilt_response) != response_bytes:
-        fail("HASH_MISMATCH", "Smoke response does not match the raw stream")
-    chunks_bytes = b"".join(canonical_json_bytes(chunk) for chunk in rebuilt_chunks)
-    if chunks_bytes != (execution_root / "chunks.jsonl").read_bytes():
-        fail("HASH_MISMATCH", "Smoke chunks do not match the raw stream")
     if (
-        rebuilt_identity != receipt["identity"]
-        or rebuilt_diagnostics != receipt["diagnostics"]
-        or rebuilt_usage != usage
+        receipt["files"]["response.json"] != sha256_bytes(response_bytes)
+        or result["files"]["receipt.json"] != sha256_bytes(receipt_bytes)
+        or result["files"]["response.json"] != sha256_bytes(response_bytes)
     ):
-        fail("HASH_MISMATCH", "Smoke receipt does not match the raw stream")
+        fail("HASH_MISMATCH", "Smoke evidence does not bind this response")
     if response != _smoke_probe_arguments(call["call_id"]):
         fail("INVALID_SMOKE_RESPONSE", "Transport smoke response schema is invalid")
     return {

@@ -337,8 +337,14 @@ python -m prototypes.local_ranking.atomic_judge record-attempt \
   --response <transport-attempt/response.json> \
   --execution-receipt <transport-attempt/receipt.json> \
   --execution-result <transport-attempt/execution-result.json> \
+  --preparation-root <atomic-transport-preparation> \
   --output-root <new-call-attempt>
 ```
+
+`--preparation-root` is required for the current family and forbidden for spent families: the
+recorder re-validates the transport preparation, binds its manifest hash plus the per-call request
+hash into the attempt, and copies the preparation manifest, the call's prompt bytes, and the
+frozen request into an `input-evidence/` directory that replay re-verifies hash-for-hash.
 
 Only machine-detectable invalid output may receive attempts 2-4, using exact identical request bytes.
 The resolver accepts the first valid response, rejects any retry after a valid response, expands
@@ -349,7 +355,8 @@ atomic preparations v2.2/v2.3, transport preparation v2.1, receipt v2.0, executi
 attempts v2.3/v2.4 — stays replayable for read-only diagnostic validation. The forced-tool family
 covers the current v2.5/v3.1 preparations and the spent v2.3 canary (atomic preparation v2.4,
 transport preparation v3.0, identical request bytes without the `response_submission`
-declaration); it uses receipt v3.0, execution result v2.1, and attempt v2.5. `execute-call` and
+declaration); it uses receipt v3.0 and execution result v2.1, with attempt v2.6 for the current
+family and attempt v2.5 for the spent canary. `execute-call` and
 `run-smoke` issue only current v2.5/v3.1 preparations, and `record-attempt` requires the response,
 receipt, execution result, and attempt to match the manifest's family; cross-family evidence fails
 closed.
@@ -376,6 +383,25 @@ all referenced transport evidence. Provider failure, truncation, or malformed JS
 counts toward the same four-attempt ceiling instead of silently disappearing before retry.
 After interruption, a complete execution result can rebuild its missing ledger without another
 request; evidence that ends before the execution result remains ambiguous and fails closed.
+
+Tool-transport evidence is verified at full strength both at record time and on replay. A
+successful execution must declare exactly the seven-file receipt evidence set
+(`stream-body.sse`, `chunks.jsonl`, `response.json`, `response-headers.json`, `http-status.txt`,
+`started-at.txt`, `finished-at.txt`) in the receipt and those plus `receipt.json` in the result,
+every declared file hash-checked against the bytes on disk; the HTTP status must read exactly 200,
+the response headers must be SSE, the started/finished timestamps must be well-formed and ordered,
+and the validator replays `stream-body.sse` through the frozen tool-stream extractor, requiring
+the rebuilt arguments, chunks, identity, diagnostics, and usage to match the stored evidence
+byte-for-byte. A failed execution must declare the frozen five-file base set
+(`stream-body.sse`, `response-headers.json`, `http-status.txt`, `started-at.txt`,
+`finished-at.txt`) and at most one classified extra: `transport-error.json` only for a typed
+transport failure whose error type matches the result error, or `stream-validation-error.json`
+only when the HTTP 200 SSE stream re-fails through the same extractor with the identical error.
+Without an extra, a numeric HTTP status requires the matching `HTTP_FAILED` code and status code,
+a 200 status requires `INVALID_SSE` with non-SSE headers, and an unavailable status is rejected.
+Current-family attempts additionally carry the preparation manifest hash in the attempt outcome
+and the three-file `input-evidence/` copy; replay re-checks both against the frozen request and
+the active call entry.
 
 The lower-level resolver remains available for replay and audit:
 

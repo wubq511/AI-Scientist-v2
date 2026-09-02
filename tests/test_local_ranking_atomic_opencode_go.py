@@ -12,10 +12,10 @@ from prototypes.local_ranking.atomic_judge import (
     SUBMIT_JUDGMENT_SCHEMA,
     SUBMIT_JUDGMENT_TOOL,
     SUBMIT_JUDGMENT_TOOL_CHOICE,
+    _legacy_request,
 )
 from prototypes.local_ranking.atomic_opencode_go import (
     ATOMIC_MAX_TOKENS,
-    _legacy_request,
     _smoke_probe_arguments,
     _validate_preparation,
     execute_call,
@@ -656,3 +656,85 @@ def test_execute_call_writes_failed_result_for_escaped_lone_surrogate(
         "stream-body.sse",
         "stream-validation-error.json",
     } <= set(result["files"])
+
+
+# --- v2.3.2 smoke evidence-metadata negatives ---
+
+
+def _resync_smoke_evidence(
+    execution_root: Path, replacements: dict[str, bytes]
+) -> None:
+    receipt = json.loads((execution_root / "receipt.json").read_bytes())
+    result = json.loads((execution_root / "execution-result.json").read_bytes())
+    for name, data in replacements.items():
+        (execution_root / name).write_bytes(data)
+        digest = sha256_bytes(data)
+        receipt["files"][name] = digest
+        result["files"][name] = digest
+    _rewrite_receipt(execution_root, receipt)
+    _rewrite_result(execution_root, result)
+
+
+@pytest.mark.parametrize(
+    ("name", "data"),
+    [
+        ("http-status.txt", b"503\n"),
+        ("http-status.txt", b"200"),
+        ("http-status.txt", b"200\nextra\n"),
+        ("response-headers.json", b'{"content-type": "text/event-stream"}\n'),
+        (
+            "response-headers.json",
+            canonical_json_bytes(
+                {"content-type": "text/event-stream", "x-trace-id": "abc"}
+            ),
+        ),
+        (
+            "response-headers.json",
+            canonical_json_bytes({"Content-Type": "text/event-stream"}),
+        ),
+        (
+            "response-headers.json",
+            canonical_json_bytes({"content-type": "application/json"}),
+        ),
+        ("response-headers.json", canonical_json_bytes({"content-type": 200})),
+        ("response-headers.json", canonical_json_bytes(["content-type"])),
+        ("started-at.txt", b"not-a-timestamp\n"),
+        ("started-at.txt", b"2026-09-02T00:00:00+00:00\n"),
+        ("started-at.txt", b"2026-09-02T00:00:00Z"),
+        ("finished-at.txt", b"2026-09-02T00:00:01Z\nextra\n"),
+    ],
+)
+def test_validate_smoke_call_rejects_invalid_evidence_metadata(
+    tmp_path: Path, name: str, data: bytes
+) -> None:
+    preparation_root, execution_root = _executed_smoke(tmp_path)
+    _resync_smoke_evidence(execution_root, {name: data})
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=execution_root,
+        )
+
+    assert raised.value.code == "INVALID_SMOKE_EVIDENCE"
+
+
+def test_validate_smoke_call_rejects_reversed_timestamps(tmp_path: Path) -> None:
+    preparation_root, execution_root = _executed_smoke(tmp_path)
+    _resync_smoke_evidence(
+        execution_root,
+        {
+            "started-at.txt": b"2026-09-02T00:00:02Z\n",
+            "finished-at.txt": b"2026-09-02T00:00:01Z\n",
+        },
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=execution_root,
+        )
+
+    assert raised.value.code == "INVALID_SMOKE_EVIDENCE"

@@ -255,3 +255,25 @@ preparation/request hashes 没有绑定 runner 实际发送的 bytes。真实 `c
 `local-ranking-atomic-formal-evidence-ledger-amendment-v2.3.2.md`：只统一 current-tool evidence policy、绑定并保存每个
 attempt 的实际 manifest/prompt/request、按失败类型保留最小 raw evidence，并让 record/replay 同强度 fail closed；不新增
 任何模型质量、性能或人工准入门槛，不改变 frozen tool/prompt/request bytes，不重跑 canary，不发送 live call。
+
+v2.3.2 evidence-ledger 修复已由 Kimi Code/Kimi K3 完成（commit `fix: close atomic formal evidence ledger`），全程无 live
+call、未动 frozen artifacts、未碰 credential。E1–E5 全部 fail closed：`atomic_judge` 集中持有一份 shared
+current-tool evidence policy（PREPARATION v2.5/v3.1、CANARY/LEGACY 版本集、7+8 成功证据文件集、5 文件失败 base 集、
+transport/stream 两类附加文件、ATOMIC_MAX_TOKENS、SMOKE_CALL_COUNT、RETRY_POLICY 全部单源），`atomic_opencode_go`
+改为 import 复用。§4.2 成功执行：receipt/result 必须恰好声明冻结的 7/8 文件集并逐文件 hash 对盘校验，HTTP 恰 200、
+SSE headers、timestamps 合法且有序、identity/usage/diagnostics 语义校验，并用冻结 extractor 从 `stream-body.sse`
+重建 arguments/chunks/identity/diagnostics/usage 逐字节比对。§4.3 失败执行：冻结 5 文件 base 集 + 按
+transport/HTTP/non-SSE/extractor 四类分派的可选附加文件，metadata 与 error/evidence 必须互恰。§4.4 输入绑定：
+current 族 `record-attempt`/`record-failed-attempt` 新增必选 `--preparation-root`（spent 族传入即拒），record 时全量
+重验 transport preparation 并把 manifest/prompt/request 三文件复制进 `input-evidence/`；attempt outcome 升 v2.6 并
+携带 `preparation_manifest_sha256`，replay（`_validate_attempt`）以 record 同强度重放全部校验（E5 闭合）。Red 证据：
+55 个新负例先在 `739ea57` 代码上跑红（14 个 smoke E1 与 3 个 judge 负例为 wrong-PASS 红，其余为缺 `preparation_root`
+形参的 TypeError 红），再修绿。验证：Python 3.13.7 locked venv（`--require-hashes`）与 ambient 3.14.6 各 251 tests
+passed；targeted Ruff（5 个改动 .py）zero-error，full Ruff（`prototypes tests`）恰剩 7 个已披露 baseline；
+Black/compileall/diff-check 绿。真实 replay：canary smoke-001 通过 shared-policy validator；canary `call-021`
+attempt-1 record 重放与 frozen ledger `_validate_attempt` 重放均通过，attempt SHA-256 仍为
+`5d620f2807f584071d444dc842811f2ea266f43e1811c44d926814e73ff75252`；v2.2 r1/o1 25 个真实 attempt 全部可读，
+resolve 停在 RETRY_REQUIRED/call-021；legacy v2.1 transport 保持 diagnostic-only；current preparation 重复
+prepare 全部 bytes 一致；proof 5 三个 hash 原样保留。Ticket 继续 open；fresh `pro-max-calibration-003-tool-output`
+仍需 Codex 独立复核并冻结 Windows execution bundle、profile hash、调用前 usage、执行顺序与 r1 budget 后，再向
+Robert 单独申请授权。

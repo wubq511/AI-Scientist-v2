@@ -4,6 +4,8 @@ import argparse
 import json
 import sys
 from collections import Counter
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,8 @@ from .canonical import (
     write_once,
 )
 from .errors import HarnessError, fail
+from .opencode_go_chat import SAFE_RESPONSE_HEADERS
+from .opencode_go_stream import _extract_stream_tool_response
 from .operational_judge import (
     BUNDLE_SCHEMA_VERSION,
     FORBIDDEN_PUBLIC_TEXT,
@@ -30,7 +34,9 @@ LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS = {
     "local-ranking-atomic-preparation-v2.3",
 }
 ATOMIC_RESPONSE_SUBMISSION = "forced_submit_judgment_tool"
-ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.5"
+ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.6"
+CANARY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS = {"local-ranking-atomic-attempt-v2.5"}
+CANARY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.5"
 LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS = {
     "local-ranking-atomic-attempt-v2.3",
     "local-ranking-atomic-attempt-v2.4",
@@ -53,6 +59,45 @@ ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION = (
 )
 LEGACY_ATOMIC_EXECUTION_RESULT_SCHEMA_VERSIONS = {
     "local-ranking-atomic-opencode-go-execution-v2.0"
+}
+PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v3.1"
+CANARY_PREPARATION_SCHEMA_VERSIONS = {
+    "local-ranking-atomic-opencode-go-preparation-v3.0"
+}
+LEGACY_PREPARATION_SCHEMA_VERSIONS = {
+    "local-ranking-atomic-opencode-go-preparation-v2.1"
+}
+TOOL_RECEIPT_EVIDENCE_FILES = frozenset(
+    {
+        "chunks.jsonl",
+        "finished-at.txt",
+        "http-status.txt",
+        "response-headers.json",
+        "response.json",
+        "started-at.txt",
+        "stream-body.sse",
+    }
+)
+TOOL_RESULT_EVIDENCE_FILES = TOOL_RECEIPT_EVIDENCE_FILES | {"receipt.json"}
+FAILED_RESULT_BASE_EVIDENCE_FILES = frozenset(
+    {
+        "finished-at.txt",
+        "http-status.txt",
+        "response-headers.json",
+        "started-at.txt",
+        "stream-body.sse",
+    }
+)
+TRANSPORT_ERROR_EVIDENCE_FILE = "transport-error.json"
+STREAM_ERROR_EVIDENCE_FILE = "stream-validation-error.json"
+ATOMIC_MAX_TOKENS = 16_384
+SMOKE_CALL_COUNT = 4
+RETRY_POLICY = {
+    "error_feedback": False,
+    "max_physical_attempts": MAX_PHYSICAL_ATTEMPTS,
+    "retry_after_valid": False,
+    "same_prompt": True,
+    "trigger": "deterministic_invalid_only",
 }
 OPENCODE_GO_ENDPOINT = "https://opencode.ai/zen/go/v1/chat/completions"
 APPROVED_ATOMIC_MODEL_ALIAS = "opencode-go/deepseek-v4-pro"
@@ -592,6 +637,205 @@ def _load_call_packet(
     return packet, packet_bytes
 
 
+def _request(*, prompt: str, reasoning_effort: str) -> dict[str, Any]:
+    return {
+        "max_tokens": ATOMIC_MAX_TOKENS,
+        "messages": [{"content": prompt, "role": "user"}],
+        "model": APPROVED_ATOMIC_MODEL_ALIAS.rsplit("/", 1)[-1],
+        "reasoning_effort": reasoning_effort,
+        "stream": True,
+        "tool_choice": SUBMIT_JUDGMENT_TOOL_CHOICE,
+        "tools": [SUBMIT_JUDGMENT_TOOL],
+    }
+
+
+def _legacy_request(*, prompt: str, reasoning_effort: str) -> dict[str, Any]:
+    return {
+        "max_tokens": ATOMIC_MAX_TOKENS,
+        "messages": [{"content": prompt, "role": "user"}],
+        "model": APPROVED_ATOMIC_MODEL_ALIAS.rsplit("/", 1)[-1],
+        "reasoning_effort": reasoning_effort,
+        "response_format": {"type": "json_object"},
+        "stream": True,
+    }
+
+
+def _validated_concurrency(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
+        fail("INVALID_CONCURRENCY", "Atomic concurrency must be between 1 and 4")
+    return value
+
+
+def _transport_request_builder(schema_version: Any) -> Any:
+    if (
+        schema_version
+        in {PREPARATION_SCHEMA_VERSION} | CANARY_PREPARATION_SCHEMA_VERSIONS
+    ):
+        return _request
+    if schema_version in LEGACY_PREPARATION_SCHEMA_VERSIONS:
+        return _legacy_request
+    fail(
+        "INVALID_PREPARATION",
+        "Atomic transport preparation schema is unsupported",
+    )
+
+
+def _validate_transport_manifest_shape(
+    manifest: dict[str, Any], *, code: str
+) -> dict[int, dict[str, Any]]:
+    base_keys = {
+        "atomic_manifest_sha256",
+        "call_count",
+        "calls",
+        "endpoint",
+        "evaluator",
+        "kind",
+        "max_concurrency",
+        "max_tokens",
+        "retry_policy",
+        "schema_version",
+        "status",
+    }
+    schema_version = manifest.get("schema_version")
+    if schema_version == PREPARATION_SCHEMA_VERSION:
+        expected_keys = {*base_keys, "response_submission"}
+    elif schema_version in (
+        CANARY_PREPARATION_SCHEMA_VERSIONS | LEGACY_PREPARATION_SCHEMA_VERSIONS
+    ):
+        expected_keys = base_keys
+    else:
+        fail(code, "Atomic transport preparation schema is unsupported")
+    evaluator = manifest.get("evaluator")
+    kind = manifest.get("kind")
+    calls = manifest.get("calls")
+    expected_count = 24 if kind == "atomic" else SMOKE_CALL_COUNT
+    if (
+        set(manifest) != expected_keys
+        or (
+            schema_version == PREPARATION_SCHEMA_VERSION
+            and manifest.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
+        )
+        or manifest.get("status") != "ready_for_execution"
+        or manifest.get("endpoint") != OPENCODE_GO_ENDPOINT
+        or manifest.get("max_tokens") != ATOMIC_MAX_TOKENS
+        or manifest.get("retry_policy") != RETRY_POLICY
+        or kind not in {"atomic", "smoke"}
+        or not isinstance(evaluator, dict)
+        or set(evaluator) != {"harness", "model_alias", "provider", "reasoning_effort"}
+        or evaluator.get("harness") != "opencode-go-chat-completions"
+        or evaluator.get("model_alias") != APPROVED_ATOMIC_MODEL_ALIAS
+        or evaluator.get("provider") != "opencode-go"
+        or evaluator.get("reasoning_effort") not in APPROVED_ATOMIC_EFFORTS
+        or not isinstance(calls, list)
+        or manifest.get("call_count") != expected_count
+        or len(calls) != expected_count
+    ):
+        fail(code, "Atomic transport manifest is incompatible")
+    _validated_concurrency(manifest.get("max_concurrency"))
+    atomic_sha = manifest.get("atomic_manifest_sha256")
+    if (
+        kind == "atomic" and (not isinstance(atomic_sha, str) or len(atomic_sha) != 64)
+    ) or (kind == "smoke" and atomic_sha is not None):
+        fail(code, "Atomic manifest binding is invalid")
+    by_sequence: dict[int, dict[str, Any]] = {}
+    for call in calls:
+        if not isinstance(call, dict) or set(call) != {
+            "call_id",
+            "orientation",
+            "prompt_path",
+            "prompt_sha256",
+            "replicate_id",
+            "request_path",
+            "request_sha256",
+            "sequence",
+        }:
+            fail(code, "Prepared call schema is invalid")
+        sequence = call.get("sequence")
+        expected_id = (
+            f"call-{sequence:03d}"
+            if kind == "atomic" and isinstance(sequence, int)
+            else f"smoke-{sequence:03d}" if isinstance(sequence, int) else None
+        )
+        if (
+            isinstance(sequence, bool)
+            or not isinstance(sequence, int)
+            or sequence not in range(1, expected_count + 1)
+            or sequence in by_sequence
+            or call.get("call_id") != expected_id
+            or (kind == "atomic")
+            != (
+                call.get("orientation") in {1, 2}
+                and isinstance(call.get("replicate_id"), str)
+                and bool(call.get("replicate_id"))
+            )
+        ):
+            fail(code, "Prepared call identity is invalid")
+        by_sequence[sequence] = call
+    return by_sequence
+
+
+def _validate_transport_call_files(
+    *,
+    preparation_root: Path,
+    call: dict[str, Any],
+    request_builder: Any,
+    reasoning_effort: str,
+) -> None:
+    prompt_path = resolve_repo_relative(
+        preparation_root, call["prompt_path"], label="prepared prompt path"
+    )
+    request_path = resolve_repo_relative(
+        preparation_root, call["request_path"], label="prepared request path"
+    )
+    try:
+        prompt_bytes = prompt_path.read_bytes()
+    except OSError as exc:
+        fail("MISSING_ARTIFACT", "Prepared prompt is missing", error=str(exc))
+    request, request_bytes = _read_canonical_object(
+        request_path, label="prepared request"
+    )
+    expected_request = request_builder(
+        prompt=prompt_bytes.decode("utf-8"),
+        reasoning_effort=reasoning_effort,
+    )
+    if (
+        sha256_bytes(prompt_bytes) != call.get("prompt_sha256")
+        or sha256_bytes(request_bytes) != call.get("request_sha256")
+        or request != expected_request
+    ):
+        fail("HASH_MISMATCH", "Prepared prompt or request changed")
+
+
+def _validate_preparation(
+    preparation_root: Path,
+) -> tuple[dict[str, Any], bytes, dict[int, dict[str, Any]]]:
+    manifest, manifest_bytes = _read_canonical_object(
+        preparation_root / "manifest.json", label="atomic transport manifest"
+    )
+    calls = _validate_transport_manifest_shape(manifest, code="INVALID_PREPARATION")
+    request_builder = _transport_request_builder(manifest["schema_version"])
+    for call in calls.values():
+        _validate_transport_call_files(
+            preparation_root=preparation_root,
+            call=call,
+            request_builder=request_builder,
+            reasoning_effort=manifest["evaluator"]["reasoning_effort"],
+        )
+    return manifest, manifest_bytes, calls
+
+
+def _call_binding(*, manifest: dict[str, Any], call: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "atomic_manifest_sha256": manifest["atomic_manifest_sha256"],
+        "call_id": call["call_id"],
+        "kind": manifest["kind"],
+        "orientation": call["orientation"],
+        "prompt_sha256": call["prompt_sha256"],
+        "replicate_id": call["replicate_id"],
+        "sequence": call["sequence"],
+    }
+
+
 def _score_object(value: Any, *, label: str) -> dict[str, int]:
     if not isinstance(value, dict):
         fail("INVALID_ATOMIC_RESPONSE", f"{label} must be an object")
@@ -672,6 +916,593 @@ def _assess_response(
     except HarnessError as exc:
         return None, {"error": exc.as_dict(), "status": "fail"}
     return judgment, {"error": None, "status": "pass"}
+
+
+def _validated_evidence_file_shape(files: Any, *, code: str, label: str) -> None:
+    if not isinstance(files, dict) or any(
+        not isinstance(name, str)
+        or not name
+        or Path(name).name != name
+        or not isinstance(digest, str)
+        or len(digest) != 64
+        for name, digest in files.items()
+    ):
+        fail(code, f"{label} file hashes are invalid")
+
+
+def _validated_evidence_file_map(
+    files: Any, expected: frozenset[str], *, code: str, label: str
+) -> dict[str, str]:
+    _validated_evidence_file_shape(files, code=code, label=label)
+    if set(files) != set(expected):
+        fail(
+            code,
+            f"{label} must declare exactly the frozen evidence set",
+            missing=sorted(set(expected) - set(files)),
+            unexpected=sorted(set(files) - set(expected)),
+        )
+    return files
+
+
+def _verify_evidence_files(
+    evidence_root: Path, files: dict[str, str], *, label: str
+) -> None:
+    for name, digest in files.items():
+        try:
+            data = (evidence_root / name).read_bytes()
+        except OSError as exc:
+            fail(
+                "MISSING_ARTIFACT",
+                f"{label} evidence is missing",
+                file=name,
+                error=str(exc),
+            )
+        if sha256_bytes(data) != digest:
+            fail("HASH_MISMATCH", f"{label} evidence changed", file=name)
+
+
+def _read_evidence_line(evidence_root: Path, name: str, *, code: str) -> str:
+    try:
+        text = (evidence_root / name).read_bytes().decode("utf-8")
+    except OSError as exc:
+        fail(
+            "MISSING_ARTIFACT", f"Execution evidence {name} is missing", error=str(exc)
+        )
+    except UnicodeDecodeError as exc:
+        fail(code, f"Execution evidence {name} is not UTF-8", error=str(exc))
+    if not text.endswith("\n") or "\n" in text[:-1] or not text[:-1]:
+        fail(code, f"Execution evidence {name} must be exactly one line")
+    return text[:-1]
+
+
+def _validated_execution_status(evidence_root: Path, *, code: str) -> str:
+    status = _read_evidence_line(evidence_root, "http-status.txt", code=code)
+    if status != "unavailable":
+        try:
+            value = int(status)
+        except ValueError:
+            fail(
+                code,
+                "Execution HTTP status is neither unavailable nor numeric",
+            )
+        if not 100 <= value <= 599:
+            fail(code, "Execution HTTP status is not a valid status code")
+    return status
+
+
+def _validated_execution_headers(
+    evidence_root: Path, *, expect_sse: bool | None, code: str
+) -> dict[str, str]:
+    try:
+        data = (evidence_root / "response-headers.json").read_bytes()
+        headers = json.loads(data)
+    except OSError as exc:
+        fail(
+            "MISSING_ARTIFACT",
+            "Execution response headers are missing",
+            error=str(exc),
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(code, "Execution response headers are unreadable", error=str(exc))
+    if (
+        not isinstance(headers, dict)
+        or canonical_json_bytes(headers) != data
+        or any(
+            not isinstance(name, str)
+            or name not in SAFE_RESPONSE_HEADERS
+            or not isinstance(value, str)
+            for name, value in headers.items()
+        )
+    ):
+        fail(code, "Execution response headers are not the canonical safe subset")
+    content_type = headers.get("content-type", "")
+    if expect_sse is True and "text/event-stream" not in content_type:
+        fail(code, "Execution response is not text/event-stream")
+    if expect_sse is False and "text/event-stream" in content_type:
+        fail(code, "Execution response is unexpectedly text/event-stream")
+    return headers
+
+
+def _validated_execution_timestamps(evidence_root: Path, *, code: str) -> None:
+    timestamps = []
+    for name in ("started-at.txt", "finished-at.txt"):
+        value = _read_evidence_line(evidence_root, name, code=code)
+        if not value.endswith("Z"):
+            fail(code, f"Execution evidence {name} must be a UTC Zulu timestamp")
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as exc:
+            fail(
+                code,
+                f"Execution evidence {name} is not a valid timestamp",
+                error=str(exc),
+            )
+        if parsed.tzinfo is None:
+            fail(code, f"Execution evidence {name} must be timezone-aware")
+        timestamps.append(parsed)
+    if timestamps[0] > timestamps[1]:
+        fail(code, "Execution started after it finished")
+
+
+def _validated_tool_usage(value: Any, *, code: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or not {
+        "completion_tokens",
+        "prompt_tokens",
+        "total_tokens",
+    }.issubset(value):
+        fail(code, "Tool execution usage is incomplete")
+    for key, token_count in value.items():
+        if (
+            key
+            not in {
+                "cached_tokens",
+                "completion_tokens",
+                "prompt_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            }
+            or isinstance(token_count, bool)
+            or not isinstance(token_count, int)
+            or token_count < 0
+        ):
+            fail(code, "Tool execution usage is invalid")
+    if value["total_tokens"] != value["prompt_tokens"] + value["completion_tokens"]:
+        fail(code, "Tool execution token usage is inconsistent")
+    return value
+
+
+def _validated_tool_cost(value: Any, *, code: str) -> None:
+    try:
+        parsed = Decimal(value) if isinstance(value, str) else Decimal("NaN")
+    except InvalidOperation:
+        parsed = Decimal("NaN")
+    if not parsed.is_finite() or parsed < 0:
+        fail(
+            code,
+            "Tool execution cost must be a finite non-negative decimal string",
+        )
+
+
+def _validated_tool_identity(
+    identity: Any, *, expected_model: str, code: str
+) -> dict[str, Any]:
+    if not isinstance(identity, dict) or set(identity) != {
+        "cost",
+        "created_first",
+        "created_last",
+        "finish_reason",
+        "model",
+        "provider_response_id",
+        "tool_call_id",
+    }:
+        fail(code, "Tool execution provider identity is invalid")
+    created_first = identity.get("created_first")
+    created_last = identity.get("created_last")
+    if (
+        identity.get("finish_reason") not in {"stop", "tool_calls"}
+        or identity.get("model") != expected_model
+        or not isinstance(identity.get("provider_response_id"), str)
+        or not identity["provider_response_id"]
+        or not isinstance(identity.get("tool_call_id"), str)
+        or not identity["tool_call_id"]
+        or isinstance(created_first, bool)
+        or not isinstance(created_first, int)
+        or created_first < 0
+        or isinstance(created_last, bool)
+        or not isinstance(created_last, int)
+        or created_last < created_first
+    ):
+        fail(code, "Tool execution provider identity is invalid")
+    _validated_tool_cost(identity.get("cost"), code=code)
+    return identity
+
+
+def _validated_tool_diagnostics(value: Any, *, code: str) -> dict[str, Any]:
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "arguments_bytes",
+            "content_bytes",
+            "data_event_count",
+            "done_received",
+            "keepalive_count",
+            "post_done_cost_received",
+            "reasoning_bytes",
+        }
+        or value.get("done_received") is not True
+        or not isinstance(value.get("post_done_cost_received"), bool)
+        or any(
+            isinstance(value[key], bool)
+            or not isinstance(value[key], int)
+            or value[key] < 0
+            for key in (
+                "arguments_bytes",
+                "content_bytes",
+                "data_event_count",
+                "keepalive_count",
+                "reasoning_bytes",
+            )
+        )
+    ):
+        fail(code, "Tool execution diagnostics are invalid")
+    return value
+
+
+def _replay_tool_stream(
+    evidence_root: Path, *, expected_model: str, code: str
+) -> tuple[bytes, bytes, dict[str, Any], dict[str, Any], Any]:
+    try:
+        raw_stream = (evidence_root / "stream-body.sse").read_bytes()
+    except OSError as exc:
+        fail(
+            "MISSING_ARTIFACT",
+            "Raw SSE stream evidence is missing",
+            error=str(exc),
+        )
+    try:
+        draft, usage, identity, chunks, diagnostics = _extract_stream_tool_response(
+            raw_stream,
+            expected_model=expected_model,
+            tool_name=SUBMIT_JUDGMENT_TOOL_NAME,
+        )
+    except HarnessError as exc:
+        fail(
+            code,
+            "Raw SSE stream does not replay as a valid tool response",
+            error=exc.as_dict(),
+        )
+    response_bytes = canonical_json_bytes(draft)
+    chunks_bytes = b"".join(canonical_json_bytes(chunk) for chunk in chunks)
+    return response_bytes, chunks_bytes, identity, diagnostics, usage
+
+
+def _validate_tool_success_evidence(
+    *,
+    evidence_root: Path,
+    receipt: dict[str, Any],
+    result: dict[str, Any],
+    expected_model: str,
+    code: str,
+) -> None:
+    _validated_evidence_file_map(
+        receipt.get("files"),
+        TOOL_RECEIPT_EVIDENCE_FILES,
+        code=code,
+        label="Tool execution receipt",
+    )
+    _verify_evidence_files(
+        evidence_root, receipt["files"], label="Tool execution receipt"
+    )
+    _validated_evidence_file_map(
+        result.get("files"),
+        TOOL_RESULT_EVIDENCE_FILES,
+        code=code,
+        label="Tool execution result",
+    )
+    _verify_evidence_files(
+        evidence_root, result["files"], label="Tool execution result"
+    )
+    if (
+        _validated_execution_status(evidence_root, code=code) != "200"
+        or receipt.get("http_status") != 200
+    ):
+        fail(code, "Successful execution requires HTTP 200 evidence")
+    _validated_execution_headers(evidence_root, expect_sse=True, code=code)
+    _validated_execution_timestamps(evidence_root, code=code)
+    _validated_tool_identity(
+        receipt.get("identity"), expected_model=expected_model, code=code
+    )
+    _validated_tool_usage(receipt.get("usage"), code=code)
+    _validated_tool_diagnostics(receipt.get("diagnostics"), code=code)
+    (
+        replayed_response,
+        replayed_chunks,
+        replayed_identity,
+        replayed_diagnostics,
+        replayed_usage,
+    ) = _replay_tool_stream(evidence_root, expected_model=expected_model, code=code)
+    try:
+        recorded_response = (evidence_root / "response.json").read_bytes()
+        recorded_chunks = (evidence_root / "chunks.jsonl").read_bytes()
+    except OSError as exc:
+        fail(
+            "MISSING_ARTIFACT",
+            "Derived execution evidence is missing",
+            error=str(exc),
+        )
+    if recorded_response != replayed_response:
+        fail("HASH_MISMATCH", "Execution response does not match the raw stream")
+    if recorded_chunks != replayed_chunks:
+        fail("HASH_MISMATCH", "Execution chunks do not match the raw stream")
+    if (
+        replayed_identity != receipt["identity"]
+        or replayed_diagnostics != receipt["diagnostics"]
+        or replayed_usage != receipt["usage"]
+    ):
+        fail("HASH_MISMATCH", "Execution receipt does not match the raw stream")
+
+
+def _read_error_evidence_file(
+    evidence_root: Path, name: str, *, code: str
+) -> dict[str, Any]:
+    try:
+        data = (evidence_root / name).read_bytes()
+        payload = json.loads(data)
+    except OSError as exc:
+        fail(
+            "MISSING_ARTIFACT", f"Execution evidence {name} is missing", error=str(exc)
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(code, f"Execution evidence {name} is unreadable", error=str(exc))
+    if not isinstance(payload, dict) or canonical_json_bytes(payload) != data:
+        fail(code, f"Execution evidence {name} is not a canonical JSON object")
+    return payload
+
+
+def _validate_tool_failure_evidence(
+    *,
+    evidence_root: Path,
+    result: dict[str, Any],
+    expected_model: str,
+    code: str,
+) -> None:
+    files = result.get("files")
+    _validated_evidence_file_shape(files, code=code, label="Failed execution result")
+    names = set(files)
+    unknown = names - (
+        FAILED_RESULT_BASE_EVIDENCE_FILES
+        | {TRANSPORT_ERROR_EVIDENCE_FILE, STREAM_ERROR_EVIDENCE_FILE}
+    )
+    if unknown:
+        fail(
+            code,
+            "Failed execution evidence declares forbidden files",
+            unexpected=sorted(unknown),
+        )
+    if not FAILED_RESULT_BASE_EVIDENCE_FILES.issubset(names):
+        fail(
+            code,
+            "Failed execution evidence lacks the frozen base set",
+            missing=sorted(FAILED_RESULT_BASE_EVIDENCE_FILES - names),
+        )
+    extra = names - FAILED_RESULT_BASE_EVIDENCE_FILES
+    error = result["error"]
+    status = _validated_execution_status(evidence_root, code=code)
+    if extra == {TRANSPORT_ERROR_EVIDENCE_FILE}:
+        details = error.get("details")
+        if (
+            error.get("code") != "OPENCODE_GO_STREAM_TRANSPORT_FAILED"
+            or not isinstance(details, dict)
+            or set(details) != {"error"}
+            or not isinstance(details["error"], str)
+            or not details["error"]
+        ):
+            fail(code, "Transport failure error does not match its evidence file")
+        payload = _read_error_evidence_file(
+            evidence_root, TRANSPORT_ERROR_EVIDENCE_FILE, code=code
+        )
+        if payload != {"error_type": details["error"]}:
+            fail(code, "Transport error evidence does not match the result error")
+        _validated_execution_headers(evidence_root, expect_sse=None, code=code)
+    elif extra == {STREAM_ERROR_EVIDENCE_FILE}:
+        if status != "200":
+            fail(code, "Stream validation failure requires HTTP 200 evidence")
+        _validated_execution_headers(evidence_root, expect_sse=True, code=code)
+        payload = _read_error_evidence_file(
+            evidence_root, STREAM_ERROR_EVIDENCE_FILE, code=code
+        )
+        if payload != error:
+            fail(code, "Stream validation error evidence must equal the result error")
+        try:
+            _extract_stream_tool_response(
+                (evidence_root / "stream-body.sse").read_bytes(),
+                expected_model=expected_model,
+                tool_name=SUBMIT_JUDGMENT_TOOL_NAME,
+            )
+        except HarnessError as exc:
+            if exc.as_dict() != error:
+                fail(code, "Raw stream does not reproduce the recorded failure")
+        else:
+            fail(code, "Raw stream replays successfully despite the recorded failure")
+    elif not extra:
+        if status == "200":
+            if error.get("code") != "INVALID_SSE":
+                fail(code, "HTTP 200 failure evidence requires the non-SSE error")
+            _validated_execution_headers(evidence_root, expect_sse=False, code=code)
+        elif status == "unavailable":
+            fail(code, "Unavailable status requires transport error evidence")
+        else:
+            if error.get("code") != "OPENCODE_GO_STREAM_HTTP_FAILED" or error.get(
+                "details"
+            ) != {"status_code": int(status)}:
+                fail(code, "HTTP failure evidence does not match the result error")
+            _validated_execution_headers(evidence_root, expect_sse=None, code=code)
+    else:
+        fail(code, "Failed execution evidence has an invalid additional file set")
+    _validated_execution_timestamps(evidence_root, code=code)
+
+
+def _bind_current_preparation(
+    *,
+    preparation_root: Path,
+    manifest: dict[str, Any],
+    manifest_file_sha256: str,
+    artifact_root: Path,
+    call: dict[str, Any],
+    request_sha256s: set[str],
+    preparation_sha256s: set[str],
+) -> tuple[bytes, bytes, bytes]:
+    preparation, preparation_bytes, prepared_calls = _validate_preparation(
+        preparation_root
+    )
+    if (
+        preparation["schema_version"] != PREPARATION_SCHEMA_VERSION
+        or preparation.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
+        or preparation["kind"] != "atomic"
+    ):
+        fail(
+            "INVALID_PREPARATION",
+            "Atomic ledger recording requires the current transport preparation",
+        )
+    prepared_call = prepared_calls.get(call["sequence"])
+    if (
+        preparation["atomic_manifest_sha256"] != manifest_file_sha256
+        or prepared_call is None
+        or prepared_call["call_id"] != call["call_id"]
+        or prepared_call["orientation"] != manifest["orientation"]
+        or prepared_call["replicate_id"] != manifest["replicate_id"]
+        or prepared_call["prompt_sha256"] != call["prompt_sha256"]
+    ):
+        fail(
+            "INVALID_PREPARATION",
+            "Transport preparation does not bind this atomic call",
+        )
+    atomic_prompt_path = resolve_repo_relative(
+        artifact_root, call["prompt_path"], label="atomic prompt path"
+    )
+    transport_prompt_path = resolve_repo_relative(
+        preparation_root, prepared_call["prompt_path"], label="prepared prompt path"
+    )
+    request_path = resolve_repo_relative(
+        preparation_root, prepared_call["request_path"], label="prepared request path"
+    )
+    try:
+        atomic_prompt_bytes = atomic_prompt_path.read_bytes()
+        transport_prompt_bytes = transport_prompt_path.read_bytes()
+        request_bytes = request_path.read_bytes()
+    except OSError as exc:
+        fail(
+            "MISSING_ARTIFACT", "Prepared input evidence is unreadable", error=str(exc)
+        )
+    if transport_prompt_bytes != atomic_prompt_bytes:
+        fail(
+            "INVALID_PREPARATION",
+            "Transport prompt differs from the atomic prompt",
+        )
+    if (
+        request_sha256s != {prepared_call["request_sha256"]}
+        or sha256_bytes(request_bytes) != prepared_call["request_sha256"]
+    ):
+        fail(
+            "INVALID_PREPARATION",
+            "Execution evidence does not bind the prepared request",
+        )
+    if preparation_sha256s != {sha256_bytes(preparation_bytes)}:
+        fail(
+            "INVALID_PREPARATION",
+            "Execution evidence does not bind the transport preparation",
+        )
+    return preparation_bytes, transport_prompt_bytes, request_bytes
+
+
+def _write_input_evidence(
+    *,
+    output_root: Path,
+    preparation_bytes: bytes,
+    prompt_bytes: bytes,
+    request_bytes: bytes,
+) -> None:
+    write_once(output_root / "input-evidence" / "manifest.json", preparation_bytes)
+    write_once(output_root / "input-evidence" / "prompt.txt", prompt_bytes)
+    write_once(output_root / "input-evidence" / "request.json", request_bytes)
+
+
+def _validate_attempt_input_evidence(
+    *,
+    attempt_dir: Path,
+    attempt: dict[str, Any],
+    manifest: dict[str, Any],
+    manifest_file_sha256: str,
+    call: dict[str, Any],
+) -> None:
+    code = "INVALID_INPUT_EVIDENCE"
+    evidence_root = attempt_dir / "input-evidence"
+    expected_files = {"manifest.json", "prompt.txt", "request.json"}
+    actual_files = (
+        {path.name for path in evidence_root.iterdir() if path.is_file()}
+        if evidence_root.is_dir()
+        else set()
+    )
+    if actual_files != expected_files:
+        fail(
+            code,
+            "Attempt input evidence must contain exactly the three frozen files",
+        )
+    try:
+        manifest_bytes = (evidence_root / "manifest.json").read_bytes()
+        copied = json.loads(manifest_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(code, "Attempt input evidence manifest is unreadable", error=str(exc))
+    if (
+        not isinstance(copied, dict)
+        or canonical_json_bytes(copied) != manifest_bytes
+        or sha256_bytes(manifest_bytes) != attempt.get("preparation_manifest_sha256")
+    ):
+        fail(code, "Attempt input evidence manifest does not match the attempt")
+    prepared_calls = _validate_transport_manifest_shape(copied, code=code)
+    if (
+        copied["schema_version"] != PREPARATION_SCHEMA_VERSION
+        or copied.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
+        or copied["kind"] != "atomic"
+        or copied["atomic_manifest_sha256"] != manifest_file_sha256
+    ):
+        fail(
+            code,
+            "Attempt input evidence does not bind the current atomic preparation",
+        )
+    prepared_call = prepared_calls.get(call["sequence"])
+    if (
+        prepared_call is None
+        or prepared_call["call_id"] != call["call_id"]
+        or prepared_call["orientation"] != manifest["orientation"]
+        or prepared_call["replicate_id"] != manifest["replicate_id"]
+        or prepared_call["prompt_sha256"] != call["prompt_sha256"]
+    ):
+        fail(code, "Attempt input evidence does not bind the atomic call")
+    try:
+        prompt_bytes = (evidence_root / "prompt.txt").read_bytes()
+        request_bytes = (evidence_root / "request.json").read_bytes()
+        request = json.loads(request_bytes)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(
+            code,
+            "Attempt input evidence prompt or request is unreadable",
+            error=str(exc),
+        )
+    expected_request = _request(
+        prompt=prompt_bytes.decode("utf-8"),
+        reasoning_effort=copied["evaluator"]["reasoning_effort"],
+    )
+    if (
+        not isinstance(request, dict)
+        or canonical_json_bytes(request) != request_bytes
+        or sha256_bytes(prompt_bytes) != prepared_call["prompt_sha256"]
+        or sha256_bytes(request_bytes) != prepared_call["request_sha256"]
+        or sha256_bytes(request_bytes) != attempt.get("request_sha256")
+        or request != expected_request
+    ):
+        fail(code, "Attempt input evidence prompt or request changed")
 
 
 def _validate_execution_receipt(
@@ -995,6 +1826,7 @@ def record_attempt(
     execution_receipt_path: Path,
     execution_result_path: Path,
     output_root: Path,
+    preparation_root: Path | None = None,
 ) -> dict[str, Any]:
     if (
         isinstance(attempt_number, bool)
@@ -1044,6 +1876,44 @@ def record_attempt(
         != sha256_bytes(response_bytes)
     ):
         fail("HASH_MISMATCH", "Execution result and receipt do not match")
+    tool_transport = _uses_tool_transport(manifest["schema_version"])
+    is_current = manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION
+    if tool_transport:
+        _validate_tool_success_evidence(
+            evidence_root=execution_result_path.parent,
+            receipt=receipt,
+            result=execution_result,
+            expected_model=manifest["evaluator"]["model_alias"].rsplit("/", 1)[-1],
+            code="INVALID_EXECUTION_RESULT",
+        )
+    if is_current:
+        if preparation_root is None:
+            fail(
+                "INVALID_PREPARATION",
+                "Current atomic attempts require the actual transport preparation",
+            )
+    elif preparation_root is not None:
+        fail(
+            "INVALID_PREPARATION",
+            "Spent atomic families must not bind a new transport preparation",
+        )
+    input_evidence: tuple[bytes, bytes, bytes] | None = None
+    if is_current:
+        input_evidence = _bind_current_preparation(
+            preparation_root=preparation_root,
+            manifest=manifest,
+            manifest_file_sha256=manifest_file_sha256,
+            artifact_root=artifact_root,
+            call=call,
+            request_sha256s={
+                receipt["request_sha256"],
+                execution_result["request_sha256"],
+            },
+            preparation_sha256s={
+                receipt["preparation_manifest_sha256"],
+                execution_result["preparation_manifest_sha256"],
+            },
+        )
     outcome = {
         "attempt_number": attempt_number,
         "call_id": call["call_id"],
@@ -1063,12 +1933,18 @@ def record_attempt(
         "request_sha256": receipt["request_sha256"],
         "schema_version": (
             ATOMIC_ATTEMPT_SCHEMA_VERSION
-            if _uses_tool_transport(manifest["schema_version"])
-            else LEGACY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+            if is_current
+            else (
+                CANARY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+                if tool_transport
+                else LEGACY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+            )
         ),
         "status": "valid" if judgment is not None else "invalid",
         "validation": validation,
     }
+    if input_evidence is not None:
+        outcome["preparation_manifest_sha256"] = sha256_bytes(input_evidence[0])
     write_once(output_root / "raw-response.bin", response_bytes)
     write_once(output_root / "execution-receipt.json", receipt_bytes)
     write_once(output_root / "execution-result.json", execution_result_bytes)
@@ -1077,6 +1953,13 @@ def record_attempt(
         source_root=execution_result_path.parent,
         output_root=output_root,
     )
+    if input_evidence is not None:
+        _write_input_evidence(
+            output_root=output_root,
+            preparation_bytes=input_evidence[0],
+            prompt_bytes=input_evidence[1],
+            request_bytes=input_evidence[2],
+        )
     write_json_once(output_root / "attempt.json", outcome)
     return outcome
 
@@ -1088,6 +1971,7 @@ def record_failed_attempt(
     attempt_number: int,
     execution_result_path: Path,
     output_root: Path,
+    preparation_root: Path | None = None,
 ) -> dict[str, Any]:
     if (
         isinstance(attempt_number, bool)
@@ -1115,6 +1999,37 @@ def record_failed_attempt(
         call=call,
         expected_status="fail",
     )
+    tool_transport = _uses_tool_transport(manifest["schema_version"])
+    is_current = manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION
+    if tool_transport:
+        _validate_tool_failure_evidence(
+            evidence_root=execution_result_path.parent,
+            result=execution_result,
+            expected_model=manifest["evaluator"]["model_alias"].rsplit("/", 1)[-1],
+            code="INVALID_EXECUTION_RESULT",
+        )
+    if is_current:
+        if preparation_root is None:
+            fail(
+                "INVALID_PREPARATION",
+                "Current atomic attempts require the actual transport preparation",
+            )
+    elif preparation_root is not None:
+        fail(
+            "INVALID_PREPARATION",
+            "Spent atomic families must not bind a new transport preparation",
+        )
+    input_evidence: tuple[bytes, bytes, bytes] | None = None
+    if is_current:
+        input_evidence = _bind_current_preparation(
+            preparation_root=preparation_root,
+            manifest=manifest,
+            manifest_file_sha256=manifest_file_sha256,
+            artifact_root=artifact_root,
+            call=call,
+            request_sha256s={execution_result["request_sha256"]},
+            preparation_sha256s={execution_result["preparation_manifest_sha256"]},
+        )
     validation = {"error": execution_result["error"], "status": "fail"}
     outcome = {
         "attempt_number": attempt_number,
@@ -1135,18 +2050,31 @@ def record_failed_attempt(
         "request_sha256": execution_result["request_sha256"],
         "schema_version": (
             ATOMIC_ATTEMPT_SCHEMA_VERSION
-            if _uses_tool_transport(manifest["schema_version"])
-            else LEGACY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+            if is_current
+            else (
+                CANARY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+                if tool_transport
+                else LEGACY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+            )
         ),
         "status": "invalid",
         "validation": validation,
     }
+    if input_evidence is not None:
+        outcome["preparation_manifest_sha256"] = sha256_bytes(input_evidence[0])
     write_once(output_root / "execution-result.json", execution_result_bytes)
     _copy_execution_evidence(
         result=execution_result,
         source_root=execution_result_path.parent,
         output_root=output_root,
     )
+    if input_evidence is not None:
+        _write_input_evidence(
+            output_root=output_root,
+            preparation_bytes=input_evidence[0],
+            prompt_bytes=input_evidence[1],
+            request_bytes=input_evidence[2],
+        )
     write_json_once(output_root / "attempt.json", outcome)
     return outcome
 
@@ -1161,41 +2089,57 @@ def _validate_attempt(
     attempt, attempt_bytes = _read_canonical_object(
         attempt_path, label="atomic attempt"
     )
+    manifest_schema = manifest.get("schema_version")
+    if manifest_schema == ATOMIC_PREPARATION_SCHEMA_VERSION:
+        allowed_attempt_versions = {ATOMIC_ATTEMPT_SCHEMA_VERSION}
+    elif manifest_schema in CANARY_ATOMIC_PREPARATION_SCHEMA_VERSIONS:
+        allowed_attempt_versions = CANARY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS
+    elif manifest_schema in LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS:
+        allowed_attempt_versions = LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS
+    else:
+        fail("INVALID_ATOMIC_MANIFEST", "Atomic preparation schema is unsupported")
+    attempt_version = attempt.get("schema_version")
+    if attempt_version not in allowed_attempt_versions:
+        fail(
+            "ATTEMPT_IDENTITY_MISMATCH",
+            "Atomic attempt schema does not match the preparation family",
+        )
+    expected_attempt_keys = {
+        "attempt_number",
+        "call_id",
+        "case_id",
+        "evaluator",
+        "execution_receipt_sha256",
+        "execution_result_sha256",
+        "execution_status",
+        "item_id",
+        "judgment",
+        "orientation",
+        "packet_sha256",
+        "prompt_sha256",
+        "provider_response_id",
+        "raw_response_sha256",
+        "replicate_id",
+        "request_sha256",
+        "schema_version",
+        "status",
+        "validation",
+    }
+    if attempt_version == ATOMIC_ATTEMPT_SCHEMA_VERSION:
+        expected_attempt_keys = {
+            *expected_attempt_keys,
+            "preparation_manifest_sha256",
+        }
     _expect_keys(
         attempt,
-        {
-            "attempt_number",
-            "call_id",
-            "case_id",
-            "evaluator",
-            "execution_receipt_sha256",
-            "execution_result_sha256",
-            "execution_status",
-            "item_id",
-            "judgment",
-            "orientation",
-            "packet_sha256",
-            "prompt_sha256",
-            "provider_response_id",
-            "raw_response_sha256",
-            "replicate_id",
-            "request_sha256",
-            "schema_version",
-            "status",
-            "validation",
-        },
+        expected_attempt_keys,
         label="atomic attempt",
     )
     call = calls_by_id.get(attempt.get("call_id"))
     attempt_number = attempt.get("attempt_number")
-    allowed_attempt_versions = (
-        {ATOMIC_ATTEMPT_SCHEMA_VERSION}
-        if _uses_tool_transport(manifest.get("schema_version"))
-        else LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS
-    )
+    preparation_sha256 = attempt.get("preparation_manifest_sha256")
     if (
-        attempt.get("schema_version") not in allowed_attempt_versions
-        or call is None
+        call is None
         or isinstance(attempt_number, bool)
         or not isinstance(attempt_number, int)
         or attempt_number not in range(1, MAX_PHYSICAL_ATTEMPTS + 1)
@@ -1206,6 +2150,12 @@ def _validate_attempt(
         or attempt.get("replicate_id") != manifest["replicate_id"]
         or attempt.get("packet_sha256") != call["packet_sha256"]
         or attempt.get("prompt_sha256") != call["prompt_sha256"]
+        or (
+            attempt_version == ATOMIC_ATTEMPT_SCHEMA_VERSION
+            and (
+                not isinstance(preparation_sha256, str) or len(preparation_sha256) != 64
+            )
+        )
     ):
         fail("ATTEMPT_IDENTITY_MISMATCH", "Atomic attempt identity is invalid")
     _load_call_packet(
@@ -1253,6 +2203,14 @@ def _validate_attempt(
             or execution_result["receipt_sha256"] != sha256_bytes(receipt_bytes)
         ):
             fail("HASH_MISMATCH", "Atomic execution receipt binding changed")
+        if _uses_tool_transport(manifest_schema):
+            _validate_tool_success_evidence(
+                evidence_root=attempt_path.parent / "execution-evidence",
+                receipt=receipt,
+                result=execution_result,
+                expected_model=manifest["evaluator"]["model_alias"].rsplit("/", 1)[-1],
+                code="INVALID_EXECUTION_RESULT",
+            )
         judgment, validation = _assess_response(
             response_bytes=raw_bytes,
             handle_map=call["evidence_handle_map"],
@@ -1271,9 +2229,35 @@ def _validate_attempt(
                 "ATTEMPT_VALIDATION_MISMATCH",
                 "Failed execution attempt contains response identity",
             )
+        if _uses_tool_transport(manifest_schema):
+            _validate_tool_failure_evidence(
+                evidence_root=attempt_path.parent / "execution-evidence",
+                result=execution_result,
+                expected_model=manifest["evaluator"]["model_alias"].rsplit("/", 1)[-1],
+                code="INVALID_EXECUTION_RESULT",
+            )
         judgment = None
         validation = {"error": execution_result["error"], "status": "fail"}
         expected_status = "invalid"
+    if attempt_version == ATOMIC_ATTEMPT_SCHEMA_VERSION:
+        if attempt.get("preparation_manifest_sha256") != execution_result[
+            "preparation_manifest_sha256"
+        ] or (
+            execution_status == "pass"
+            and attempt.get("preparation_manifest_sha256")
+            != receipt["preparation_manifest_sha256"]
+        ):
+            fail(
+                "INVALID_INPUT_EVIDENCE",
+                "Atomic attempt does not bind the recorded transport preparation",
+            )
+        _validate_attempt_input_evidence(
+            attempt_dir=attempt_path.parent,
+            attempt=attempt,
+            manifest=manifest,
+            manifest_file_sha256=sha256_bytes(canonical_json_bytes(manifest)),
+            call=call,
+        )
     if (
         attempt.get("status") != expected_status
         or attempt.get("judgment") != judgment
@@ -1441,12 +2425,14 @@ def _parser() -> argparse.ArgumentParser:
     attempt_parser.add_argument("--response", type=Path, required=True)
     attempt_parser.add_argument("--execution-receipt", type=Path, required=True)
     attempt_parser.add_argument("--execution-result", type=Path, required=True)
+    attempt_parser.add_argument("--preparation-root", type=Path)
     attempt_parser.add_argument("--output-root", type=Path, required=True)
     failed_parser = subparsers.add_parser("record-failed-attempt")
     failed_parser.add_argument("--manifest", type=Path, required=True)
     failed_parser.add_argument("--call-sequence", type=int, required=True)
     failed_parser.add_argument("--attempt-number", type=int, required=True)
     failed_parser.add_argument("--execution-result", type=Path, required=True)
+    failed_parser.add_argument("--preparation-root", type=Path)
     failed_parser.add_argument("--output-root", type=Path, required=True)
     resolve_parser = subparsers.add_parser("resolve-orientation")
     resolve_parser.add_argument("--manifest", type=Path, required=True)
@@ -1486,6 +2472,7 @@ def main(argv: list[str] | None = None) -> int:
                 execution_receipt_path=args.execution_receipt,
                 execution_result_path=args.execution_result,
                 output_root=args.output_root,
+                preparation_root=args.preparation_root,
             )
             displayed_result = {
                 key: result[key]
@@ -1505,6 +2492,7 @@ def main(argv: list[str] | None = None) -> int:
                 attempt_number=args.attempt_number,
                 execution_result_path=args.execution_result,
                 output_root=args.output_root,
+                preparation_root=args.preparation_root,
             )
             displayed_result = {
                 key: result[key]

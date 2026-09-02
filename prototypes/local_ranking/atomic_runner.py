@@ -66,6 +66,7 @@ def _preflight_resume(
     manifest: dict[str, Any],
     artifact_root: Path,
     calls: dict[int, dict[str, Any]],
+    preparation_root: Path,
 ) -> dict[tuple[int, int], dict[str, Any]]:
     calls_by_id = {call["call_id"]: call for call in calls.values()}
     existing = {}
@@ -107,6 +108,7 @@ def _preflight_resume(
                         execution_receipt_path=execution_root / "receipt.json",
                         execution_result_path=result_path,
                         output_root=ledger_root,
+                        preparation_root=preparation_root,
                     )
                 elif execution_result.get("status") == "fail":
                     existing[(sequence, attempt_number)] = record_failed_attempt(
@@ -115,6 +117,7 @@ def _preflight_resume(
                         attempt_number=attempt_number,
                         execution_result_path=result_path,
                         output_root=ledger_root,
+                        preparation_root=preparation_root,
                     )
                 else:
                     fail(
@@ -305,6 +308,7 @@ def run_orientation(
         manifest=manifest,
         artifact_root=artifact_root,
         calls=calls,
+        preparation_root=preparation_root,
     )
     completed = _resume_completed_run(
         output_root=output_root,
@@ -343,6 +347,7 @@ def run_orientation(
                 attempt_number=attempt_number,
                 execution_result_path=result_path,
                 output_root=ledger_root,
+                preparation_root=preparation_root,
             )
         return record_attempt(
             manifest_path=atomic_manifest_path,
@@ -352,6 +357,7 @@ def run_orientation(
             execution_receipt_path=execution_root / "receipt.json",
             execution_result_path=execution_root / "execution-result.json",
             output_root=ledger_root,
+            preparation_root=preparation_root,
         )
 
     first_attempts: dict[int, dict[str, Any]] = {}

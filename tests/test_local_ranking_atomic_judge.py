@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import shutil
 import threading
 from pathlib import Path
 
@@ -16,8 +17,10 @@ from prototypes.local_ranking.atomic_judge import (
     ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION,
     ATOMIC_PREPARATION_SCHEMA_VERSION,
     ATOMIC_RESPONSE_SUBMISSION,
+    CANARY_ATOMIC_PREPARATION_SCHEMA_VERSIONS,
     SUBMIT_JUDGMENT_TOOL,
     _legacy_prompt_text,
+    _validate_attempt,
     prepare_atomic,
     record_failed_attempt,
     resolve_orientation,
@@ -34,6 +37,7 @@ from prototypes.local_ranking.atomic_profile import (
 from prototypes.local_ranking.atomic_runner import run_orientation
 from prototypes.local_ranking.canonical import canonical_json_bytes, sha256_bytes
 from prototypes.local_ranking.errors import HarnessError
+from prototypes.local_ranking.opencode_go_stream import _extract_stream_tool_response
 from prototypes.local_ranking.operational_judge import BUNDLE_SCHEMA_VERSION
 
 SCORE_FIELDS = (
@@ -202,6 +206,13 @@ def record_attempt(
     response_path = kwargs["response_path"]
     output_root = kwargs["output_root"]
     manifest = json.loads(manifest_path.read_bytes())
+    if receipt_family == "tool" and manifest["schema_version"] in (
+        {ATOMIC_PREPARATION_SCHEMA_VERSION} | CANARY_ATOMIC_PREPARATION_SCHEMA_VERSIONS
+    ):
+        # Tool-transport families require the full execution evidence set; the
+        # minimal synthetic receipt below only exercises the legacy gates.
+        kwargs["result_family"] = result_family
+        return _record_tool_attempt(**kwargs)
     call = manifest["calls"][kwargs["call_sequence"] - 1]
     response_bytes = response_path.read_bytes()
     response_id = "test-" + sha256_bytes(str(output_root).encode())[:24]
@@ -306,41 +317,22 @@ def _failed_attempt(
     attempt_number: int,
     output_root: Path,
 ) -> dict:
-    manifest = json.loads(manifest_path.read_bytes())
-    call = manifest["calls"][call_sequence - 1]
     execution_root = output_root.parent / f"{output_root.name}-execution-source"
-    status_path = execution_root / "http-status.txt"
-    status_path.parent.mkdir(parents=True, exist_ok=True)
-    status_path.write_bytes(b"503\n")
-    result = {
-        "call_binding": {
-            "atomic_manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
-            "call_id": call["call_id"],
-            "kind": "atomic",
-            "orientation": manifest["orientation"],
-            "prompt_sha256": call["prompt_sha256"],
-            "replicate_id": manifest["replicate_id"],
-            "sequence": call["sequence"],
-        },
-        "error": {
-            "code": "OPENCODE_GO_STREAM_HTTP_FAILED",
-            "details": {"status_code": 503},
-            "message": "Synthetic provider failure",
-        },
-        "files": {"http-status.txt": sha256_bytes(b"503\n")},
-        "preparation_manifest_sha256": "a" * 64,
-        "receipt_sha256": None,
-        "request_sha256": "b" * 64,
-        "schema_version": ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
-        "status": "fail",
-    }
-    result_path = _write(execution_root / "execution-result.json", result)
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=call_sequence,
+        execution_root=execution_root,
+    )
+    kwargs: dict = {}
+    if root is not None:
+        kwargs["preparation_root"] = root
     return record_failed_attempt(
         manifest_path=manifest_path,
         call_sequence=call_sequence,
         attempt_number=attempt_number,
         execution_result_path=result_path,
         output_root=output_root,
+        **kwargs,
     )
 
 
@@ -724,7 +716,7 @@ def test_new_writers_emit_only_tool_transport_schema_versions(tmp_path: Path) ->
     assert manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION
     assert manifest["response_submission"] == "forced_submit_judgment_tool"
     assert manifest["response_submission"] == ATOMIC_RESPONSE_SUBMISSION
-    assert outcome["schema_version"] == "local-ranking-atomic-attempt-v2.5"
+    assert outcome["schema_version"] == "local-ranking-atomic-attempt-v2.6"
     receipt = json.loads((tmp_path / "attempt" / "execution-receipt.json").read_bytes())
     assert receipt["schema_version"] == ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
     assert receipt["identity"]["finish_reason"] == "tool_calls"
@@ -773,6 +765,7 @@ def test_record_attempt_rejects_receipt_outside_tool_finish_allowlist(
             execution_receipt_path=receipt_path,
             execution_result_path=receipt_path.parent / "execution-result.json",
             output_root=tmp_path / "attempt-drifted",
+            preparation_root=_transport_root_for(manifest_path),
         )
 
     assert raised_after_drift.value.code == "INVALID_EXECUTION_RECEIPT"
@@ -812,6 +805,7 @@ def test_record_attempt_rejects_receipt_with_wrong_tool_schema(tmp_path: Path) -
             execution_receipt_path=receipt_path,
             execution_result_path=receipt_path.parent / "execution-result.json",
             output_root=tmp_path / "attempt-drifted",
+            preparation_root=_transport_root_for(manifest_path),
         )
 
     assert raised.value.code == "INVALID_EXECUTION_RECEIPT"
@@ -1688,3 +1682,1214 @@ def test_repeated_atomic_prepare_is_byte_identical(tmp_path: Path) -> None:
         assert (first_transport / relative).read_bytes() == (
             second_transport / relative
         ).read_bytes()
+
+
+# --- v2.3.2 evidence-ledger closure helpers and negatives ---
+
+
+def _transport_root_for(manifest_path: Path) -> Path:
+    prepared_root = manifest_path.parent.parent
+    return prepared_root.parent / f"{prepared_root.name}-transport"
+
+
+def _ensure_transport(manifest_path: Path) -> Path:
+    root = _transport_root_for(manifest_path)
+    if not (root / "manifest.json").is_file():
+        prepare_atomic_transport(
+            atomic_manifest_path=manifest_path,
+            output_root=root,
+            max_concurrency=4,
+        )
+    return root
+
+
+def _preparation_binding(
+    manifest_path: Path, call: dict, preparation_root: Path | None
+) -> tuple[str, str]:
+    if preparation_root is None:
+        return "a" * 64, "b" * 64
+    transport_bytes = (preparation_root / "manifest.json").read_bytes()
+    transport = json.loads(transport_bytes)
+    prepared_call = next(
+        entry for entry in transport["calls"] if entry["sequence"] == call["sequence"]
+    )
+    return sha256_bytes(transport_bytes), prepared_call["request_sha256"]
+
+
+def _resolve_preparation_root(
+    manifest: dict, manifest_path: Path, preparation_root: Path | None | str
+) -> Path | None:
+    if preparation_root != "auto":
+        return preparation_root
+    if manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION:
+        return _ensure_transport(manifest_path)
+    return None
+
+
+def _tool_execution(
+    *,
+    manifest_path: Path,
+    call_sequence: int,
+    response_path: Path,
+    execution_root: Path,
+    preparation_root: Path | None | str = "auto",
+    result_family: str = "tool",
+) -> tuple[Path, Path, Path | None]:
+    manifest = json.loads(manifest_path.read_bytes())
+    call = manifest["calls"][call_sequence - 1]
+    root = _resolve_preparation_root(manifest, manifest_path, preparation_root)
+    response_bytes = response_path.read_bytes()
+    response_id = "test-" + sha256_bytes(str(execution_root).encode())[:24]
+    stream = _semantic_stream(
+        response_id=response_id, response=json.loads(response_bytes)
+    )
+    draft, usage, identity, chunks, diagnostics = _extract_stream_tool_response(
+        stream,
+        expected_model="deepseek-v4-pro",
+        tool_name="submit_judgment",
+    )
+    assert canonical_json_bytes(draft) == response_bytes
+    evidence = {
+        "chunks.jsonl": b"".join(canonical_json_bytes(chunk) for chunk in chunks),
+        "finished-at.txt": b"2026-09-02T00:00:01Z\n",
+        "http-status.txt": b"200\n",
+        "response-headers.json": canonical_json_bytes(
+            {"content-type": "text/event-stream"}
+        ),
+        "response.json": response_bytes,
+        "started-at.txt": b"2026-09-02T00:00:00Z\n",
+        "stream-body.sse": stream,
+    }
+    bind_root = (
+        root
+        if manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION
+        else None
+    )
+    preparation_sha256, request_sha256 = _preparation_binding(
+        manifest_path, call, bind_root
+    )
+    receipt = {
+        "call_binding": {
+            "atomic_manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
+            "call_id": call["call_id"],
+            "kind": "atomic",
+            "orientation": manifest["orientation"],
+            "prompt_sha256": call["prompt_sha256"],
+            "replicate_id": manifest["replicate_id"],
+            "sequence": call["sequence"],
+        },
+        "diagnostics": diagnostics,
+        "endpoint": "https://opencode.ai/zen/go/v1/chat/completions",
+        "files": {name: sha256_bytes(data) for name, data in evidence.items()},
+        "http_status": 200,
+        "identity": identity,
+        "preparation_manifest_sha256": preparation_sha256,
+        "provider": "opencode-go",
+        "request_sha256": request_sha256,
+        "schema_version": ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
+        "status": "pass",
+        "tool": {
+            "name": "submit_judgment",
+            "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
+        },
+        "transport_qualification": {
+            "forced_tool_call_accepted": True,
+            "reasoning_effort_requested": manifest["evaluator"]["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        },
+        "usage": usage,
+    }
+    execution_root.mkdir(parents=True, exist_ok=True)
+    for name, data in evidence.items():
+        (execution_root / name).write_bytes(data)
+    receipt_path = _write(execution_root / "receipt.json", receipt)
+    result_schema_version = (
+        "local-ranking-atomic-opencode-go-execution-v2.0"
+        if result_family == "legacy"
+        else ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION
+    )
+    execution_result = {
+        "call_binding": receipt["call_binding"],
+        "error": None,
+        "files": {
+            **{name: sha256_bytes(data) for name, data in evidence.items()},
+            "receipt.json": sha256_bytes(receipt_path.read_bytes()),
+        },
+        "preparation_manifest_sha256": preparation_sha256,
+        "receipt_sha256": sha256_bytes(receipt_path.read_bytes()),
+        "request_sha256": request_sha256,
+        "schema_version": result_schema_version,
+        "status": "pass",
+    }
+    execution_result_path = _write(
+        execution_root / "execution-result.json", execution_result
+    )
+    return receipt_path, execution_result_path, root
+
+
+def _record_tool_attempt(**kwargs) -> dict:
+    output_root = kwargs["output_root"]
+    execution_root = output_root.parent / f"{output_root.name}-execution-source"
+    receipt_path, execution_result_path, root = _tool_execution(
+        manifest_path=kwargs["manifest_path"],
+        call_sequence=kwargs["call_sequence"],
+        response_path=kwargs["response_path"],
+        execution_root=execution_root,
+        preparation_root=kwargs.pop("preparation_root", "auto"),
+        result_family=kwargs.pop("result_family", "tool"),
+    )
+    if root is not None:
+        kwargs["preparation_root"] = root
+    return _record_attempt(
+        execution_receipt_path=receipt_path,
+        execution_result_path=execution_result_path,
+        **kwargs,
+    )
+
+
+def _resync_execution_maps(
+    execution_root: Path, replacements: dict[str, bytes | None]
+) -> None:
+    receipt_path = execution_root / "receipt.json"
+    result_path = execution_root / "execution-result.json"
+    receipt = json.loads(receipt_path.read_bytes())
+    result = json.loads(result_path.read_bytes())
+    for name, data in replacements.items():
+        if data is None:
+            (execution_root / name).unlink()
+            receipt["files"].pop(name, None)
+            result["files"].pop(name, None)
+        else:
+            (execution_root / name).write_bytes(data)
+            digest = sha256_bytes(data)
+            if name in receipt["files"]:
+                receipt["files"][name] = digest
+            result["files"][name] = digest
+    receipt_bytes = canonical_json_bytes(receipt)
+    receipt_path.write_bytes(receipt_bytes)
+    result["receipt_sha256"] = sha256_bytes(receipt_bytes)
+    result["files"]["receipt.json"] = sha256_bytes(receipt_bytes)
+    result_path.write_bytes(canonical_json_bytes(result))
+
+
+def _failed_execution(
+    *,
+    manifest_path: Path,
+    call_sequence: int,
+    execution_root: Path,
+    kind: str = "http",
+    preparation_root: Path | None | str = "auto",
+) -> tuple[Path, Path | None]:
+    manifest = json.loads(manifest_path.read_bytes())
+    call = manifest["calls"][call_sequence - 1]
+    root = _resolve_preparation_root(manifest, manifest_path, preparation_root)
+    bind_root = (
+        root
+        if manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION
+        else None
+    )
+    preparation_sha256, request_sha256 = _preparation_binding(
+        manifest_path, call, bind_root
+    )
+    extra: dict[str, bytes] = {}
+    if kind == "transport":
+        status = b"unavailable\n"
+        headers: dict[str, str] = {}
+        stream = b""
+        error = {
+            "code": "OPENCODE_GO_STREAM_TRANSPORT_FAILED",
+            "details": {"error": "ConnectError"},
+            "message": "Synthetic transport failure",
+        }
+        extra["transport-error.json"] = canonical_json_bytes(
+            {"error_type": "ConnectError"}
+        )
+    elif kind == "http":
+        status = b"503\n"
+        headers = {"content-type": "text/plain"}
+        stream = b"temporarily unavailable"
+        error = {
+            "code": "OPENCODE_GO_STREAM_HTTP_FAILED",
+            "details": {"status_code": 503},
+            "message": "Synthetic provider failure",
+        }
+    elif kind == "non_sse":
+        status = b"200\n"
+        headers = {"content-type": "application/json"}
+        stream = b'{"error": "plain json body"}\n'
+        error = {
+            "code": "INVALID_SSE",
+            "message": "Synthetic non-SSE response",
+        }
+    elif kind == "extractor":
+        status = b"200\n"
+        headers = {"content-type": "text/event-stream"}
+        stream = _semantic_stream(
+            response_id="failed-extractor", response=_valid_response()
+        ).replace(b"submit_judgment", b"other_function")
+        try:
+            _extract_stream_tool_response(
+                stream,
+                expected_model="deepseek-v4-pro",
+                tool_name="submit_judgment",
+            )
+        except HarnessError as exc:
+            error = exc.as_dict()
+        else:
+            raise AssertionError("extractor must reject the synthetic stream")
+        extra["stream-validation-error.json"] = canonical_json_bytes(error)
+    else:
+        raise AssertionError(f"unsupported failure kind {kind}")
+    evidence = {
+        "finished-at.txt": b"2026-09-02T00:00:01Z\n",
+        "http-status.txt": status,
+        "response-headers.json": canonical_json_bytes(headers),
+        "started-at.txt": b"2026-09-02T00:00:00Z\n",
+        "stream-body.sse": stream,
+        **extra,
+    }
+    execution_root.mkdir(parents=True, exist_ok=True)
+    for name, data in evidence.items():
+        (execution_root / name).write_bytes(data)
+    result = {
+        "call_binding": {
+            "atomic_manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
+            "call_id": call["call_id"],
+            "kind": "atomic",
+            "orientation": manifest["orientation"],
+            "prompt_sha256": call["prompt_sha256"],
+            "replicate_id": manifest["replicate_id"],
+            "sequence": call["sequence"],
+        },
+        "error": error,
+        "files": {name: sha256_bytes(data) for name, data in evidence.items()},
+        "preparation_manifest_sha256": preparation_sha256,
+        "receipt_sha256": None,
+        "request_sha256": request_sha256,
+        "schema_version": ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
+        "status": "fail",
+    }
+    result_path = _write(execution_root / "execution-result.json", result)
+    return result_path, root
+
+
+def _rewrite_failed_result(execution_root: Path, result: dict) -> Path:
+    result_path = execution_root / "execution-result.json"
+    result_path.write_bytes(canonical_json_bytes(result))
+    return result_path
+
+
+def _recorded_current_attempt(tmp_path: Path) -> tuple[Path, Path, Path]:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    output_root = tmp_path / "attempt"
+    _record_tool_attempt(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        attempt_number=1,
+        response_path=response,
+        output_root=output_root,
+    )
+    return manifest_path, output_root, _transport_root_for(manifest_path)
+
+
+def test_record_attempt_requires_preparation_root_for_the_current_family(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+
+    with pytest.raises(HarnessError) as raised:
+        _record_tool_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            output_root=tmp_path / "attempt",
+            preparation_root=None,
+        )
+
+    assert raised.value.code == "INVALID_PREPARATION"
+
+
+def test_record_attempt_rejects_preparation_root_for_spent_families(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    _relabeled_atomic_manifest(
+        prepared, manifest_path, "local-ranking-atomic-preparation-v2.4"
+    )
+    response = _write(tmp_path / "response.json", _valid_response())
+
+    with pytest.raises(HarnessError) as raised:
+        _record_tool_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            output_root=tmp_path / "attempt",
+            preparation_root=tmp_path / "unused-transport",
+        )
+
+    assert raised.value.code == "INVALID_PREPARATION"
+
+
+@pytest.mark.parametrize(
+    ("dropped", "expected_code"),
+    [
+        ("chunks.jsonl", "INVALID_EXECUTION_RESULT"),
+        ("finished-at.txt", "INVALID_EXECUTION_RESULT"),
+        ("http-status.txt", "INVALID_EXECUTION_RESULT"),
+        ("response-headers.json", "INVALID_EXECUTION_RESULT"),
+        ("response.json", "INVALID_EXECUTION_RECEIPT"),
+        ("started-at.txt", "INVALID_EXECUTION_RESULT"),
+        ("stream-body.sse", "INVALID_EXECUTION_RESULT"),
+        ("receipt.json", "INVALID_EXECUTION_RESULT"),
+    ],
+)
+def test_record_attempt_rejects_shrunk_success_evidence(
+    tmp_path: Path, dropped: str, expected_code: str
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    execution_root = tmp_path / "evidence"
+    receipt_path, result_path, root = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=execution_root,
+    )
+    if dropped == "receipt.json":
+        result = json.loads(result_path.read_bytes())
+        del result["files"]["receipt.json"]
+        _rewrite_failed_result(execution_root, result)
+    else:
+        _resync_execution_maps(execution_root, {dropped: None})
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == expected_code
+    assert not (tmp_path / "attempt").exists()
+
+
+def test_record_attempt_rejects_stream_divergent_chunks(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    execution_root = tmp_path / "evidence"
+    receipt_path, result_path, root = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=execution_root,
+    )
+    chunks_path = execution_root / "chunks.jsonl"
+    lines = chunks_path.read_bytes().splitlines(keepends=True)
+    assert len(lines) > 1
+    _resync_execution_maps(
+        execution_root, {"chunks.jsonl": b"".join(list(reversed(lines)))}
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "HASH_MISMATCH"
+    assert not (tmp_path / "attempt").exists()
+
+
+@pytest.mark.parametrize(
+    ("replacements", "expected_code"),
+    [
+        ({"http-status.txt": b"503\n"}, "INVALID_EXECUTION_RESULT"),
+        (
+            {
+                "response-headers.json": canonical_json_bytes(
+                    {"content-type": "application/json"}
+                )
+            },
+            "INVALID_EXECUTION_RESULT",
+        ),
+        (
+            {
+                "started-at.txt": b"2026-09-02T00:00:02Z\n",
+                "finished-at.txt": b"2026-09-02T00:00:01Z\n",
+            },
+            "INVALID_EXECUTION_RESULT",
+        ),
+        ({"started-at.txt": b"not-a-timestamp\n"}, "INVALID_EXECUTION_RESULT"),
+    ],
+)
+def test_record_attempt_rejects_invalid_success_metadata(
+    tmp_path: Path, replacements: dict[str, bytes], expected_code: str
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    execution_root = tmp_path / "evidence"
+    receipt_path, result_path, root = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=execution_root,
+    )
+    _resync_execution_maps(execution_root, replacements)
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == expected_code
+    assert not (tmp_path / "attempt").exists()
+
+
+def test_record_attempt_rejects_a_foreign_preparation(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    other = tmp_path / "other"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "other-source.json", orientation=2),
+        replicate_id="r9",
+        output_root=other,
+    )
+    foreign_root = tmp_path / "foreign-transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=other / "private" / "manifest.json",
+        output_root=foreign_root,
+    )
+    response = _write(tmp_path / "response.json", _valid_response())
+    execution_root = tmp_path / "evidence"
+    receipt_path, result_path, _ = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=execution_root,
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=foreign_root,
+        )
+
+    assert raised.value.code == "INVALID_PREPARATION"
+
+
+@pytest.mark.parametrize("field", ["preparation_manifest_sha256", "request_sha256"])
+def test_record_attempt_rejects_forged_transport_hashes(
+    tmp_path: Path, field: str
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    execution_root = tmp_path / "evidence"
+    receipt_path, result_path, root = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=execution_root,
+    )
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt[field] = "c" * 64
+    receipt_bytes = canonical_json_bytes(receipt)
+    receipt_path.write_bytes(receipt_bytes)
+    result = json.loads(result_path.read_bytes())
+    result[field] = "c" * 64
+    result["receipt_sha256"] = sha256_bytes(receipt_bytes)
+    result["files"]["receipt.json"] = sha256_bytes(receipt_bytes)
+    result_path.write_bytes(canonical_json_bytes(result))
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_PREPARATION"
+
+
+@pytest.mark.parametrize("artifact", ["prompt", "request"])
+def test_record_attempt_rejects_tampered_prepared_input(
+    tmp_path: Path, artifact: str
+) -> None:
+    prepared = tmp_path / "prepared"
+    manifest = prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    response = _write(tmp_path / "response.json", _valid_response())
+    execution_root = tmp_path / "evidence"
+    receipt_path, result_path, root = _tool_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        response_path=response,
+        execution_root=execution_root,
+    )
+    assert root is not None
+    transport = json.loads((root / "manifest.json").read_bytes())
+    prepared_call = transport["calls"][0]
+    target = root / prepared_call[f"{artifact}_path"]
+    if artifact == "prompt":
+        target.write_bytes(target.read_bytes() + b"tampered")
+    else:
+        request = json.loads(target.read_bytes())
+        request["max_tokens"] = 1
+        target.write_bytes(canonical_json_bytes(request))
+
+    with pytest.raises(HarnessError) as raised:
+        _record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            execution_receipt_path=receipt_path,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "HASH_MISMATCH"
+    assert manifest["call_count"] == 24
+
+
+@pytest.mark.parametrize("kind", ["transport", "http", "non_sse", "extractor"])
+def test_record_failed_attempt_accepts_writer_shaped_failures(
+    tmp_path: Path, kind: str
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=execution_root,
+        kind=kind,
+    )
+
+    outcome = record_failed_attempt(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        attempt_number=1,
+        execution_result_path=result_path,
+        output_root=tmp_path / "attempt",
+        preparation_root=root,
+    )
+
+    assert outcome["status"] == "invalid"
+    assert outcome["execution_status"] == "fail"
+    assert outcome["schema_version"] == "local-ranking-atomic-attempt-v2.6"
+    input_evidence = tmp_path / "attempt" / "input-evidence"
+    assert sorted(path.name for path in input_evidence.iterdir()) == [
+        "manifest.json",
+        "prompt.txt",
+        "request.json",
+    ]
+
+
+def test_record_failed_attempt_requires_preparation_root_for_the_current_family(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    result_path, _ = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=tmp_path / "evidence",
+        preparation_root=None,
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+        )
+
+    assert raised.value.code == "INVALID_PREPARATION"
+
+
+def test_record_failed_attempt_rejects_a_missing_base_file(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path, call_sequence=1, execution_root=execution_root
+    )
+    result = json.loads(result_path.read_bytes())
+    (execution_root / "stream-body.sse").unlink()
+    del result["files"]["stream-body.sse"]
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_record_failed_attempt_rejects_mixed_in_success_files(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path, call_sequence=1, execution_root=execution_root
+    )
+    result = json.loads(result_path.read_bytes())
+    (execution_root / "response.json").write_bytes(
+        canonical_json_bytes(_valid_response())
+    )
+    result["files"]["response.json"] = sha256_bytes(
+        (execution_root / "response.json").read_bytes()
+    )
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_record_failed_attempt_rejects_competing_error_files(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=execution_root,
+        kind="transport",
+    )
+    result = json.loads(result_path.read_bytes())
+    extra = canonical_json_bytes({"code": "INVALID_SSE", "message": "competing"})
+    (execution_root / "stream-validation-error.json").write_bytes(extra)
+    result["files"]["stream-validation-error.json"] = sha256_bytes(extra)
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_record_failed_attempt_rejects_transport_error_mismatch(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=execution_root,
+        kind="transport",
+    )
+    drifted = canonical_json_bytes({"error_type": "ReadError"})
+    (execution_root / "transport-error.json").write_bytes(drifted)
+    result = json.loads(result_path.read_bytes())
+    result["files"]["transport-error.json"] = sha256_bytes(drifted)
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_record_failed_attempt_rejects_http_status_mismatch(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=execution_root,
+        kind="http",
+    )
+    result = json.loads(result_path.read_bytes())
+    result["error"]["details"]["status_code"] = 500
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_record_failed_attempt_rejects_non_sse_with_sse_headers(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=execution_root,
+        kind="non_sse",
+    )
+    drifted = canonical_json_bytes({"content-type": "text/event-stream"})
+    (execution_root / "response-headers.json").write_bytes(drifted)
+    result = json.loads(result_path.read_bytes())
+    result["files"]["response-headers.json"] = sha256_bytes(drifted)
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_record_failed_attempt_rejects_drifted_stream_error_file(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=execution_root,
+        kind="extractor",
+    )
+    drifted = canonical_json_bytes({"code": "INVALID_SSE", "message": "drifted"})
+    (execution_root / "stream-validation-error.json").write_bytes(drifted)
+    result = json.loads(result_path.read_bytes())
+    result["files"]["stream-validation-error.json"] = sha256_bytes(drifted)
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_record_failed_attempt_rejects_replayable_stream_under_extractor_claim(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    execution_root = tmp_path / "evidence"
+    result_path, root = _failed_execution(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        execution_root=execution_root,
+        kind="extractor",
+    )
+    replayable = _semantic_stream(
+        response_id="replayable-stream", response=_valid_response()
+    )
+    (execution_root / "stream-body.sse").write_bytes(replayable)
+    result = json.loads(result_path.read_bytes())
+    result["files"]["stream-body.sse"] = sha256_bytes(replayable)
+    _rewrite_failed_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        record_failed_attempt(
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            execution_result_path=result_path,
+            output_root=tmp_path / "attempt",
+            preparation_root=root,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+def test_validate_attempt_replays_copied_evidence_at_record_strength(
+    tmp_path: Path,
+) -> None:
+    manifest_path, output_root, _ = _recorded_current_attempt(tmp_path)
+    manifest = json.loads(manifest_path.read_bytes())
+    calls_by_id = {call["call_id"]: call for call in manifest["calls"]}
+
+    attempt, _ = _validate_attempt(
+        attempt_path=output_root / "attempt.json",
+        manifest=manifest,
+        artifact_root=manifest_path.parent.parent,
+        calls_by_id=calls_by_id,
+    )
+
+    assert attempt["status"] == "valid"
+    assert attempt["schema_version"] == "local-ranking-atomic-attempt-v2.6"
+
+
+def test_validate_attempt_rejects_tampered_execution_metadata(tmp_path: Path) -> None:
+    manifest_path, output_root, _ = _recorded_current_attempt(tmp_path)
+    evidence_root = output_root / "execution-evidence"
+    (evidence_root / "http-status.txt").write_bytes(b"503\n")
+    receipt_path = output_root / "execution-receipt.json"
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt["files"]["http-status.txt"] = sha256_bytes(b"503\n")
+    receipt_bytes = canonical_json_bytes(receipt)
+    receipt_path.write_bytes(receipt_bytes)
+    (evidence_root / "receipt.json").write_bytes(receipt_bytes)
+    result_path = output_root / "execution-result.json"
+    result = json.loads(result_path.read_bytes())
+    result["files"]["http-status.txt"] = sha256_bytes(b"503\n")
+    result["files"]["receipt.json"] = sha256_bytes(receipt_bytes)
+    result["receipt_sha256"] = sha256_bytes(receipt_bytes)
+    result_bytes = canonical_json_bytes(result)
+    result_path.write_bytes(result_bytes)
+    attempt_path = output_root / "attempt.json"
+    attempt = json.loads(attempt_path.read_bytes())
+    attempt["execution_receipt_sha256"] = sha256_bytes(receipt_bytes)
+    attempt["execution_result_sha256"] = sha256_bytes(result_bytes)
+    attempt_path.write_bytes(canonical_json_bytes(attempt))
+    manifest = json.loads(manifest_path.read_bytes())
+    calls_by_id = {call["call_id"]: call for call in manifest["calls"]}
+
+    with pytest.raises(HarnessError) as raised:
+        _validate_attempt(
+            attempt_path=attempt_path,
+            manifest=manifest,
+            artifact_root=manifest_path.parent.parent,
+            calls_by_id=calls_by_id,
+        )
+
+    assert raised.value.code == "INVALID_EXECUTION_RESULT"
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected_code"),
+    [
+        ("missing-request", "INVALID_INPUT_EVIDENCE"),
+        ("tampered-prompt", "INVALID_INPUT_EVIDENCE"),
+        ("tampered-manifest", "INVALID_INPUT_EVIDENCE"),
+        ("extra-input-file", "INVALID_INPUT_EVIDENCE"),
+    ],
+)
+def test_validate_attempt_rejects_broken_input_evidence(
+    tmp_path: Path, tamper: str, expected_code: str
+) -> None:
+    manifest_path, output_root, _ = _recorded_current_attempt(tmp_path)
+    input_evidence = output_root / "input-evidence"
+    if tamper == "missing-request":
+        (input_evidence / "request.json").unlink()
+    elif tamper == "tampered-prompt":
+        prompt_path = input_evidence / "prompt.txt"
+        prompt_path.write_bytes(prompt_path.read_bytes() + b"drift")
+    elif tamper == "tampered-manifest":
+        manifest_bytes = (input_evidence / "manifest.json").read_bytes()
+        pretty = json.dumps(json.loads(manifest_bytes), indent=2).encode()
+        (input_evidence / "manifest.json").write_bytes(pretty)
+    else:
+        (input_evidence / "extra.json").write_bytes(canonical_json_bytes({}))
+    manifest = json.loads(manifest_path.read_bytes())
+    calls_by_id = {call["call_id"]: call for call in manifest["calls"]}
+
+    with pytest.raises(HarnessError) as raised:
+        _validate_attempt(
+            attempt_path=output_root / "attempt.json",
+            manifest=manifest,
+            artifact_root=manifest_path.parent.parent,
+            calls_by_id=calls_by_id,
+        )
+
+    assert raised.value.code == expected_code
+
+
+def test_orientation_runner_recovers_completed_execution_without_resending(
+    tmp_path: Path,
+) -> None:
+    atomic_root = tmp_path / "atomic"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=atomic_root,
+    )
+    manifest_path = atomic_root / "private" / "manifest.json"
+    preparation_root = tmp_path / "transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=manifest_path,
+        output_root=preparation_root,
+        max_concurrency=4,
+    )
+    lock = threading.Lock()
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        with lock:
+            request_count += 1
+            response_id = f"recovery-response-{request_count:03d}"
+        winner = "left" if "query 0?" not in prompt else "right"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_semantic_stream(
+                response_id=response_id, response=_valid_response(winner=winner)
+            ),
+        )
+
+    run_root = tmp_path / "run"
+    result = run_orientation(
+        atomic_manifest_path=manifest_path,
+        preparation_root=preparation_root,
+        output_root=run_root,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+    assert result["run_result"]["status"] == "pass"
+    assert request_count == 24
+
+    shutil.rmtree(run_root / "attempts" / "call-001" / "attempt-1")
+    replay = run_orientation(
+        atomic_manifest_path=manifest_path,
+        preparation_root=preparation_root,
+        output_root=run_root,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert replay == result
+    assert request_count == 24
+
+
+def test_orientation_runner_fails_closed_on_tampered_input_evidence(
+    tmp_path: Path,
+) -> None:
+    atomic_root = tmp_path / "atomic"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=atomic_root,
+    )
+    manifest_path = atomic_root / "private" / "manifest.json"
+    preparation_root = tmp_path / "transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=manifest_path,
+        output_root=preparation_root,
+        max_concurrency=4,
+    )
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        request_count += 1
+        winner = "left" if "query 0?" not in prompt else "right"
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_semantic_stream(
+                response_id=f"tamper-response-{request_count:03d}",
+                response=_valid_response(winner=winner),
+            ),
+        )
+
+    run_root = tmp_path / "run"
+    run_orientation(
+        atomic_manifest_path=manifest_path,
+        preparation_root=preparation_root,
+        output_root=run_root,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+    assert request_count == 24
+    prompt_path = (
+        run_root
+        / "attempts"
+        / "call-001"
+        / "attempt-1"
+        / "input-evidence"
+        / "prompt.txt"
+    )
+    prompt_path.parent.mkdir(parents=True, exist_ok=True)
+    original = prompt_path.read_bytes() if prompt_path.is_file() else b""
+    prompt_path.write_bytes(original + b"drift")
+
+    with pytest.raises(HarnessError) as raised:
+        run_orientation(
+            atomic_manifest_path=manifest_path,
+            preparation_root=preparation_root,
+            output_root=run_root,
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert raised.value.code == "INVALID_INPUT_EVIDENCE"
+    assert request_count == 24
