@@ -288,3 +288,12 @@ Kimi red run 中由旧函数签名 `TypeError` 遮蔽的 failure-subset 实证�
 writer allowlist 由 shared success/failure constants 推导。修复后双解释器各 255 tests passed，真实 replay 与三个 frozen
 hashes 仍不变。v2.3.2 至此通过 Standards 与 Spec 两轴验收，可进入 formal 003 的 prepare-only 冻结阶段；live calls 仍未
 授权。
+
+Robert 已批准开始下一阶段。Codex 从第一性原理冻结
+`local-ranking-atomic-formal-003-preparation-contract-v1.0.md`：执行代码基线为 `8ea6443`，两份 source bundle、tool canary、
+concurrency smoke、Pro/max current-family instrument 与 fresh root 均 exact 固定。Prepare-only 生成六路 atomic/transport
+inputs、read-only usage snapshot、profile 与无 secret Windows execution bundle；Mac 负责 controller/SSH，Windows 负责
+formal evidence execution 与离线 bundle verification。Profile 的完整结构上限仍是 144 logical / 576 physical，但下一次
+live 授权只考虑 r1/o1 → r1/o2：最多 48 logical / 192 physical，r1 incomplete/semantic FAIL 都停止，r1 PASS 也不自动进入
+r2/r3。未新增 first-valid、latency、token、cost、tie-rate 或 winner-direction 门槛。本阶段交 Kimi 执行 prepare/Windows
+离线验证并在回报 hashes 后停止；chat/completions、formal votes 与任何 live runner 仍未授权。

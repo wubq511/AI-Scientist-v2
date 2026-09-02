@@ -489,7 +489,8 @@ code for the authorized v2.3 canary run (no caller-side override exists) and rec
 `spent_transport_only` evidence, a passing synthetic
 probe, a first-valid stop on canary attempt 1, the approved model alias, and the canary
 implementation commit — and unless all six orientations use current-family manifests (atomic
-v2.5 plus transport v3.1, both declaring `response_submission`) that bind one Pro/high evaluator,
+v2.5 plus transport v3.1, both declaring `response_submission`) that bind one requested Pro/high
+or Pro/max evaluator,
 one frozen source per orientation, concurrency 4, the 16,384-token ceiling, and the exact bounded
 retry policy. Its budget is 144 logical and at most 576 physical calls; early stop can reduce use
 but cannot authorize additional calls.
