@@ -35,9 +35,9 @@ The ideation-only runtime must retain a portable CPU FP32 reference path. Option
 
 ## Local-Ranking Execution Topology
 
-Use Windows as the bulk evidence executor for local-ranking candidate matrices, calibration, repeated replay, and formal holdout evaluation. Copy immutable code/input/model bundles once, verify hashes, run from the Windows-local workspace, and return only evidence artifacts. Do not move these workloads to Mac merely because Windows is temporarily unavailable.
+Use Windows as the bulk evidence executor for local-ranking candidate matrices, local-scorer calibration, repeated replay, and formal local-scorer holdout evaluation. Copy immutable code/input/model bundles once, verify hashes, run from the Windows-local workspace, and return only evidence artifacts. Do not move these local-compute workloads to Mac merely because Windows is temporarily unavailable.
 
-Use Mac as the controller for editing, protocol and input preparation, SSH orchestration, evidence review, ordinary single-run ranking, and the Windows-unavailable fallback. The frozen scorer must remain runnable on Mac and produce the same canonical payload as Windows; raw float equality and performance parity are not required. Run Mac cross-platform checks only when the scorer, model, dependency lock, or output semantics change—not for every bulk evidence run.
+Use Mac as the controller for editing, protocol and input preparation, SSH orchestration, evidence review, ordinary single-run ranking, and authenticated calls to remote-provider judges/evaluators. Remote inference does not use Windows compute: keep API credentials on Mac, then send only immutable credential-free outputs to Windows for offline replay or verification. Follow the `windows-executor` skill for Windows connection, transfer, unpacking, offline verification, and cleanup. The frozen scorer must remain runnable on Mac and produce the same canonical payload as Windows; raw float equality and performance parity are not required. Run Mac cross-platform checks only when the scorer, model, dependency lock, or output semantics change—not for every bulk evidence run.
 
 ## Reproducibility, Commits & Pull Requests
 
