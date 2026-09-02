@@ -14,6 +14,12 @@ Never lock a material technical approach from intuition alone. Define hypotheses
 
 For every result, record why it is trustworthy. Before resuming, read relevant work logs. After a material change, decision, failure, or validation, use `record-session-progress`; use `daily-work-summary` at day end.
 
+## Agent Collaboration Topology
+
+Use Codex as the coordinator for this project: Codex investigates and reviews evidence, makes and records technical decisions, freezes contracts and approval boundaries, and accepts or rejects delegated results. Delegate bounded implementation and model-execution work to Kimi Code through the `handoff` skill. Each handoff must live in the OS temporary directory, name one clean base commit and exact completion criteria, reference repository contracts instead of copying them, and contain no secrets.
+
+Kimi executes only the handed-off scope and stops at its stated gate; it does not redesign the method, widen model-call budgets, select fallbacks, or start the next scientific phase. Codex independently reviews the returned commit and raw evidence before issuing the next handoff. Continue the same Kimi session when it remains usable; create a new execution session only when the existing one is unavailable or its state cannot be trusted. This division never expands an approval already recorded in a contract.
+
 ## Development & Validation Commands
 
 This repository has no build step or automated test suite.

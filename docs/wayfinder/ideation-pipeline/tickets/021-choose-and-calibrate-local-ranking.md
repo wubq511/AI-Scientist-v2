@@ -180,3 +180,21 @@ execution v2.1）；legacy v2.2-era preparation/attempt/receipt/execution eviden
 `atomic_runner.py` 与 profile/aggregator 代码不变，retry/resume/early-stop 语义不退化。实现 commit、完整验证与
 prepare-only hash 冻结完成后，按 v2.3 第 6 节直接执行 synthetic → spent `call-021` 最多 5-call canary，全部输出
 `spent_transport_only`；无论 PASS/FAIL 都在 fresh calibration 前停止并交回 Codex 复核。
+
+Kimi implementation commit 为 `fa2409f`。Canary 实际只发 2 calls：synthetic `smoke-001` valid，spent
+`call-021` attempt 1 也 valid，随后 first-valid stop；usage 从 `0/32/40%` 到 `0/33/40%`，summary SHA-256 为
+`900b49b59c72f3da4282e2cf7d58affb7df0678421a9f042cf868db4a6b26749`。Codex 已从 raw SSE 独立重提取
+arguments、重跑 `record_attempt` 并逐文件核验 receipt hashes，因此接受 tool canary PASS，不复用其 judgment，
+也不因后续 metadata/validator 修复而重复调用。
+
+Formal-readiness 独立复核同时发现：new manifests 漏写 `response_submission`；真实 v2.2 prompt replay 因统一使用
+新 prompt 而失败；new manifest 可接受 legacy receipt/result；`validate-smoke-call` 在只有 response 时也会 PASS；
+lone surrogate 会抛出无 execution-result 的 `UnicodeEncodeError`；runner/profile 仍写旧 versions。另有一次已披露
+流程偏差：合同要求 Ruff 全绿，但 canary 前仍有 11 个 pre-existing findings。Canary raw evidence不受这些问题影响，
+但 `fa2409f` 不具备 formal readiness。
+
+下一步按 `local-ranking-atomic-tool-output-formal-readiness-review-v2.3.md` 做无 live-call repair：current atomic /
+transport manifests 升 v2.5/v3.1 并显式写 `forced_submit_judgment_tool`，补真实 legacy/canary read-only validation、
+版本配对、完整 smoke evidence validation、typed Unicode failure、runner/round/profile v2.2 与 exact canary-summary
+binding。修复不得改变已通过 canary 的 tool schema/prompt/request bytes；修复后由 Codex 复核并单独申请 fresh 003
+调用授权。Ticket 继续 open。
