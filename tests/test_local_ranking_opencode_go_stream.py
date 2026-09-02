@@ -605,3 +605,24 @@ def test_extract_tool_stream_rejects_non_string_reasoning() -> None:
         _extract_tool(raw_stream)
 
     assert raised.value.code == "INVALID_PROVIDER_RESPONSE"
+
+
+def test_extract_tool_stream_rejects_escaped_lone_surrogate_arguments() -> None:
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(_tool_stream(arguments='{"value":"\ud800"}'))
+
+    assert raised.value.code == "INVALID_TOOL_CALL"
+
+
+def test_extract_tool_stream_rejects_escaped_lone_surrogate_content() -> None:
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(_tool_stream(content="noise\ud800"))
+
+    assert raised.value.code == "INVALID_PROVIDER_RESPONSE"
+
+
+def test_extract_tool_stream_rejects_escaped_lone_surrogate_reasoning() -> None:
+    with pytest.raises(HarnessError) as raised:
+        _extract_tool(_tool_stream(reasoning="private\ud800"))
+
+    assert raised.value.code == "INVALID_PROVIDER_RESPONSE"

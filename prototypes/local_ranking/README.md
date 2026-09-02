@@ -295,10 +295,12 @@ python -m prototypes.local_ranking.atomic_judge prepare \
 The public prompts contain only query text, visible evidence, and `L1-L3`/`R1-R3` handles. Item,
 paper, segment, bundle, and evaluator identities stay controller-owned. Prompts state that no
 external or retrieval tools are available and require exactly one `submit_judgment` tool call.
-After each physical call, prepare immutable OpenCode Go requests. The adapter freezes
-`deepseek-v4-pro`, one forced `submit_judgment` function tool with a closed six-field schema (no
-`response_format`), `max_tokens=16384`, concurrency 1-4, request hashes, and the bounded retry
-policy:
+The v2.5 atomic manifest declares `response_submission: forced_submit_judgment_tool`, making the
+forced-tool contract explicit and machine-checkable. After each physical call, prepare immutable
+OpenCode Go requests. The v3.1 transport adapter freezes `deepseek-v4-pro`, one forced
+`submit_judgment` function tool with a closed six-field schema (no `response_format`),
+`max_tokens=16384`, concurrency 1-4, request hashes, the same `response_submission` declaration,
+and the bounded retry policy:
 
 ```bash
 python -m prototypes.local_ranking.atomic_opencode_go prepare-atomic \
@@ -317,7 +319,10 @@ Execution streams the SSE body, joins fragmented `tool_calls[0]` ID/name/argumen
 accepts only one index-0 `submit_judgment` call whose arguments parse without repair; ordinary
 `content` and `reasoning_content` are preserved as raw evidence only and never supply judgment
 fields. `finish_reason` must be `tool_calls` or `stop`; multiple/wrong/missing calls, malformed
-arguments, refusal, or terminal continuation fail closed. The canonical `response.json` is built
+arguments, refusal, or terminal continuation fail closed. Stream text that cannot be encoded as
+UTF-8 (for example a lone surrogate) fails closed as a typed `INVALID_PROVIDER_RESPONSE` or
+`INVALID_TOOL_CALL` error with the raw SSE body preserved, never as an encoding crash. The
+canonical `response.json` is built
 only from the validated-parse tool arguments, and the v3.0 receipt binds the request, tool schema,
 tool-call identity, raw/derived evidence hashes, usage, and cost.
 
@@ -338,6 +343,16 @@ python -m prototypes.local_ranking.atomic_judge record-attempt \
 Only machine-detectable invalid output may receive attempts 2-4, using exact identical request bytes.
 The resolver accepts the first valid response, rejects any retry after a valid response, expands
 handles through the private manifest, and fails after four invalid attempts.
+
+Schema versions are separated into two transport families. The legacy JSON-response family —
+atomic preparations v2.2/v2.3, transport preparation v2.1, receipt v2.0, execution result v2.0,
+attempts v2.3/v2.4 — stays replayable for read-only diagnostic validation. The forced-tool family
+covers the current v2.5/v3.1 preparations and the spent v2.3 canary (atomic preparation v2.4,
+transport preparation v3.0, identical request bytes without the `response_submission`
+declaration); it uses receipt v3.0, execution result v2.1, and attempt v2.5. `execute-call` and
+`run-smoke` issue only current v2.5/v3.1 preparations, and `record-attempt` requires the response,
+receipt, execution result, and attempt to match the manifest's family; cross-family evidence fails
+closed.
 
 For a formal orientation, use the bounded runner instead of issuing calls manually. It executes
 at most four calls concurrently, records HTTP/SSE/non-JSON failures as spent physical attempts,
@@ -396,8 +411,16 @@ python -m prototypes.local_ranking.atomic_opencode_go validate-smoke-call \
   --execution-root <single-smoke-execution>
 ```
 
-The probe is valid only when the executed call's canonical `response.json` equals the exact
-prescribed `submit_judgment` arguments for that smoke call. The bounded v2.3 canary then retries
+`validate-smoke-call` verifies the full evidence chain before judging the probe: the smoke
+preparation (v3.0 or v3.1) must rebuild to the recorded request bytes; the preserved
+`response.json`, the v3.0 receipt, and the execution result must all be present (a response
+without its receipt or result fails as `INCOMPLETE_SMOKE_EVIDENCE`); and the closed-schema receipt
+must bind the preparation manifest, request hash, call binding, tool name plus tool-schema hash,
+provider identity, finish reason, usage, cost, and stream diagnostics, with every listed evidence
+file hash-checked against the bytes on disk. The closed-schema execution result must in turn bind
+the receipt and the response. The probe is valid only when, on top of that chain, the executed
+call's canonical `response.json` equals the exact prescribed `submit_judgment` arguments for that
+smoke call. The bounded v2.3 canary then retries
 the spent `pro-max-calibration-002/r1/o1/call-021` with identical request bytes (at most four
 sequential attempts, first-valid stop) through `execute-call` plus `record-attempt`; every canary
 output is `spent_transport_only` and never becomes a semantic vote. See
@@ -417,16 +440,21 @@ python -m prototypes.local_ranking.atomic_profile prepare \
   --reasoning-effort <high-or-max> \
   --usage-snapshot <usage-snapshot.json> \
   --smoke-result-sha256 <transport-smoke-result-sha256> \
+  --canary-summary <transport-canary-summary.json> \
   --replicate r1 <r1-o1-atomic> <r1-o1-prep> <r1-o2-atomic> <r1-o2-prep> \
   --replicate r2 <r2-o1-atomic> <r2-o1-prep> <r2-o2-atomic> <r2-o2-prep> \
   --replicate r3 <r3-o1-atomic> <r3-o1-prep> <r3-o2-atomic> <r3-o2-prep> \
   --output <new-profile-manifest.json>
 ```
 
-The profile manifest fails closed unless all six inputs bind one Pro/high evaluator, one frozen
-source per orientation, concurrency 4, the 16,384-token ceiling, and the exact bounded retry
-policy. Its budget is 144 logical and at most 576 physical calls; early stop can reduce use but
-cannot authorize additional calls.
+The v2.2 profile manifest fails closed unless the canary summary matches the frozen SHA-256 of
+the authorized v2.3 canary run and records `spent_transport_only` evidence, a passing synthetic
+probe, a first-valid stop on canary attempt 1, the approved model alias, and the canary
+implementation commit — and unless all six orientations use current-family manifests (atomic
+v2.5 plus transport v3.1, both declaring `response_submission`) that bind one Pro/high evaluator,
+one frozen source per orientation, concurrency 4, the 16,384-token ceiling, and the exact bounded
+retry policy. Its budget is 144 logical and at most 576 physical calls; early stop can reduce use
+but cannot authorize additional calls.
 
 After all four orientations pass, reduce them with:
 

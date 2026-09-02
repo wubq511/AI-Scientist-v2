@@ -15,6 +15,7 @@ from prototypes.local_ranking.atomic_judge import (
 )
 from prototypes.local_ranking.atomic_opencode_go import (
     ATOMIC_MAX_TOKENS,
+    _legacy_request,
     _smoke_probe_arguments,
     _validate_preparation,
     execute_call,
@@ -103,6 +104,10 @@ def test_smoke_preparation_freezes_profile_token_ceiling_and_concurrency(
     assert manifest["max_concurrency"] == 4
     assert manifest["max_tokens"] == ATOMIC_MAX_TOKENS == 16_384
     assert manifest["evaluator"]["model_alias"] == "opencode-go/deepseek-v4-pro"
+    assert manifest["schema_version"] == (
+        "local-ranking-atomic-opencode-go-preparation-v3.1"
+    )
+    assert manifest["response_submission"] == "forced_submit_judgment_tool"
     for call in manifest["calls"]:
         request = json.loads((tmp_path / "input" / call["request_path"]).read_bytes())
         assert request == {
@@ -375,3 +380,159 @@ def test_repeated_prepare_is_byte_identical(tmp_path: Path) -> None:
             assert (tmp_path / "first" / call[key]).read_bytes() == (
                 tmp_path / "second" / call[key]
             ).read_bytes()
+
+
+def _relabeled_smoke_preparation(root: Path, schema_version: str) -> None:
+    manifest_path = root / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    if schema_version == "local-ranking-atomic-opencode-go-preparation-v2.1":
+        for call in manifest["calls"]:
+            prompt = (root / call["prompt_path"]).read_text()
+            request_bytes = canonical_json_bytes(
+                _legacy_request(
+                    prompt=prompt,
+                    reasoning_effort=manifest["evaluator"]["reasoning_effort"],
+                )
+            )
+            (root / call["request_path"]).write_bytes(request_bytes)
+            call["request_sha256"] = sha256_bytes(request_bytes)
+    elif schema_version != "local-ranking-atomic-opencode-go-preparation-v3.0":
+        raise AssertionError(f"unsupported test relabel target {schema_version}")
+    del manifest["response_submission"]
+    manifest["schema_version"] = schema_version
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+
+
+@pytest.mark.parametrize(
+    "schema_version",
+    [
+        "local-ranking-atomic-opencode-go-preparation-v2.1",
+        "local-ranking-atomic-opencode-go-preparation-v3.0",
+    ],
+)
+def test_legacy_and_canary_preparations_validate_but_cannot_execute(
+    tmp_path: Path, schema_version: str
+) -> None:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+    _relabeled_smoke_preparation(preparation_root, schema_version)
+
+    manifest, _, calls = _validate_preparation(preparation_root)
+
+    assert manifest["schema_version"] == schema_version
+    assert set(calls) == {1, 2, 3, 4}
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("diagnostic-only preparation must never be sent")
+
+    with pytest.raises(HarnessError) as raised:
+        execute_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            output_root=tmp_path / "output",
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert raised.value.code == "INVALID_PREPARATION"
+    assert not (tmp_path / "output").exists()
+
+
+def test_validate_smoke_call_rejects_response_only_evidence(tmp_path: Path) -> None:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+    execution_root = tmp_path / "output"
+    execution_root.mkdir()
+    (execution_root / "response.json").write_bytes(
+        canonical_json_bytes(_smoke_probe_arguments("smoke-001"))
+    )
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=execution_root,
+        )
+
+    assert raised.value.code == "INCOMPLETE_SMOKE_EVIDENCE"
+
+
+def test_validate_smoke_call_rejects_forged_receipt(tmp_path: Path) -> None:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_stream(
+                response_id="response-001",
+                arguments=_smoke_probe_arguments("smoke-001"),
+            ),
+        )
+
+    output_root = tmp_path / "output"
+    execute_call(
+        preparation_root=preparation_root,
+        call_sequence=1,
+        output_root=output_root,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+    receipt_path = output_root / "receipt.json"
+    receipt = json.loads(receipt_path.read_bytes())
+    receipt["identity"]["provider_response_id"] = "chatcmpl-forged"
+    receipt_path.write_bytes(canonical_json_bytes(receipt))
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=output_root,
+        )
+
+    assert raised.value.code == "HASH_MISMATCH"
+
+
+def test_execute_call_writes_failed_result_for_escaped_lone_surrogate(
+    tmp_path: Path,
+) -> None:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+    arguments = _smoke_probe_arguments("smoke-001")
+    arguments["rationale"] = "transport probe \ud800 truncated"
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_stream(response_id="response-001", arguments=arguments),
+        )
+
+    output_root = tmp_path / "output"
+    with pytest.raises(HarnessError) as raised:
+        execute_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            output_root=output_root,
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert raised.value.code == "INVALID_TOOL_CALL"
+    result = json.loads((output_root / "execution-result.json").read_bytes())
+    assert result["status"] == "fail"
+    assert result["error"]["code"] == "INVALID_TOOL_CALL"
+    assert result["receipt_sha256"] is None
+    assert not (output_root / "response.json").exists()
+    assert not (output_root / "receipt.json").exists()
+    assert (output_root / "stream-body.sse").is_file()
+    stream_error = json.loads(
+        (output_root / "stream-validation-error.json").read_bytes()
+    )
+    assert stream_error["code"] == "INVALID_TOOL_CALL"
+    assert {
+        "http-status.txt",
+        "stream-body.sse",
+        "stream-validation-error.json",
+    } <= set(result["files"])

@@ -23,16 +23,19 @@ from .operational_judge import (
 )
 
 ATOMIC_PACKET_SCHEMA_VERSION = "local-ranking-atomic-judge-packet-v2.0"
-ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.4"
+ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.5"
+CANARY_ATOMIC_PREPARATION_SCHEMA_VERSIONS = {"local-ranking-atomic-preparation-v2.4"}
 LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS = {
     "local-ranking-atomic-preparation-v2.2",
     "local-ranking-atomic-preparation-v2.3",
 }
+ATOMIC_RESPONSE_SUBMISSION = "forced_submit_judgment_tool"
 ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.5"
 LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS = {
     "local-ranking-atomic-attempt-v2.3",
     "local-ranking-atomic-attempt-v2.4",
 }
+LEGACY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.4"
 ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.5"
 ATOMIC_ORIENTATION_RESULT_SCHEMA_VERSION = (
     "local-ranking-atomic-orientation-result-v2.3"
@@ -305,6 +308,37 @@ def _prompt_text(packet: dict[str, Any]) -> str:
     )
 
 
+def _legacy_prompt_text(packet: dict[str, Any]) -> str:
+    packet_json = canonical_json_bytes(packet).decode("utf-8")
+    return (
+        "You are a blind setwise evidence evaluator. No tools are available. "
+        "Use only the embedded single-item packet; do not use external facts or prior conversations.\n\n"
+        "Compare the complete left and right top-3 evidence sets for the query. Judge direct "
+        "support, usefulness for AI ideation, coverage/diversity, specificity, and catastrophic "
+        "omissions. Do not reward length, fluency, or familiarity by themselves.\n\n"
+        "Return exactly one JSON object and no Markdown. Root keys must be exactly "
+        "catastrophic_omission_side, evidence_handles, left_scores, rationale, right_scores, "
+        "winner. Each score object must contain coverage_diversity, direct_support, "
+        "query_usefulness, specificity with integer 0, 1, or 2. winner must be left, right, "
+        "tie, or both_bad. catastrophic_omission_side must be left, right, or neither. "
+        "evidence_handles must contain 1-4 unique visible handles. A left/right winner needs "
+        "at least one handle from the winning side; tie/both_bad needs at least one from each "
+        "side. rationale must be a non-empty string and use only visible evidence. "
+        "Do not name or infer retrieval methods, ground-truth labels, or prior results.\n\n"
+        f"EMBEDDED_ATOMIC_PACKET_JSON\n{packet_json}"
+    )
+
+
+def _uses_tool_transport(preparation_schema_version: Any) -> bool:
+    if preparation_schema_version in LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS:
+        return False
+    if preparation_schema_version in (
+        {ATOMIC_PREPARATION_SCHEMA_VERSION} | CANARY_ATOMIC_PREPARATION_SCHEMA_VERSIONS
+    ):
+        return True
+    fail("INVALID_ATOMIC_MANIFEST", "Atomic preparation schema is unsupported")
+
+
 def _effective_evaluator(
     source_evaluator: Any, *, reasoning_effort: str | None
 ) -> dict[str, str]:
@@ -384,6 +418,7 @@ def prepare_atomic(
         "evaluator": evaluator,
         "orientation": bundle["orientation"],
         "replicate_id": replicate_id,
+        "response_submission": ATOMIC_RESPONSE_SUBMISSION,
         "schema_version": ATOMIC_PREPARATION_SCHEMA_VERSION,
         "source_evaluator": bundle["evaluator"],
         "source_bundle_file_sha256": sha256_bytes(bundle_bytes),
@@ -400,30 +435,39 @@ def _load_manifest(
     manifest_path: Path,
 ) -> tuple[dict[str, Any], Path, dict[int, dict[str, Any]]]:
     manifest, _ = _read_canonical_object(manifest_path, label="atomic manifest")
+    schema_version = manifest.get("schema_version")
+    expected_keys = {
+        "call_count",
+        "calls",
+        "evaluator",
+        "orientation",
+        "replicate_id",
+        "schema_version",
+        "source_bundle_file_sha256",
+        "source_bundle_self_sha256",
+        "source_evaluator",
+        "status",
+    }
+    if schema_version == ATOMIC_PREPARATION_SCHEMA_VERSION:
+        expected_keys = {*expected_keys, "response_submission"}
+    elif schema_version not in (
+        LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS
+        | CANARY_ATOMIC_PREPARATION_SCHEMA_VERSIONS
+    ):
+        fail("INVALID_ATOMIC_MANIFEST", "Atomic manifest schema is unsupported")
     _expect_keys(
         manifest,
-        {
-            "call_count",
-            "calls",
-            "evaluator",
-            "orientation",
-            "replicate_id",
-            "schema_version",
-            "source_bundle_file_sha256",
-            "source_bundle_self_sha256",
-            "source_evaluator",
-            "status",
-        },
+        expected_keys,
         label="atomic manifest",
     )
+    if (
+        schema_version == ATOMIC_PREPARATION_SCHEMA_VERSION
+        and manifest.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
+    ):
+        fail("INVALID_ATOMIC_MANIFEST", "Atomic response submission is invalid")
     calls = manifest.get("calls")
     if (
-        manifest.get("schema_version")
-        not in {
-            ATOMIC_PREPARATION_SCHEMA_VERSION,
-            *LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS,
-        }
-        or manifest.get("status") != "ready_for_atomic_execution"
+        manifest.get("status") != "ready_for_atomic_execution"
         or manifest.get("call_count") != EXPECTED_ITEM_COUNT
         or not isinstance(calls, list)
         or len(calls) != EXPECTED_ITEM_COUNT
@@ -518,7 +562,7 @@ def _load_manifest(
 
 
 def _load_call_packet(
-    *, artifact_root: Path, call: dict[str, Any]
+    *, artifact_root: Path, call: dict[str, Any], preparation_schema_version: str
 ) -> tuple[dict[str, Any], bytes]:
     packet_path = resolve_repo_relative(
         artifact_root, call["packet_path"], label="atomic packet path"
@@ -531,13 +575,18 @@ def _load_call_packet(
         prompt_bytes = prompt_path.read_bytes()
     except OSError as exc:
         fail("MISSING_ARTIFACT", "Atomic prompt is unreadable", error=str(exc))
+    prompt_text = (
+        _prompt_text
+        if _uses_tool_transport(preparation_schema_version)
+        else _legacy_prompt_text
+    )
     if (
         packet.get("schema_version") != ATOMIC_PACKET_SCHEMA_VERSION
         or len(packet_bytes) != call.get("packet_bytes")
         or sha256_bytes(packet_bytes) != call.get("packet_sha256")
         or len(prompt_bytes) != call.get("prompt_bytes")
         or sha256_bytes(prompt_bytes) != call.get("prompt_sha256")
-        or prompt_bytes != _prompt_text(packet).encode("utf-8")
+        or prompt_bytes != prompt_text(packet).encode("utf-8")
     ):
         fail("HASH_MISMATCH", "Atomic packet or prompt differs from manifest")
     return packet, packet_bytes
@@ -638,6 +687,17 @@ def _validate_execution_receipt(
     )
     evaluator = manifest["evaluator"]
     schema_version = receipt.get("schema_version")
+    if _uses_tool_transport(manifest.get("schema_version")):
+        if schema_version != ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION:
+            fail(
+                "INVALID_EXECUTION_RECEIPT",
+                "Tool-transport atomic evidence requires the forced-tool receipt",
+            )
+    elif schema_version not in LEGACY_ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSIONS:
+        fail(
+            "INVALID_EXECUTION_RECEIPT",
+            "Legacy atomic evidence requires the free-content receipt",
+        )
     if schema_version == ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION:
         expected_receipt_keys = {
             "call_binding",
@@ -841,12 +901,13 @@ def _validate_execution_result(
     files = result.get("files")
     request_sha256 = result.get("request_sha256")
     preparation_sha256 = result.get("preparation_manifest_sha256")
+    allowed_result_versions = (
+        {ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION}
+        if _uses_tool_transport(manifest.get("schema_version"))
+        else LEGACY_ATOMIC_EXECUTION_RESULT_SCHEMA_VERSIONS
+    )
     if (
-        result.get("schema_version")
-        not in {
-            ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
-            *LEGACY_ATOMIC_EXECUTION_RESULT_SCHEMA_VERSIONS,
-        }
+        result.get("schema_version") not in allowed_result_versions
         or result.get("status") != expected_status
         or result.get("call_binding") != expected_binding
         or not isinstance(files, dict)
@@ -949,7 +1010,11 @@ def record_attempt(
     call = calls.get(call_sequence)
     if call is None:
         fail("UNKNOWN_LOGICAL_CALL", "Logical call sequence is not in the manifest")
-    _load_call_packet(artifact_root=artifact_root, call=call)
+    _load_call_packet(
+        artifact_root=artifact_root,
+        call=call,
+        preparation_schema_version=manifest["schema_version"],
+    )
     try:
         response_bytes = response_path.read_bytes()
     except OSError as exc:
@@ -996,7 +1061,11 @@ def record_attempt(
         "raw_response_sha256": sha256_bytes(response_bytes),
         "replicate_id": manifest["replicate_id"],
         "request_sha256": receipt["request_sha256"],
-        "schema_version": ATOMIC_ATTEMPT_SCHEMA_VERSION,
+        "schema_version": (
+            ATOMIC_ATTEMPT_SCHEMA_VERSION
+            if _uses_tool_transport(manifest["schema_version"])
+            else LEGACY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+        ),
         "status": "valid" if judgment is not None else "invalid",
         "validation": validation,
     }
@@ -1034,7 +1103,11 @@ def record_failed_attempt(
     call = calls.get(call_sequence)
     if call is None:
         fail("UNKNOWN_LOGICAL_CALL", "Logical call sequence is not in the manifest")
-    _load_call_packet(artifact_root=artifact_root, call=call)
+    _load_call_packet(
+        artifact_root=artifact_root,
+        call=call,
+        preparation_schema_version=manifest["schema_version"],
+    )
     execution_result, execution_result_bytes = _validate_execution_result(
         result_path=execution_result_path,
         manifest=manifest,
@@ -1060,7 +1133,11 @@ def record_failed_attempt(
         "raw_response_sha256": None,
         "replicate_id": manifest["replicate_id"],
         "request_sha256": execution_result["request_sha256"],
-        "schema_version": ATOMIC_ATTEMPT_SCHEMA_VERSION,
+        "schema_version": (
+            ATOMIC_ATTEMPT_SCHEMA_VERSION
+            if _uses_tool_transport(manifest["schema_version"])
+            else LEGACY_ATOMIC_ATTEMPT_WRITE_SCHEMA_VERSION
+        ),
         "status": "invalid",
         "validation": validation,
     }
@@ -1111,12 +1188,13 @@ def _validate_attempt(
     )
     call = calls_by_id.get(attempt.get("call_id"))
     attempt_number = attempt.get("attempt_number")
+    allowed_attempt_versions = (
+        {ATOMIC_ATTEMPT_SCHEMA_VERSION}
+        if _uses_tool_transport(manifest.get("schema_version"))
+        else LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS
+    )
     if (
-        attempt.get("schema_version")
-        not in {
-            ATOMIC_ATTEMPT_SCHEMA_VERSION,
-            *LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS,
-        }
+        attempt.get("schema_version") not in allowed_attempt_versions
         or call is None
         or isinstance(attempt_number, bool)
         or not isinstance(attempt_number, int)
@@ -1130,7 +1208,11 @@ def _validate_attempt(
         or attempt.get("prompt_sha256") != call["prompt_sha256"]
     ):
         fail("ATTEMPT_IDENTITY_MISMATCH", "Atomic attempt identity is invalid")
-    _load_call_packet(artifact_root=artifact_root, call=call)
+    _load_call_packet(
+        artifact_root=artifact_root,
+        call=call,
+        preparation_schema_version=manifest["schema_version"],
+    )
     execution_status = attempt.get("execution_status")
     if execution_status not in {"pass", "fail"}:
         fail("ATTEMPT_IDENTITY_MISMATCH", "Atomic execution status is invalid")

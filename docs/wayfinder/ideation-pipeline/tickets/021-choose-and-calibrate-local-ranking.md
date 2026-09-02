@@ -198,3 +198,23 @@ transport manifests 升 v2.5/v3.1 并显式写 `forced_submit_judgment_tool`，�
 版本配对、完整 smoke evidence validation、typed Unicode failure、runner/round/profile v2.2 与 exact canary-summary
 binding。修复不得改变已通过 canary 的 tool schema/prompt/request bytes；修复后由 Codex 复核并单独申请 fresh 003
 调用授权。Ticket 继续 open。
+
+Formal-readiness repair 已由 Kimi Code/Kimi K3 完成（commit `fix: harden atomic tool formal readiness`），全程无 live
+call、未动 frozen artifacts、未碰 credential。Current atomic/transport preparation 升 v2.5/v3.1 并显式声明
+`response_submission: forced_submit_judgment_tool`；legacy JSON-response 族（atomic v2.2/v2.3、transport v2.1、
+receipt v2.0/execution v2.0、attempt v2.3/v2.4）与 v2.3 canary 族（atomic v2.4、transport v3.0）保留只读
+diagnostic validation，`execute-call`/`run-smoke` 只发 current preparations；`record-attempt` 强制
+response/receipt/result/attempt 与 manifest 同族，跨族 fail closed。`validate-smoke-call` 重写为完整 evidence
+链验证（response-only 以 `INCOMPLETE_SMOKE_EVIDENCE` 拒绝；receipt/result closed-schema、逐文件 hash 对盘校验、
+精确 probe arguments 比对）。tool-mode SSE extractor 对 lone surrogate 等不可 UTF-8 编码片段 fail closed 为 typed
+`INVALID_PROVIDER_RESPONSE`/`INVALID_TOOL_CALL` 并保留 raw SSE 与完整 failed execution-result。runner 升 v2.2；
+profile manifest 升 v2.2，`prepare` 新增 `--canary-summary`，强制绑定 frozen canary summary SHA-256
+（`900b49b59c72f3da4282e2cf7d58affb7df0678421a9f042cf868db4a6b26749`）与 canary implementation commit `fa2409f`，
+六个 orientations 必须是 current-family manifests。已通过 canary 的 tool schema/prompt/request bytes 未变（proof 5
+三个 hash 原样保留）。验证：Python 3.13.7 locked venv 与 ambient 3.14.6 各 187 tests passed；targeted Ruff（9 个改动
+文件）zero-error，full Ruff 恰剩 7 个 pre-existing baseline（canary 前披露的 11 个中本任务修掉 4 个
+`opencode_go_stream` findings）；Black/compileall/diff-check 绿。真实 v2.2 replay：pro-max-calibration-002 r1/o1 的 25
+个真实 attempt 全部通过重验，resolve 正确停在 RETRY_REQUIRED/call-021 语义边界；canary replay：真实 `call-021`
+attempt-1 重放 attempt SHA-256 `5d620f2807f584071d444dc842811f2ea266f43e1811c44d926814e73ff75252` 精确一致，真实
+smoke-001 通过增强 validator；proof 6 用真实 canary-summary 与默认冻结 hash 通过 prepare-profile。Ticket 继续 open；
+fresh `pro-max-calibration-003-tool-output` 仍需 Robert 单独授权。

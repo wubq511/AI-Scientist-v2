@@ -26,8 +26,8 @@ from .canonical import (
 from .errors import HarnessError, fail
 from .opencode_go_chat import _api_key
 
-ORIENTATION_RUN_SCHEMA_VERSION = "local-ranking-atomic-orientation-run-v2.1"
-ROUND_SCHEMA_VERSION = "local-ranking-atomic-execution-round-v2.1"
+ORIENTATION_RUN_SCHEMA_VERSION = "local-ranking-atomic-orientation-run-v2.2"
+ROUND_SCHEMA_VERSION = "local-ranking-atomic-execution-round-v2.2"
 
 
 def _load_existing_attempt(

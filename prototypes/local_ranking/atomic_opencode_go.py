@@ -13,6 +13,8 @@ from .atomic_judge import (
     APPROVED_ATOMIC_EFFORTS,
     APPROVED_ATOMIC_MODEL_ALIAS,
     ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
+    ATOMIC_PREPARATION_SCHEMA_VERSION,
+    ATOMIC_RESPONSE_SUBMISSION,
     MAX_PHYSICAL_ATTEMPTS,
     OPENCODE_GO_ENDPOINT,
     SUBMIT_JUDGMENT_TOOL,
@@ -29,9 +31,15 @@ from .canonical import (
 )
 from .errors import HarnessError, fail
 from .opencode_go_chat import SAFE_RESPONSE_HEADERS, _api_key, _utc_now
-from .opencode_go_stream import _extract_stream_tool_response
+from .opencode_go_stream import _extract_stream_tool_response, _validated_cost
 
-PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v3.0"
+PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v3.1"
+CANARY_PREPARATION_SCHEMA_VERSIONS = {
+    "local-ranking-atomic-opencode-go-preparation-v3.0"
+}
+LEGACY_PREPARATION_SCHEMA_VERSIONS = {
+    "local-ranking-atomic-opencode-go-preparation-v2.1"
+}
 EXECUTION_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-execution-v2.1"
 SMOKE_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-smoke-v2.0"
 ATOMIC_MAX_TOKENS = 16_384
@@ -55,6 +63,17 @@ def _request(*, prompt: str, reasoning_effort: str) -> dict[str, Any]:
         "stream": True,
         "tool_choice": SUBMIT_JUDGMENT_TOOL_CHOICE,
         "tools": [SUBMIT_JUDGMENT_TOOL],
+    }
+
+
+def _legacy_request(*, prompt: str, reasoning_effort: str) -> dict[str, Any]:
+    return {
+        "max_tokens": ATOMIC_MAX_TOKENS,
+        "messages": [{"content": prompt, "role": "user"}],
+        "model": APPROVED_ATOMIC_MODEL_ALIAS.rsplit("/", 1)[-1],
+        "reasoning_effort": reasoning_effort,
+        "response_format": {"type": "json_object"},
+        "stream": True,
     }
 
 
@@ -112,6 +131,7 @@ def _write_preparation(
         "kind": kind,
         "max_concurrency": concurrency,
         "max_tokens": ATOMIC_MAX_TOKENS,
+        "response_submission": ATOMIC_RESPONSE_SUBMISSION,
         "retry_policy": RETRY_POLICY,
         "schema_version": PREPARATION_SCHEMA_VERSION,
         "status": "ready_for_execution",
@@ -126,11 +146,20 @@ def prepare_atomic_transport(
     *, atomic_manifest_path: Path, output_root: Path, max_concurrency: int = 4
 ) -> dict[str, Any]:
     manifest, artifact_root, calls = _load_manifest(atomic_manifest_path)
+    if manifest["schema_version"] != ATOMIC_PREPARATION_SCHEMA_VERSION:
+        fail(
+            "INVALID_ATOMIC_MANIFEST",
+            "Transport preparation requires the current atomic manifest",
+        )
     manifest_bytes = atomic_manifest_path.read_bytes()
     raw_calls = []
     for sequence in sorted(calls):
         call = calls[sequence]
-        _load_call_packet(artifact_root=artifact_root, call=call)
+        _load_call_packet(
+            artifact_root=artifact_root,
+            call=call,
+            preparation_schema_version=manifest["schema_version"],
+        )
         prompt_path = resolve_repo_relative(
             artifact_root, call["prompt_path"], label="atomic prompt path"
         )
@@ -236,7 +265,7 @@ def _validate_preparation(
     manifest, manifest_bytes = _read_canonical_object(
         preparation_root / "manifest.json", label="atomic transport manifest"
     )
-    expected_keys = {
+    base_keys = {
         "atomic_manifest_sha256",
         "call_count",
         "calls",
@@ -249,13 +278,30 @@ def _validate_preparation(
         "schema_version",
         "status",
     }
+    schema_version = manifest.get("schema_version")
+    request_builder = _request
+    if schema_version == PREPARATION_SCHEMA_VERSION:
+        expected_keys = {*base_keys, "response_submission"}
+    elif schema_version in CANARY_PREPARATION_SCHEMA_VERSIONS:
+        expected_keys = base_keys
+    elif schema_version in LEGACY_PREPARATION_SCHEMA_VERSIONS:
+        expected_keys = base_keys
+        request_builder = _legacy_request
+    else:
+        fail(
+            "INVALID_PREPARATION",
+            "Atomic transport preparation schema is unsupported",
+        )
     evaluator = manifest.get("evaluator")
     kind = manifest.get("kind")
     calls = manifest.get("calls")
     expected_count = 24 if kind == "atomic" else SMOKE_CALL_COUNT
     if (
         set(manifest) != expected_keys
-        or manifest.get("schema_version") != PREPARATION_SCHEMA_VERSION
+        or (
+            schema_version == PREPARATION_SCHEMA_VERSION
+            and manifest.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
+        )
         or manifest.get("status") != "ready_for_execution"
         or manifest.get("endpoint") != OPENCODE_GO_ENDPOINT
         or manifest.get("max_tokens") != ATOMIC_MAX_TOKENS
@@ -324,7 +370,7 @@ def _validate_preparation(
         request, request_bytes = _read_canonical_object(
             request_path, label="prepared request"
         )
-        expected_request = _request(
+        expected_request = request_builder(
             prompt=prompt_bytes.decode("utf-8"),
             reasoning_effort=evaluator["reasoning_effort"],
         )
@@ -420,6 +466,14 @@ def _fail_execution(
     raise error
 
 
+def _require_current_preparation(manifest: dict[str, Any], *, command: str) -> None:
+    if manifest["schema_version"] != PREPARATION_SCHEMA_VERSION:
+        fail(
+            "INVALID_PREPARATION",
+            f"{command} may send only the current atomic transport preparation",
+        )
+
+
 def execute_call(
     *,
     preparation_root: Path,
@@ -431,6 +485,7 @@ def execute_call(
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
     manifest, manifest_bytes, calls = _validate_preparation(preparation_root)
+    _require_current_preparation(manifest, command="execute-call")
     call = calls.get(call_sequence)
     if call is None:
         fail("UNKNOWN_LOGICAL_CALL", "Prepared call sequence does not exist")
@@ -588,26 +643,237 @@ def execute_call(
     return receipt
 
 
-def _validate_smoke_response(path: Path, *, expected_call_id: str) -> None:
-    response, _ = _read_canonical_object(path, label="smoke response")
-    if response != _smoke_probe_arguments(expected_call_id):
-        fail("INVALID_SMOKE_RESPONSE", "Transport smoke response schema is invalid")
+def _validated_smoke_usage(value: Any) -> None:
+    if not isinstance(value, dict) or not {
+        "completion_tokens",
+        "prompt_tokens",
+        "total_tokens",
+    }.issubset(value):
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt usage is incomplete")
+    for key, token_count in value.items():
+        if (
+            key
+            not in {
+                "cached_tokens",
+                "completion_tokens",
+                "prompt_tokens",
+                "reasoning_tokens",
+                "total_tokens",
+            }
+            or isinstance(token_count, bool)
+            or not isinstance(token_count, int)
+            or token_count < 0
+        ):
+            fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt usage is invalid")
+    if value["total_tokens"] != value["prompt_tokens"] + value["completion_tokens"]:
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt token usage is inconsistent")
+
+
+def _smoke_evidence_files(*, execution_root: Path, files: Any, label: str) -> None:
+    if (
+        not isinstance(files, dict)
+        or not files
+        or any(
+            not isinstance(name, str)
+            or not name
+            or Path(name).name != name
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            for name, digest in files.items()
+        )
+    ):
+        fail("INVALID_SMOKE_EVIDENCE", f"{label} file hashes are invalid")
+    for name, digest in files.items():
+        try:
+            data = (execution_root / name).read_bytes()
+        except OSError as exc:
+            fail(
+                "MISSING_ARTIFACT",
+                f"{label} evidence is missing",
+                file=name,
+                error=str(exc),
+            )
+        if sha256_bytes(data) != digest:
+            fail("HASH_MISMATCH", f"{label} evidence changed", file=name)
 
 
 def validate_smoke_call(
     *, preparation_root: Path, call_sequence: int, execution_root: Path
 ) -> dict[str, Any]:
-    manifest, _, calls = _validate_preparation(preparation_root)
+    manifest, manifest_bytes, calls = _validate_preparation(preparation_root)
     if manifest["kind"] != "smoke":
         fail("INVALID_PREPARATION", "validate-smoke-call requires a smoke preparation")
+    if manifest["schema_version"] not in (
+        {PREPARATION_SCHEMA_VERSION} | CANARY_PREPARATION_SCHEMA_VERSIONS
+    ):
+        fail(
+            "INVALID_PREPARATION",
+            "validate-smoke-call requires a current or canary smoke preparation",
+        )
     call = calls.get(call_sequence)
     if call is None:
         fail("UNKNOWN_LOGICAL_CALL", "Prepared call sequence does not exist")
     response_path = execution_root / "response.json"
-    _validate_smoke_response(response_path, expected_call_id=call["call_id"])
+    receipt_path = execution_root / "receipt.json"
+    result_path = execution_root / "execution-result.json"
+    if not (
+        response_path.is_file() and receipt_path.is_file() and result_path.is_file()
+    ):
+        fail(
+            "INCOMPLETE_SMOKE_EVIDENCE",
+            "Smoke validation requires response, receipt, and execution result",
+        )
+    response, response_bytes = _read_canonical_object(
+        response_path, label="smoke response"
+    )
+    receipt, receipt_bytes = _read_canonical_object(
+        receipt_path, label="smoke execution receipt"
+    )
+    result, _ = _read_canonical_object(result_path, label="smoke execution result")
+    evaluator = manifest["evaluator"]
+    expected_binding = _call_binding(manifest=manifest, call=call)
+    if (
+        set(receipt)
+        != {
+            "call_binding",
+            "diagnostics",
+            "endpoint",
+            "files",
+            "http_status",
+            "identity",
+            "preparation_manifest_sha256",
+            "provider",
+            "request_sha256",
+            "schema_version",
+            "status",
+            "tool",
+            "transport_qualification",
+            "usage",
+        }
+        or receipt.get("schema_version") != ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
+        or receipt.get("status") != "pass"
+        or receipt.get("provider") != "opencode-go"
+        or receipt.get("endpoint") != OPENCODE_GO_ENDPOINT
+        or receipt.get("http_status") != 200
+        or receipt.get("call_binding") != expected_binding
+        or receipt.get("preparation_manifest_sha256") != sha256_bytes(manifest_bytes)
+        or receipt.get("request_sha256") != call["request_sha256"]
+        or receipt.get("tool")
+        != {
+            "name": SUBMIT_JUDGMENT_TOOL_NAME,
+            "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
+        }
+        or receipt.get("transport_qualification")
+        != {
+            "forced_tool_call_accepted": True,
+            "reasoning_effort_requested": evaluator["reasoning_effort"],
+            "reasoning_execution_proven": False,
+            "stream_completed": True,
+            "streaming_requested": True,
+        }
+    ):
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt does not bind this call")
+    identity = receipt["identity"]
+    if not isinstance(identity, dict) or set(identity) != {
+        "cost",
+        "created_first",
+        "created_last",
+        "finish_reason",
+        "model",
+        "provider_response_id",
+        "tool_call_id",
+    }:
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt provider identity is invalid")
+    created_first = identity.get("created_first")
+    created_last = identity.get("created_last")
+    if (
+        identity.get("finish_reason") not in {"stop", "tool_calls"}
+        or identity.get("model") != evaluator["model_alias"].rsplit("/", 1)[-1]
+        or not isinstance(identity.get("provider_response_id"), str)
+        or not identity["provider_response_id"]
+        or not isinstance(identity.get("tool_call_id"), str)
+        or not identity["tool_call_id"]
+        or isinstance(created_first, bool)
+        or not isinstance(created_first, int)
+        or created_first < 0
+        or isinstance(created_last, bool)
+        or not isinstance(created_last, int)
+        or created_last < created_first
+    ):
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt provider identity is invalid")
+    _validated_cost(identity.get("cost"))
+    if receipt.get("usage") is not None:
+        _validated_smoke_usage(receipt["usage"])
+    diagnostics = receipt["diagnostics"]
+    if (
+        not isinstance(diagnostics, dict)
+        or set(diagnostics)
+        != {
+            "arguments_bytes",
+            "content_bytes",
+            "data_event_count",
+            "done_received",
+            "keepalive_count",
+            "post_done_cost_received",
+            "reasoning_bytes",
+        }
+        or diagnostics.get("done_received") is not True
+        or not isinstance(diagnostics.get("post_done_cost_received"), bool)
+        or any(
+            isinstance(diagnostics[key], bool)
+            or not isinstance(diagnostics[key], int)
+            or diagnostics[key] < 0
+            for key in (
+                "arguments_bytes",
+                "content_bytes",
+                "data_event_count",
+                "keepalive_count",
+                "reasoning_bytes",
+            )
+        )
+    ):
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt diagnostics are invalid")
+    _smoke_evidence_files(
+        execution_root=execution_root, files=receipt.get("files"), label="Smoke receipt"
+    )
+    if receipt["files"].get("response.json") != sha256_bytes(response_bytes):
+        fail("HASH_MISMATCH", "Smoke receipt does not bind this response")
+    if (
+        set(result)
+        != {
+            "call_binding",
+            "error",
+            "files",
+            "preparation_manifest_sha256",
+            "receipt_sha256",
+            "request_sha256",
+            "schema_version",
+            "status",
+        }
+        or result.get("schema_version") != EXECUTION_RESULT_SCHEMA_VERSION
+        or result.get("status") != "pass"
+        or result.get("error") is not None
+        or result.get("call_binding") != expected_binding
+        or result.get("preparation_manifest_sha256") != sha256_bytes(manifest_bytes)
+        or result.get("request_sha256") != call["request_sha256"]
+    ):
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke execution result does not bind this call")
+    if result.get("receipt_sha256") != sha256_bytes(receipt_bytes):
+        fail("HASH_MISMATCH", "Smoke execution result and receipt do not match")
+    _smoke_evidence_files(
+        execution_root=execution_root,
+        files=result.get("files"),
+        label="Smoke execution result",
+    )
+    if result["files"].get("receipt.json") != sha256_bytes(receipt_bytes) or result[
+        "files"
+    ].get("response.json") != sha256_bytes(response_bytes):
+        fail("HASH_MISMATCH", "Smoke execution result does not bind this evidence")
+    if response != _smoke_probe_arguments(call["call_id"]):
+        fail("INVALID_SMOKE_RESPONSE", "Transport smoke response schema is invalid")
     return {
         "call_id": call["call_id"],
-        "response_sha256": sha256_bytes(response_path.read_bytes()),
+        "response_sha256": sha256_bytes(response_bytes),
         "status": "pass",
     }
 
@@ -624,6 +890,7 @@ def run_smoke(
     manifest, _, calls = _validate_preparation(preparation_root)
     if manifest["kind"] != "smoke":
         fail("INVALID_PREPARATION", "run-smoke requires a smoke preparation")
+    _require_current_preparation(manifest, command="run-smoke")
     key = api_key or _api_key(env_name=api_key_env, kimi_config_path=kimi_config_path)
 
     def run_one(sequence: int) -> dict[str, Any]:
@@ -637,8 +904,10 @@ def run_smoke(
                 api_key=key,
                 transport=transport,
             )
-            _validate_smoke_response(
-                call_root / "response.json", expected_call_id=call["call_id"]
+            validate_smoke_call(
+                preparation_root=preparation_root,
+                call_sequence=sequence,
+                execution_root=call_root,
             )
             return {
                 "call_id": call["call_id"],

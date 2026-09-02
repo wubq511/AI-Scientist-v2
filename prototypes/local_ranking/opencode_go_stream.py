@@ -129,9 +129,11 @@ def _sse_data_events(raw_stream: bytes) -> tuple[list[str], int]:
             dispatch()
         elif line.startswith(":"):
             keepalive_count += 1
-        elif line == "data" or line.startswith("data:"):
-            value = line[5:] if line.startswith("data:") else ""
-            data_lines.append(value[1:] if value.startswith(" ") else value)
+        elif line == "data":
+            data_lines.append("")
+        elif line.startswith("data:"):
+            value = line.removeprefix("data:")
+            data_lines.append(value.removeprefix(" "))
         else:
             fail("INVALID_SSE", "OpenCode Go stream contains a non-data SSE field")
     dispatch()
@@ -566,7 +568,13 @@ def _extract_stream_tool_response(
             if content:
                 content_parts.append(content)
             if reasoning_content:
-                reasoning_bytes += len(reasoning_content.encode("utf-8"))
+                try:
+                    reasoning_bytes += len(reasoning_content.encode("utf-8"))
+                except UnicodeEncodeError:
+                    fail(
+                        "INVALID_PROVIDER_RESPONSE",
+                        "Stream reasoning content is not canonical UTF-8",
+                    )
             if finish_reason in {"stop", "tool_calls"}:
                 terminal_count += 1
                 terminal_reason = finish_reason
@@ -607,6 +615,10 @@ def _extract_stream_tool_response(
     if not arguments_text:
         fail("INVALID_TOOL_CALL", "Tool call arguments are missing")
     try:
+        arguments_text.encode("utf-8")
+    except UnicodeEncodeError:
+        fail("INVALID_TOOL_CALL", "Tool call arguments are not canonical UTF-8")
+    try:
         arguments = json.loads(arguments_text)
     except json.JSONDecodeError as exc:
         fail(
@@ -617,7 +629,15 @@ def _extract_stream_tool_response(
         )
     if not isinstance(arguments, dict):
         fail("INVALID_TOOL_CALL", "Tool call arguments must be one JSON object")
+    try:
+        canonical_json_bytes(arguments)
+    except UnicodeEncodeError:
+        fail("INVALID_TOOL_CALL", "Tool call arguments are not canonical UTF-8")
     content_text = "".join(content_parts)
+    try:
+        content_bytes = len(content_text.encode("utf-8"))
+    except UnicodeEncodeError:
+        fail("INVALID_PROVIDER_RESPONSE", "Stream content is not canonical UTF-8")
     identity = {
         "cost": cost,
         "created_first": created_first,
@@ -629,7 +649,7 @@ def _extract_stream_tool_response(
     }
     diagnostics = {
         "arguments_bytes": len(arguments_text.encode("utf-8")),
-        "content_bytes": len(content_text.encode("utf-8")),
+        "content_bytes": content_bytes,
         "data_event_count": len(events),
         "done_received": done_received,
         "keepalive_count": keepalive_count,
@@ -699,7 +719,7 @@ def execute(
     api_key_env: str,
     kimi_config_path: Path | None,
 ) -> dict[str, Any]:
-    manifest, manifest_bytes, request, request_bytes, _, _ = _validate_preparation(
+    _manifest, manifest_bytes, request, request_bytes, _, _ = _validate_preparation(
         preparation_root=preparation_root
     )
     key = _api_key(env_name=api_key_env, kimi_config_path=kimi_config_path)
@@ -711,8 +731,9 @@ def execute(
     safe_headers: dict[str, str] = {}
     transport_error: str | None = None
     try:
-        with httpx.Client(timeout=httpx.Timeout(900.0, connect=30.0)) as client:
-            with client.stream(
+        with (
+            httpx.Client(timeout=httpx.Timeout(900.0, connect=30.0)) as client,
+            client.stream(
                 "POST",
                 API_URL,
                 content=request_bytes,
@@ -720,15 +741,15 @@ def execute(
                     "Authorization": f"Bearer {key}",
                     "Content-Type": "application/json",
                 },
-            ) as response:
-                status_code = response.status_code
-                safe_headers = {
-                    name.lower(): value
-                    for name, value in response.headers.items()
-                    if name.lower() in SAFE_RESPONSE_HEADERS
-                }
-                for part in response.iter_bytes():
-                    raw_parts.append(part)
+            ) as response,
+        ):
+            status_code = response.status_code
+            safe_headers = {
+                name.lower(): value
+                for name, value in response.headers.items()
+                if name.lower() in SAFE_RESPONSE_HEADERS
+            }
+            raw_parts.extend(response.iter_bytes())
     except httpx.HTTPError as exc:
         transport_error = type(exc).__name__
 

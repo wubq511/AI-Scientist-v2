@@ -13,7 +13,9 @@ from prototypes.local_ranking.atomic_judge import (
     ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION,
     ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION,
     ATOMIC_PREPARATION_SCHEMA_VERSION,
+    ATOMIC_RESPONSE_SUBMISSION,
     SUBMIT_JUDGMENT_TOOL,
+    _legacy_prompt_text,
     prepare_atomic,
     record_failed_attempt,
     resolve_orientation,
@@ -23,6 +25,7 @@ from prototypes.local_ranking.atomic_judge import (
 )
 from prototypes.local_ranking.atomic_opencode_go import prepare_atomic_transport
 from prototypes.local_ranking.atomic_profile import (
+    TRANSPORT_CANARY_SUMMARY_SHA256,
     USAGE_SNAPSHOT_SCHEMA_VERSION,
     prepare_profile,
 )
@@ -188,7 +191,11 @@ def _semantic_stream(*, response_id: str, response: dict) -> bytes:
     )
 
 
-def record_attempt(legacy: bool = False, **kwargs):
+def record_attempt(
+    receipt_family: str = "tool", result_family: str | None = None, **kwargs
+):
+    if result_family is None:
+        result_family = receipt_family
     manifest_path = kwargs["manifest_path"]
     response_path = kwargs["response_path"]
     output_root = kwargs["output_root"]
@@ -196,7 +203,7 @@ def record_attempt(legacy: bool = False, **kwargs):
     call = manifest["calls"][kwargs["call_sequence"] - 1]
     response_bytes = response_path.read_bytes()
     response_id = "test-" + sha256_bytes(str(output_root).encode())[:24]
-    if legacy:
+    if receipt_family == "legacy":
         identity = {
             "cost": "0",
             "created_first": 1,
@@ -213,7 +220,6 @@ def record_attempt(legacy: bool = False, **kwargs):
             "streaming_requested": True,
         }
         receipt_schema_version = "local-ranking-atomic-opencode-go-receipt-v2.0"
-        result_schema_version = "local-ranking-atomic-opencode-go-execution-v2.0"
     else:
         identity = {
             "cost": "0",
@@ -232,7 +238,11 @@ def record_attempt(legacy: bool = False, **kwargs):
             "streaming_requested": True,
         }
         receipt_schema_version = ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
-        result_schema_version = ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION
+    result_schema_version = (
+        "local-ranking-atomic-opencode-go-execution-v2.0"
+        if result_family == "legacy"
+        else ATOMIC_EXECUTION_RESULT_SCHEMA_VERSION
+    )
     receipt = {
         "call_binding": {
             "atomic_manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
@@ -256,7 +266,7 @@ def record_attempt(legacy: bool = False, **kwargs):
         "transport_qualification": qualification,
         "usage": None,
     }
-    if not legacy:
+    if receipt_family == "tool":
         receipt["tool"] = {
             "name": "submit_judgment",
             "schema_sha256": sha256_bytes(canonical_json_bytes(SUBMIT_JUDGMENT_TOOL)),
@@ -492,6 +502,33 @@ def test_resolver_forbids_retry_after_a_valid_response(tmp_path: Path) -> None:
     assert raised.value.code == "RETRY_AFTER_VALID"
 
 
+def _relabeled_atomic_manifest(
+    prepared: Path, manifest_path: Path, schema_version: str
+) -> dict:
+    manifest = json.loads(manifest_path.read_bytes())
+    if schema_version in (
+        "local-ranking-atomic-preparation-v2.2",
+        "local-ranking-atomic-preparation-v2.3",
+    ):
+        # Rebuild every prompt with the frozen legacy JSON prompt so the
+        # manifest binds genuine legacy bytes instead of relabelled new ones.
+        del manifest["response_submission"]
+        for call in manifest["calls"]:
+            packet = json.loads((prepared / call["packet_path"]).read_bytes())
+            prompt_bytes = _legacy_prompt_text(packet).encode("utf-8")
+            (prepared / call["prompt_path"]).write_bytes(prompt_bytes)
+            call["prompt_bytes"] = len(prompt_bytes)
+            call["prompt_sha256"] = sha256_bytes(prompt_bytes)
+    elif schema_version == "local-ranking-atomic-preparation-v2.4":
+        # The spent canary family shares the current tool prompt bytes.
+        del manifest["response_submission"]
+    else:
+        raise AssertionError(f"unsupported test relabel target {schema_version}")
+    manifest["schema_version"] = schema_version
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    return manifest
+
+
 def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -> None:
     prepared = tmp_path / "prepared"
     manifest = prepare_atomic(
@@ -500,9 +537,9 @@ def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -
         output_root=prepared,
     )
     manifest_path = prepared / "private" / "manifest.json"
-    legacy_manifest = json.loads(manifest_path.read_bytes())
-    legacy_manifest["schema_version"] = "local-ranking-atomic-preparation-v2.2"
-    manifest_path.write_bytes(canonical_json_bytes(legacy_manifest))
+    _relabeled_atomic_manifest(
+        prepared, manifest_path, "local-ranking-atomic-preparation-v2.2"
+    )
     attempt_paths = []
     for call in manifest["calls"]:
         response = _write(
@@ -510,22 +547,20 @@ def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -
             _valid_response(),
         )
         attempt_root = tmp_path / "attempts" / call["call_id"] / "attempt-1"
-        record_attempt(
-            legacy=True,
+        outcome = record_attempt(
+            receipt_family="legacy",
             manifest_path=manifest_path,
             call_sequence=call["sequence"],
             attempt_number=1,
             response_path=response,
             output_root=attempt_root,
         )
+        assert outcome["schema_version"] == "local-ranking-atomic-attempt-v2.4"
         attempt_path = attempt_root / "attempt.json"
-        legacy_attempt = json.loads(attempt_path.read_bytes())
-        legacy_attempt["schema_version"] = (
-            "local-ranking-atomic-attempt-v2.3"
-            if call["sequence"] == 1
-            else "local-ranking-atomic-attempt-v2.4"
-        )
-        attempt_path.write_bytes(canonical_json_bytes(legacy_attempt))
+        if call["sequence"] == 1:
+            legacy_attempt = json.loads(attempt_path.read_bytes())
+            legacy_attempt["schema_version"] = "local-ranking-atomic-attempt-v2.3"
+            attempt_path.write_bytes(canonical_json_bytes(legacy_attempt))
         attempt_paths.append(attempt_path)
 
     trace = resolve_orientation(
@@ -547,6 +582,124 @@ def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -
     assert legacy_receipt["identity"]["finish_reason"] == "stop"
 
 
+def test_spent_canary_family_accepts_tool_prompt_without_submission_enum(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    _relabeled_atomic_manifest(
+        prepared, manifest_path, "local-ranking-atomic-preparation-v2.4"
+    )
+    response = _write(tmp_path / "response.json", _valid_response())
+
+    outcome = record_attempt(
+        manifest_path=manifest_path,
+        call_sequence=1,
+        attempt_number=1,
+        response_path=response,
+        output_root=tmp_path / "attempt",
+    )
+
+    assert outcome["status"] == "valid"
+    assert outcome["schema_version"] == "local-ranking-atomic-attempt-v2.5"
+
+
+@pytest.mark.parametrize(
+    ("manifest_version", "receipt_family", "result_family", "expected_code"),
+    [
+        ("v2.5", "legacy", "legacy", "INVALID_EXECUTION_RECEIPT"),
+        ("v2.5", "tool", "legacy", "INVALID_EXECUTION_RESULT"),
+        ("v2.2", "tool", "tool", "INVALID_EXECUTION_RECEIPT"),
+        ("v2.2", "legacy", "tool", "INVALID_EXECUTION_RESULT"),
+        ("v2.4", "legacy", "legacy", "INVALID_EXECUTION_RECEIPT"),
+    ],
+)
+def test_record_attempt_pairs_manifest_and_evidence_transport_families(
+    tmp_path: Path,
+    manifest_version: str,
+    receipt_family: str,
+    result_family: str,
+    expected_code: str,
+) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    if manifest_version != "v2.5":
+        _relabeled_atomic_manifest(
+            prepared,
+            manifest_path,
+            f"local-ranking-atomic-preparation-{manifest_version}",
+        )
+    response = _write(tmp_path / "response.json", _valid_response())
+
+    with pytest.raises(HarnessError) as raised:
+        record_attempt(
+            receipt_family=receipt_family,
+            result_family=result_family,
+            manifest_path=manifest_path,
+            call_sequence=1,
+            attempt_number=1,
+            response_path=response,
+            output_root=tmp_path / "attempt",
+        )
+
+    assert raised.value.code == expected_code
+
+
+def test_resolve_orientation_rejects_attempt_from_the_wrong_family(
+    tmp_path: Path,
+) -> None:
+    prepared = tmp_path / "prepared"
+    manifest = prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    _relabeled_atomic_manifest(
+        prepared, manifest_path, "local-ranking-atomic-preparation-v2.2"
+    )
+    attempt_paths = []
+    for call in manifest["calls"]:
+        response = _write(
+            tmp_path / "responses" / f"{call['call_id']}.json",
+            _valid_response(),
+        )
+        attempt_root = tmp_path / "attempts" / call["call_id"] / "attempt-1"
+        record_attempt(
+            receipt_family="legacy",
+            manifest_path=manifest_path,
+            call_sequence=call["sequence"],
+            attempt_number=1,
+            response_path=response,
+            output_root=attempt_root,
+        )
+        attempt_path = attempt_root / "attempt.json"
+        if call["sequence"] == 1:
+            misplaced = json.loads(attempt_path.read_bytes())
+            misplaced["schema_version"] = "local-ranking-atomic-attempt-v2.5"
+            attempt_path.write_bytes(canonical_json_bytes(misplaced))
+        attempt_paths.append(attempt_path)
+
+    with pytest.raises(HarnessError) as raised:
+        resolve_orientation(
+            manifest_path=manifest_path,
+            attempt_paths=attempt_paths,
+            output_root=tmp_path / "resolved",
+        )
+
+    assert raised.value.code == "ATTEMPT_IDENTITY_MISMATCH"
+
+
 def test_new_writers_emit_only_tool_transport_schema_versions(tmp_path: Path) -> None:
     prepared = tmp_path / "prepared"
     manifest = prepare_atomic(
@@ -565,7 +718,10 @@ def test_new_writers_emit_only_tool_transport_schema_versions(tmp_path: Path) ->
         output_root=tmp_path / "attempt",
     )
 
+    assert manifest["schema_version"] == "local-ranking-atomic-preparation-v2.5"
     assert manifest["schema_version"] == ATOMIC_PREPARATION_SCHEMA_VERSION
+    assert manifest["response_submission"] == "forced_submit_judgment_tool"
+    assert manifest["response_submission"] == ATOMIC_RESPONSE_SUBMISSION
     assert outcome["schema_version"] == "local-ranking-atomic-attempt-v2.5"
     receipt = json.loads((tmp_path / "attempt" / "execution-receipt.json").read_bytes())
     assert receipt["schema_version"] == ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION
@@ -795,6 +951,9 @@ def test_orientation_runner_retries_only_invalid_response(tmp_path: Path) -> Non
     )
 
     assert result["run_result"]["status"] == "pass"
+    assert result["run_result"]["schema_version"] == (
+        "local-ranking-atomic-orientation-run-v2.2"
+    )
     assert request_count == 25
     assert result["trace"]["attempt_summary"] == {
         "first_attempt_valid_count": 23,
@@ -921,7 +1080,110 @@ def test_orientation_runner_stops_after_four_invalid_attempts(tmp_path: Path) ->
     assert len(list((run_root / "attempts" / "call-001").glob("*/attempt.json"))) == 4
 
 
-def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> None:
+def test_orientation_runner_fails_closed_on_ambiguous_partial_attempt(
+    tmp_path: Path,
+) -> None:
+    atomic_root = tmp_path / "atomic"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=atomic_root,
+    )
+    manifest_path = atomic_root / "private" / "manifest.json"
+    preparation_root = tmp_path / "transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=manifest_path,
+        output_root=preparation_root,
+        max_concurrency=4,
+    )
+    run_root = tmp_path / "run-interrupted"
+    partial = run_root / "executions" / "call-001" / "attempt-1"
+    partial.mkdir(parents=True)
+    (partial / "started-at.txt").write_bytes(b"2026-09-02T00:00:00Z\n")
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("no request may be sent while a partial attempt exists")
+
+    with pytest.raises(HarnessError) as raised:
+        run_orientation(
+            atomic_manifest_path=manifest_path,
+            preparation_root=preparation_root,
+            output_root=run_root,
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert raised.value.code == "AMBIGUOUS_PARTIAL_ATTEMPT"
+
+
+CANARY_IMPLEMENTATION_COMMIT = "fa2409ff1d955cb546aec27f08de7ae62412e130"
+
+
+def _canary_summary(path: Path, **overrides: object) -> Path:
+    summary: dict[str, object] = {
+        "authorization": "atomic tool-output contract v2.3 section 6 (Robert, 2026-09-02)",
+        "evidence_class": "spent_transport_only",
+        "implementation_commit": CANARY_IMPLEMENTATION_COMMIT,
+        "max_tokens": 16_384,
+        "notes": "Synthetic closed-schema canary summary for profile binding tests.",
+        "physical_call_count": 2,
+        "prepare_only_inputs": {
+            "atomic_manifest_sha256": "a" * 64,
+            "transport_manifest_sha256": "b" * 64,
+        },
+        "provider_model": "opencode-go/deepseek-v4-pro",
+        "reasoning_effort": "max",
+        "stress_canary": {
+            "attempt_1": {
+                "attempt_sha256": "c" * 64,
+                "cost": "0",
+                "execution_result_sha256": "d" * 64,
+                "finish_reason": "tool_calls",
+                "provider_response_id": "chatcmpl-stress",
+                "receipt_sha256": "e" * 64,
+                "response_sha256": "f" * 64,
+                "semantic_validator": {"error": None, "status": "pass"},
+                "status": "valid",
+                "tool_call_id": "chatcmpl-tool-stress",
+                "usage": {
+                    "cached_tokens": 0,
+                    "completion_tokens": 100,
+                    "prompt_tokens": 200,
+                    "reasoning_tokens": 50,
+                    "total_tokens": 300,
+                },
+            },
+            "attempts_sent": 1,
+            "call_id": "call-021",
+            "stop_condition": "first-valid stop (canary PASS)",
+        },
+        "synthetic_probe": {
+            "call_id": "smoke-001",
+            "cost": "0",
+            "finish_reason": "tool_calls",
+            "provider_response_id": "chatcmpl-probe",
+            "receipt_sha256": "1" * 64,
+            "response_sha256": "2" * 64,
+            "tool_call_id": "chatcmpl-tool-probe",
+            "usage": {
+                "cached_tokens": 0,
+                "completion_tokens": 10,
+                "prompt_tokens": 20,
+                "reasoning_tokens": 5,
+                "total_tokens": 30,
+            },
+            "validator": "validate-smoke-call: pass",
+        },
+        "usage_percent_after": {"monthly": 40, "rolling": 0, "weekly": 33},
+        "usage_percent_before": {"monthly": 40, "rolling": 0, "weekly": 32},
+        "usage_snapshot_after_sha256": "3" * 64,
+        "usage_snapshot_before_sha256": "4" * 64,
+    }
+    summary.update(overrides)
+    return _write(path, summary)
+
+
+def _profile_replicates(tmp_path: Path) -> list[dict[str, Path | str]]:
     replicates = []
     for replicate_index in range(1, 4):
         replicate_id = f"r{replicate_index}"
@@ -946,8 +1208,12 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
             entry[f"orientation_{orientation}_atomic"] = atomic_path
             entry[f"orientation_{orientation}_preparation"] = preparation_root
         replicates.append(entry)
-    usage_snapshot = _write(
-        tmp_path / "usage.json",
+    return replicates
+
+
+def _usage_snapshot(path: Path) -> Path:
+    return _write(
+        path,
         {
             "captured_at": "2026-09-01T00:00:00Z",
             "model_id": "deepseek-v4-pro",
@@ -969,12 +1235,21 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
         },
     )
 
+
+def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> None:
+    replicates = _profile_replicates(tmp_path)
+    usage_snapshot = _usage_snapshot(tmp_path / "usage.json")
+    canary_summary = _canary_summary(tmp_path / "canary-summary.json")
+    canary_summary_sha256 = sha256_bytes(canary_summary.read_bytes())
+
     profile = prepare_profile(
         replicates=replicates,
         source_commit="a" * 40,
         reasoning_effort="max",
         usage_snapshot_path=usage_snapshot,
         smoke_result_sha256="b" * 64,
+        canary_summary_path=canary_summary,
+        expected_canary_summary_sha256=canary_summary_sha256,
         output_path=tmp_path / "profile.json",
     )
 
@@ -987,6 +1262,152 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
     assert len(profile["replicates"]) == 3
     assert all(len(item["orientations"]) == 2 for item in profile["replicates"])
     assert profile["status"] == "ready_for_pro_max_calibration"
+    assert profile["schema_version"] == "local-ranking-atomic-profile-manifest-v2.2"
+    assert profile["response_submission"] == "forced_submit_judgment_tool"
+    assert profile["transport_canary_summary_sha256"] == canary_summary_sha256
+    assert profile["canary_implementation_commit"] == CANARY_IMPLEMENTATION_COMMIT
+
+
+def test_profile_requires_the_frozen_canary_summary_hash(tmp_path: Path) -> None:
+    canary_summary = _canary_summary(tmp_path / "canary-summary.json")
+
+    with pytest.raises(HarnessError) as raised:
+        prepare_profile(
+            replicates=_profile_replicates(tmp_path),
+            source_commit="a" * 40,
+            reasoning_effort="max",
+            usage_snapshot_path=_usage_snapshot(tmp_path / "usage.json"),
+            smoke_result_sha256="b" * 64,
+            canary_summary_path=canary_summary,
+            output_path=tmp_path / "profile.json",
+        )
+
+    assert raised.value.code == "CANARY_SUMMARY_MISMATCH"
+    assert TRANSPORT_CANARY_SUMMARY_SHA256 == (
+        "900b49b59c72f3da4282e2cf7d58affb7df0678421a9f042cf868db4a6b26749"
+    )
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"evidence_class": "semantic_vote"},
+        {"physical_call_count": 0},
+        {"physical_call_count": 6},
+        {"provider_model": "opencode-go/deepseek-v4-flash"},
+        {"reasoning_effort": "high"},
+        {"max_tokens": 8192},
+        {"implementation_commit": "0" * 40},
+        {"synthetic_probe": {"validator": "validate-smoke-call: fail"}},
+        {"stress_canary": {"stop_condition": "exhausted after four attempts"}},
+        {
+            "stress_canary": {
+                "attempt_1": {"semantic_validator": {"error": {}, "status": "fail"}},
+                "stop_condition": "first-valid stop (canary PASS)",
+            }
+        },
+    ],
+)
+def test_profile_rejects_incomplete_or_failed_canary_summary(
+    tmp_path: Path, override: dict
+) -> None:
+    canary_summary = _canary_summary(tmp_path / "canary-summary.json", **override)
+
+    with pytest.raises(HarnessError) as raised:
+        prepare_profile(
+            replicates=_profile_replicates(tmp_path),
+            source_commit="a" * 40,
+            reasoning_effort="max",
+            usage_snapshot_path=_usage_snapshot(tmp_path / "usage.json"),
+            smoke_result_sha256="b" * 64,
+            canary_summary_path=canary_summary,
+            expected_canary_summary_sha256=sha256_bytes(canary_summary.read_bytes()),
+            output_path=tmp_path / "profile.json",
+        )
+
+    assert raised.value.code == "INVALID_CANARY_SUMMARY"
+
+
+@pytest.mark.parametrize(
+    ("atomic_version", "transport_version"),
+    [
+        ("local-ranking-atomic-preparation-v2.4", None),
+        (None, "local-ranking-atomic-opencode-go-preparation-v3.0"),
+    ],
+)
+def test_profile_requires_current_orientation_manifests(
+    tmp_path: Path, atomic_version: str | None, transport_version: str | None
+) -> None:
+    replicates = _profile_replicates(tmp_path)
+    first = replicates[0]
+    atomic_path = first["orientation_1_atomic"]
+    assert isinstance(atomic_path, Path)
+    if atomic_version is not None:
+        _relabeled_atomic_manifest(
+            atomic_path.parent.parent, atomic_path, atomic_version
+        )
+    if transport_version is not None:
+        preparation_root = first["orientation_1_preparation"]
+        assert isinstance(preparation_root, Path)
+        transport_path = preparation_root / "manifest.json"
+        transport = json.loads(transport_path.read_bytes())
+        del transport["response_submission"]
+        transport["schema_version"] = transport_version
+        transport_path.write_bytes(canonical_json_bytes(transport))
+    canary_summary = _canary_summary(tmp_path / "canary-summary.json")
+
+    with pytest.raises(HarnessError) as raised:
+        prepare_profile(
+            replicates=replicates,
+            source_commit="a" * 40,
+            reasoning_effort="max",
+            usage_snapshot_path=_usage_snapshot(tmp_path / "usage.json"),
+            smoke_result_sha256="b" * 64,
+            canary_summary_path=canary_summary,
+            expected_canary_summary_sha256=sha256_bytes(canary_summary.read_bytes()),
+            output_path=tmp_path / "profile.json",
+        )
+
+    assert raised.value.code == "PROFILE_BINDING_MISMATCH"
+
+
+@pytest.mark.parametrize(
+    ("tamper", "expected_code"),
+    [
+        ("atomic", "INVALID_ATOMIC_MANIFEST"),
+        ("transport", "INVALID_PREPARATION"),
+    ],
+)
+def test_profile_rejects_divergent_response_submission(
+    tmp_path: Path, tamper: str, expected_code: str
+) -> None:
+    replicates = _profile_replicates(tmp_path)
+    first = replicates[0]
+    if tamper == "atomic":
+        manifest_path = first["orientation_1_atomic"]
+    else:
+        preparation_root = first["orientation_1_preparation"]
+        assert isinstance(preparation_root, Path)
+        manifest_path = preparation_root / "manifest.json"
+    assert isinstance(manifest_path, Path)
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["response_submission"] = "free_content_json"
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    canary_summary = _canary_summary(tmp_path / "canary-summary.json")
+
+    with pytest.raises(HarnessError) as raised:
+        prepare_profile(
+            replicates=replicates,
+            source_commit="a" * 40,
+            reasoning_effort="max",
+            usage_snapshot_path=_usage_snapshot(tmp_path / "usage.json"),
+            smoke_result_sha256="b" * 64,
+            canary_summary_path=canary_summary,
+            expected_canary_summary_sha256=sha256_bytes(canary_summary.read_bytes()),
+            output_path=tmp_path / "profile.json",
+        )
+
+    assert raised.value.code == expected_code
 
 
 def test_unknown_handle_is_machine_detectable_invalid(tmp_path: Path) -> None:
@@ -1115,7 +1536,8 @@ def test_prepare_atomic_prompt_requires_exactly_one_tool_call(tmp_path: Path) ->
 
     first = manifest["calls"][0]
     prompt = (prepared / first["prompt_path"]).read_text()
-    assert manifest["schema_version"] == "local-ranking-atomic-preparation-v2.4"
+    assert manifest["schema_version"] == "local-ranking-atomic-preparation-v2.5"
+    assert manifest["response_submission"] == "forced_submit_judgment_tool"
     assert "No external or retrieval tools are available" in prompt
     assert "submit_judgment" in prompt
     assert "Call submit_judgment exactly once" in prompt
