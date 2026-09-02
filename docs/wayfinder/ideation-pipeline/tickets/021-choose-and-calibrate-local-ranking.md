@@ -49,6 +49,7 @@ blocked_by:
 - [Local-ranking atomic formal-readiness review v2.3](../../../prototypes/local-ranking-atomic-tool-output-formal-readiness-review-v2.3.md)
 - [Local-ranking atomic formal-readiness 补修合同 v2.3.1](../../../prototypes/local-ranking-atomic-tool-output-formal-readiness-amendment-v2.3.1.md)
 - [Local-ranking atomic formal evidence ledger 补充合同 v2.3.2](../../../prototypes/local-ranking-atomic-formal-evidence-ledger-amendment-v2.3.2.md)
+- [Local-ranking atomic Pro/max calibration result v2.3](../../../prototypes/local-ranking-atomic-pro-max-calibration-result-v2.3.md)
 
 ## Question
 
@@ -353,7 +354,7 @@ attempt-1 被 deterministic validator 判 invalid（`PROVIDER_RESPONSE_FAILED`�
 stable_directional_count=13（非全 tie 退化），decision=`stop_profile_failed`——合同明示的合法终止态；unstable 为
 lr-dev-02/04/05-focused 与 lr-hol-06-focused；pair SHA `5e26f1e7…7dfd`。跨 orientation 48/48 response ID 唯一性由
 pair fail-closed 校验通过。r1 合计 48 logical / 49 physical（上限 48/192），receipt tokens 合计 339,148
-（prompt 151,664 / completion 187,484 / reasoning 163,195；receipt schema 无 cost 字段，如实记 null）；usage 从
+（prompt 151,664 / completion 187,484 / reasoning 163,195；48 份成功 receipt 的 `identity.cost` 均为字符串 `"0"`）；usage 从
 rolling/weekly/monthly `7/36/42%` 升至 `12/42/45%`（after SHA `adc7d730…7356`）。execution summary（canonical，SHA
 `c31c3285…a607`）含 per-attempt validity、全部 hashes、failures 与 deviations=[]，不含任何 endpoint/secret 字符串。
 Credential-free output archive（SHA `00ecfc5d…9f44`，3,291,324 bytes，1,183 文件）已传 Windows 新子目录、SHA 核对后
@@ -363,3 +364,14 @@ evidence 一致的 completed run-result，fresh scratch 重生成 pair 逐字节
 （directional 13 vs 14），FAIL 同样归因于 atomic semantic stability 而非 transport/contract——两次 fresh run 的
 49 个 physical calls 中只有 1 次确定性重试，transport 完整性零失败。Ticket 继续 open；r1 证据交回 Codex 独立复核，
 r2/r3/fallback/new canary 均未授权。
+
+Codex 随后未使用 subagent、未读取 credential、未发新模型请求，完成 formal 003 r1 独立复核：全部关键 hashes 重算一致，
+49 份 attempts/execution results 聚合为 48 valid / 1 deterministic invalid / 0 exhausted，48/48 valid response IDs 全唯一；
+用 frozen bundle、本地 wheels 与 Python 3.13.7 在无 credential 条件下 re-enter 两路 runner 均返回 `pass`，fresh scratch
+重建 pair 与正式文件 byte-identical；Windows 保留 archive/verifier 的远端 SHA 与 Mac 一致，verifier 仍为 offline、
+credentials_accessed=false、两路与 pair PASS。因此接受 `stop_profile_failed` 为真实 semantic failure。复核发现一项不影响
+结果的 derived-summary 错误：`live-r1-execution-summary.json` 把 `receipt_cost_totals` 写成 null，但 48 份 hash-bound success
+receipts 均显式含 `identity.cost="0"`；为不事后覆盖已归档 identity，保留原 summary 并由 result v2.3 显式纠正，以 raw
+receipts 为准。DeepSeek Pro/high 与 Pro/max 均在 r1 得到 20/24，当前 atomic contract 下的 DeepSeek ladder 已耗尽；不得
+继续 r2/r3、重复 r1 或降低门槛。推荐停止继续构造新 evaluator ladder，以 BM25 作为 v1 parsimony default，同时明确这不是
+BM25 科学胜出；该产品选择及 ticket 关闭待 Robert 明确批准。
