@@ -329,3 +329,13 @@ Live execution 尚不能直接授权：current runner 只从本机 environment �
 requests，Windows 只接收无 secret outputs 做离线 replay/verification；远端模型推理不使用 Windows 算力，因此这比向 Windows
 分发 credential 更直接，也不改变 prompt、request bytes、model、sample、retry 或 semantic gates。该拓扑调整属于合同变化，
 须 Robert 明确批准后另写窄 amendment；在此之前 r1 仍未授权。
+
+Robert 已批准上述 topology amendment 与 r1 live execution。Codex 先更新 repository topology：Windows 继续承担 local-scorer
+bulk compute 与 credential-free offline replay，Mac 承担 remote-provider authenticated calls；Windows 操作统一通过
+`windows-executor` skill，API credential 留在 Mac。随后冻结
+`local-ranking-atomic-formal-003-live-execution-amendment-v1.0.md`（commit `25beeb2`，SHA-256
+`566e10b831e8dee1804885b853f86e770124147b48d8cecb6f64de5fd5827789`）。Preparation archive/profile/input hashes 全部不变，
+无需重做 prepare 或 canary。授权只覆盖 fresh live usage preflight、`r1/o1` 24 logical / 96 physical ceiling、o1 完整后的
+`r1/o2` 同额 ceiling、r1 pair reduction、usage-after 与 Windows offline replay；总上限 48 logical / 192 physical，
+concurrency 4。任一 orientation incomplete/ambiguous/evidence failure 都停止；r1 结果无论 PASS/FAIL 都交回 Codex，r2/r3 与
+fallback 仍未授权。具体执行按 handoff 交给 Kimi，live calls 只能由 frozen `atomic_runner` 发出。
