@@ -354,7 +354,11 @@ declaration); it uses receipt v3.0, execution result v2.1, and attempt v2.5. `ex
 receipt, execution result, and attempt to match the manifest's family; cross-family evidence fails
 closed.
 
-For a formal orientation, use the bounded runner instead of issuing calls manually. It executes
+For a formal orientation, use the bounded runner instead of issuing calls manually. The runner
+first requires both manifests to be current-family — atomic preparation v2.5 and transport
+preparation v3.1, each declaring `response_submission: forced_submit_judgment_tool` — and refuses
+legacy or canary manifests before reading any credential, creating output, or sending a request;
+it is not a resume entry point for spent runs. It executes
 at most four calls concurrently, records HTTP/SSE/non-JSON failures as spent physical attempts,
 retries only invalid calls up to three times with identical request bytes, refuses to resend an ambiguous
 partial attempt after interruption, and replays a completed run without new API calls:
@@ -416,8 +420,14 @@ preparation (v3.0 or v3.1) must rebuild to the recorded request bytes; the prese
 `response.json`, the v3.0 receipt, and the execution result must all be present (a response
 without its receipt or result fails as `INCOMPLETE_SMOKE_EVIDENCE`); and the closed-schema receipt
 must bind the preparation manifest, request hash, call binding, tool name plus tool-schema hash,
-provider identity, finish reason, usage, cost, and stream diagnostics, with every listed evidence
-file hash-checked against the bytes on disk. The closed-schema execution result must in turn bind
+provider identity, finish reason, usage, cost, and stream diagnostics. The receipt must declare
+exactly the seven raw and derived evidence files (`stream-body.sse`, `chunks.jsonl`,
+`response.json`, `response-headers.json`, `http-status.txt`, `started-at.txt`, `finished-at.txt`)
+and the result exactly those plus `receipt.json`, each hash-checked against the bytes on disk;
+`usage` must be a valid non-empty object and `identity.cost` a finite non-negative decimal string,
+so the call ledger is provably complete. The validator then replays `stream-body.sse` through the
+frozen tool-stream extractor and requires the rebuilt arguments, chunks, identity, diagnostics,
+and usage to match the stored evidence exactly. The closed-schema execution result must in turn bind
 the receipt and the response. The probe is valid only when, on top of that chain, the executed
 call's canonical `response.json` equals the exact prescribed `submit_judgment` arguments for that
 smoke call. The bounded v2.3 canary then retries
@@ -447,8 +457,9 @@ python -m prototypes.local_ranking.atomic_profile prepare \
   --output <new-profile-manifest.json>
 ```
 
-The v2.2 profile manifest fails closed unless the canary summary matches the frozen SHA-256 of
-the authorized v2.3 canary run and records `spent_transport_only` evidence, a passing synthetic
+The v2.2 profile manifest fails closed unless the canary summary matches the SHA-256 frozen in
+code for the authorized v2.3 canary run (no caller-side override exists) and records
+`spent_transport_only` evidence, a passing synthetic
 probe, a first-valid stop on canary attempt 1, the approved model alias, and the canary
 implementation commit — and unless all six orientations use current-family manifests (atomic
 v2.5 plus transport v3.1, both declaring `response_submission`) that bind one Pro/high evaluator,

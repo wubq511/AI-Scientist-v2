@@ -494,6 +494,126 @@ def test_validate_smoke_call_rejects_forged_receipt(tmp_path: Path) -> None:
     assert raised.value.code == "HASH_MISMATCH"
 
 
+def _executed_smoke(tmp_path: Path) -> tuple[Path, Path]:
+    preparation_root = tmp_path / "input"
+    prepare_smoke(output_root=preparation_root)
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_stream(
+                response_id="response-001",
+                arguments=_smoke_probe_arguments("smoke-001"),
+            ),
+        )
+
+    execution_root = tmp_path / "output"
+    execute_call(
+        preparation_root=preparation_root,
+        call_sequence=1,
+        output_root=execution_root,
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+    return preparation_root, execution_root
+
+
+def _rewrite_receipt(execution_root: Path, receipt: dict) -> None:
+    (execution_root / "receipt.json").write_bytes(canonical_json_bytes(receipt))
+
+
+def _rewrite_result(execution_root: Path, result: dict) -> None:
+    receipt_bytes = (execution_root / "receipt.json").read_bytes()
+    result["receipt_sha256"] = sha256_bytes(receipt_bytes)
+    result["files"]["receipt.json"] = sha256_bytes(receipt_bytes)
+    (execution_root / "execution-result.json").write_bytes(canonical_json_bytes(result))
+
+
+def test_validate_smoke_call_rejects_shrunk_receipt_file_map(tmp_path: Path) -> None:
+    preparation_root, execution_root = _executed_smoke(tmp_path)
+    receipt = json.loads((execution_root / "receipt.json").read_bytes())
+    result = json.loads((execution_root / "execution-result.json").read_bytes())
+    for name in ("chunks.jsonl", "stream-body.sse"):
+        (execution_root / name).unlink()
+        del receipt["files"][name]
+        del result["files"][name]
+    _rewrite_receipt(execution_root, receipt)
+    _rewrite_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=execution_root,
+        )
+
+    assert raised.value.code == "INVALID_SMOKE_EVIDENCE"
+
+
+def test_validate_smoke_call_rejects_shrunk_result_file_map(tmp_path: Path) -> None:
+    preparation_root, execution_root = _executed_smoke(tmp_path)
+    result = json.loads((execution_root / "execution-result.json").read_bytes())
+    del result["files"]["chunks.jsonl"]
+    _rewrite_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=execution_root,
+        )
+
+    assert raised.value.code == "INVALID_SMOKE_EVIDENCE"
+
+
+def test_validate_smoke_call_rejects_stream_divergent_chunks(tmp_path: Path) -> None:
+    preparation_root, execution_root = _executed_smoke(tmp_path)
+    chunks_path = execution_root / "chunks.jsonl"
+    tampered = b"".join(chunks_path.read_bytes().splitlines(keepends=True)[:-1])
+    assert tampered != chunks_path.read_bytes()
+    chunks_path.write_bytes(tampered)
+    receipt = json.loads((execution_root / "receipt.json").read_bytes())
+    result = json.loads((execution_root / "execution-result.json").read_bytes())
+    receipt["files"]["chunks.jsonl"] = sha256_bytes(tampered)
+    result["files"]["chunks.jsonl"] = sha256_bytes(tampered)
+    _rewrite_receipt(execution_root, receipt)
+    _rewrite_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=execution_root,
+        )
+
+    assert raised.value.code == "HASH_MISMATCH"
+
+
+@pytest.mark.parametrize("field", ["usage", "identity.cost"])
+def test_validate_smoke_call_rejects_missing_usage_or_cost(
+    tmp_path: Path, field: str
+) -> None:
+    preparation_root, execution_root = _executed_smoke(tmp_path)
+    receipt = json.loads((execution_root / "receipt.json").read_bytes())
+    if field == "usage":
+        receipt["usage"] = None
+    else:
+        receipt["identity"]["cost"] = None
+    _rewrite_receipt(execution_root, receipt)
+    result = json.loads((execution_root / "execution-result.json").read_bytes())
+    _rewrite_result(execution_root, result)
+
+    with pytest.raises(HarnessError) as raised:
+        validate_smoke_call(
+            preparation_root=preparation_root,
+            call_sequence=1,
+            execution_root=execution_root,
+        )
+
+    assert raised.value.code == "INVALID_SMOKE_EVIDENCE"
+
+
 def test_execute_call_writes_failed_result_for_escaped_lone_surrogate(
     tmp_path: Path,
 ) -> None:

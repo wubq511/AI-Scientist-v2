@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +32,7 @@ from .canonical import (
 )
 from .errors import HarnessError, fail
 from .opencode_go_chat import SAFE_RESPONSE_HEADERS, _api_key, _utc_now
-from .opencode_go_stream import _extract_stream_tool_response, _validated_cost
+from .opencode_go_stream import _extract_stream_tool_response
 
 PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v3.1"
 CANARY_PREPARATION_SCHEMA_VERSIONS = {
@@ -42,6 +43,18 @@ LEGACY_PREPARATION_SCHEMA_VERSIONS = {
 }
 EXECUTION_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-execution-v2.1"
 SMOKE_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-smoke-v2.0"
+SMOKE_RECEIPT_EVIDENCE_FILES = frozenset(
+    {
+        "chunks.jsonl",
+        "finished-at.txt",
+        "http-status.txt",
+        "response-headers.json",
+        "response.json",
+        "started-at.txt",
+        "stream-body.sse",
+    }
+)
+SMOKE_RESULT_EVIDENCE_FILES = SMOKE_RECEIPT_EVIDENCE_FILES | {"receipt.json"}
 ATOMIC_MAX_TOKENS = 16_384
 MAX_CONCURRENCY = 4
 SMOKE_CALL_COUNT = 4
@@ -801,9 +814,20 @@ def validate_smoke_call(
         or created_last < created_first
     ):
         fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt provider identity is invalid")
-    _validated_cost(identity.get("cost"))
-    if receipt.get("usage") is not None:
-        _validated_smoke_usage(receipt["usage"])
+    cost = identity.get("cost")
+    try:
+        parsed_cost = Decimal(cost) if isinstance(cost, str) else Decimal("NaN")
+    except InvalidOperation:
+        parsed_cost = Decimal("NaN")
+    if not parsed_cost.is_finite() or parsed_cost < 0:
+        fail(
+            "INVALID_SMOKE_EVIDENCE",
+            "Smoke receipt cost must be a finite non-negative decimal string",
+        )
+    usage = receipt.get("usage")
+    if usage is None:
+        fail("INVALID_SMOKE_EVIDENCE", "Smoke receipt usage is missing")
+    _validated_smoke_usage(usage)
     diagnostics = receipt["diagnostics"]
     if (
         not isinstance(diagnostics, dict)
@@ -836,6 +860,11 @@ def validate_smoke_call(
     _smoke_evidence_files(
         execution_root=execution_root, files=receipt.get("files"), label="Smoke receipt"
     )
+    if set(receipt["files"]) != SMOKE_RECEIPT_EVIDENCE_FILES:
+        fail(
+            "INVALID_SMOKE_EVIDENCE",
+            "Smoke receipt must declare the exact raw and derived evidence set",
+        )
     if receipt["files"].get("response.json") != sha256_bytes(response_bytes):
         fail("HASH_MISMATCH", "Smoke receipt does not bind this response")
     if (
@@ -865,10 +894,48 @@ def validate_smoke_call(
         files=result.get("files"),
         label="Smoke execution result",
     )
+    if set(result["files"]) != SMOKE_RESULT_EVIDENCE_FILES:
+        fail(
+            "INVALID_SMOKE_EVIDENCE",
+            "Smoke execution result must declare the exact evidence set",
+        )
     if result["files"].get("receipt.json") != sha256_bytes(receipt_bytes) or result[
         "files"
     ].get("response.json") != sha256_bytes(response_bytes):
         fail("HASH_MISMATCH", "Smoke execution result does not bind this evidence")
+    request_path = resolve_repo_relative(
+        preparation_root, call["request_path"], label="prepared request path"
+    )
+    request = json.loads(request_path.read_bytes())
+    try:
+        (
+            rebuilt_response,
+            rebuilt_usage,
+            rebuilt_identity,
+            rebuilt_chunks,
+            rebuilt_diagnostics,
+        ) = _extract_stream_tool_response(
+            (execution_root / "stream-body.sse").read_bytes(),
+            expected_model=request["model"],
+            tool_name=SUBMIT_JUDGMENT_TOOL_NAME,
+        )
+    except HarnessError as exc:
+        fail(
+            "INVALID_SMOKE_EVIDENCE",
+            "Smoke raw stream does not replay as a valid tool response",
+            error=exc.as_dict(),
+        )
+    if canonical_json_bytes(rebuilt_response) != response_bytes:
+        fail("HASH_MISMATCH", "Smoke response does not match the raw stream")
+    chunks_bytes = b"".join(canonical_json_bytes(chunk) for chunk in rebuilt_chunks)
+    if chunks_bytes != (execution_root / "chunks.jsonl").read_bytes():
+        fail("HASH_MISMATCH", "Smoke chunks do not match the raw stream")
+    if (
+        rebuilt_identity != receipt["identity"]
+        or rebuilt_diagnostics != receipt["diagnostics"]
+        or rebuilt_usage != usage
+    ):
+        fail("HASH_MISMATCH", "Smoke receipt does not match the raw stream")
     if response != _smoke_probe_arguments(call["call_id"]):
         fail("INVALID_SMOKE_RESPONSE", "Transport smoke response schema is invalid")
     return {

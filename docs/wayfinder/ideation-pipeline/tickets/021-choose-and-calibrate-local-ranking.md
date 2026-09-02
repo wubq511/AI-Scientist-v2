@@ -229,3 +229,19 @@ SSE 重建 arguments/chunks/identity；`prepare_profile` 的 Python API 允许 c
 `c4bbb2e` 尚未批准进入 fresh 003。下一步只执行
 `local-ranking-atomic-tool-output-formal-readiness-amendment-v2.3.1.md` 的无 live-call 最小补修；不改变任何模型质量门、
 tool/prompt/request bytes 或版本，不连接 Windows、不读取 credential、不发送 model call。
+
+v2.3.1 补修已由 Kimi Code/Kimi K3 完成（commit `fix: close atomic formal readiness bypasses`），全程无 live call、未动
+frozen artifacts。`run_orientation` 在读取 credential、创建输出或提交 request 之前强制双 current-family 门（atomic
+v2.5 + transport v3.1 且两者 `response_submission=forced_submit_judgment_tool`），spent v2.4/legacy v2.2 重包装与
+canary v3.0 transport 均在任何 HTTP 与输出前被拒；legacy/canary 的只读 diagnostic 入口不变。`validate-smoke-call`
+升级为强证据验证：receipt `files` 必须恰好是七个 raw/derived 文件、result `files` 必须恰好再加 `receipt.json`，
+缩减 file map 以 `INVALID_SMOKE_EVIDENCE` 拒绝；成功 smoke 的 `usage` 必须为合法非空 object、`identity.cost` 必须为
+有限非负 decimal string（只查账本完整性，不设数值门槛）；并从 `stream-body.sse` 用冻结的 tool-stream extractor 重建
+arguments/chunks/identity/diagnostics/usage，与留存证据逐字节/逐字段比对，不一致以 `HASH_MISMATCH` 拒绝。
+`prepare_profile` 删除 `expected_canary_summary_sha256` 参数，production path 只比较模块内冻结常量；测试改用
+monkeypatch 构造 synthetic fixture。验证：Python 3.13.7 locked venv 与 ambient 3.14.6 各 196 tests passed（新增 9 个
+负例全部先红后绿）；targeted Ruff（5 个改动 .py 文件）zero-error，full Ruff 恰剩 7 个 pre-existing baseline；
+Black/compileall/diff-check 绿。真实 replay：canary smoke-001 通过增强 validator，`call-021` attempt-1 replay SHA-256
+`5d620f2807f584071d444dc842811f2ea266f43e1811c44d926814e73ff75252` 精确一致，v2.2 r1/o1 25 个真实 attempt 全部可读；
+proof 5 三个 hash 原样保留。Ticket 继续 open；fresh `pro-max-calibration-003-tool-output` 仍需 Codex 先冻结
+profile/Windows bundle/usage snapshot/执行顺序/r1 budget，再向 Robert 单独申请授权。

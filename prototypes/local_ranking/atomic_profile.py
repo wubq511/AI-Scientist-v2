@@ -224,14 +224,11 @@ def prepare_profile(
     smoke_result_sha256: str,
     canary_summary_path: Path,
     output_path: Path,
-    expected_canary_summary_sha256: str = TRANSPORT_CANARY_SUMMARY_SHA256,
 ) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{40}", source_commit):
         fail("INVALID_SOURCE_COMMIT", "Profile source commit must be a full SHA")
     if not re.fullmatch(r"[0-9a-f]{64}", smoke_result_sha256):
         fail("INVALID_SMOKE_BINDING", "Smoke result SHA-256 is invalid")
-    if not re.fullmatch(r"[0-9a-f]{64}", expected_canary_summary_sha256):
-        fail("INVALID_CANARY_BINDING", "Expected canary summary SHA-256 is invalid")
     if reasoning_effort not in {"high", "max"}:
         fail("PROFILE_MISMATCH", "Profile reasoning effort must be high or max")
     if len(replicates) != EXPECTED_REPLICATES:
@@ -241,7 +238,7 @@ def prepare_profile(
         canary_summary_path, reasoning_effort=reasoning_effort
     )
     canary_summary_sha256 = sha256_bytes(canary_summary_bytes)
-    if canary_summary_sha256 != expected_canary_summary_sha256:
+    if canary_summary_sha256 != TRANSPORT_CANARY_SUMMARY_SHA256:
         fail(
             "CANARY_SUMMARY_MISMATCH",
             "Transport canary summary bytes differ from the frozen hash",

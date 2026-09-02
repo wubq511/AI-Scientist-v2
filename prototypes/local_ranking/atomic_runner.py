@@ -10,6 +10,8 @@ from typing import Any
 import httpx
 
 from .atomic_judge import (
+    ATOMIC_PREPARATION_SCHEMA_VERSION,
+    ATOMIC_RESPONSE_SUBMISSION,
     MAX_PHYSICAL_ATTEMPTS,
     _load_manifest,
     _validate_attempt,
@@ -17,7 +19,11 @@ from .atomic_judge import (
     record_failed_attempt,
     resolve_orientation,
 )
-from .atomic_opencode_go import _validate_preparation, execute_call
+from .atomic_opencode_go import (
+    PREPARATION_SCHEMA_VERSION,
+    _validate_preparation,
+    execute_call,
+)
 from .canonical import (
     canonical_json_bytes,
     sha256_bytes,
@@ -260,6 +266,22 @@ def run_orientation(
         preparation_root
     )
     atomic_manifest_bytes = atomic_manifest_path.read_bytes()
+    if (
+        manifest["schema_version"] != ATOMIC_PREPARATION_SCHEMA_VERSION
+        or manifest.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
+    ):
+        fail(
+            "INVALID_ATOMIC_MANIFEST",
+            "Orientation runner requires the current atomic preparation",
+        )
+    if (
+        preparation["schema_version"] != PREPARATION_SCHEMA_VERSION
+        or preparation.get("response_submission") != ATOMIC_RESPONSE_SUBMISSION
+    ):
+        fail(
+            "INVALID_PREPARATION",
+            "Orientation runner requires the current atomic transport preparation",
+        )
     if (
         preparation["kind"] != "atomic"
         or preparation["atomic_manifest_sha256"] != sha256_bytes(atomic_manifest_bytes)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from prototypes.local_ranking import atomic_profile
 from prototypes.local_ranking.atomic_calibration import aggregate
 from prototypes.local_ranking.atomic_judge import (
     ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION,
@@ -1116,6 +1118,71 @@ def test_orientation_runner_fails_closed_on_ambiguous_partial_attempt(
     assert raised.value.code == "AMBIGUOUS_PARTIAL_ATTEMPT"
 
 
+@pytest.mark.parametrize(
+    ("side", "schema_version", "expected_code"),
+    [
+        (
+            "atomic",
+            "local-ranking-atomic-preparation-v2.2",
+            "INVALID_ATOMIC_MANIFEST",
+        ),
+        (
+            "atomic",
+            "local-ranking-atomic-preparation-v2.4",
+            "INVALID_ATOMIC_MANIFEST",
+        ),
+        (
+            "transport",
+            "local-ranking-atomic-opencode-go-preparation-v3.0",
+            "INVALID_PREPARATION",
+        ),
+    ],
+)
+def test_orientation_runner_requires_current_preparation_families(
+    tmp_path: Path, side: str, schema_version: str, expected_code: str
+) -> None:
+    atomic_root = tmp_path / "atomic"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=atomic_root,
+    )
+    manifest_path = atomic_root / "private" / "manifest.json"
+    preparation_root = tmp_path / "transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=manifest_path,
+        output_root=preparation_root,
+        max_concurrency=4,
+    )
+    transport_path = preparation_root / "manifest.json"
+    transport = json.loads(transport_path.read_bytes())
+    if side == "atomic":
+        _relabeled_atomic_manifest(atomic_root, manifest_path, schema_version)
+        transport["atomic_manifest_sha256"] = sha256_bytes(manifest_path.read_bytes())
+    else:
+        del transport["response_submission"]
+        transport["schema_version"] = schema_version
+    transport_path.write_bytes(canonical_json_bytes(transport))
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError(
+            "runner must reject non-current families before any request"
+        )
+
+    run_root = tmp_path / "run"
+    with pytest.raises(HarnessError) as raised:
+        run_orientation(
+            atomic_manifest_path=manifest_path,
+            preparation_root=preparation_root,
+            output_root=run_root,
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert raised.value.code == expected_code
+    assert not run_root.exists()
+
+
 CANARY_IMPLEMENTATION_COMMIT = "fa2409ff1d955cb546aec27f08de7ae62412e130"
 
 
@@ -1236,11 +1303,16 @@ def _usage_snapshot(path: Path) -> Path:
     )
 
 
-def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> None:
+def test_profile_manifest_binds_six_orientations_and_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     replicates = _profile_replicates(tmp_path)
     usage_snapshot = _usage_snapshot(tmp_path / "usage.json")
     canary_summary = _canary_summary(tmp_path / "canary-summary.json")
     canary_summary_sha256 = sha256_bytes(canary_summary.read_bytes())
+    monkeypatch.setattr(
+        atomic_profile, "TRANSPORT_CANARY_SUMMARY_SHA256", canary_summary_sha256
+    )
 
     profile = prepare_profile(
         replicates=replicates,
@@ -1249,7 +1321,6 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
         usage_snapshot_path=usage_snapshot,
         smoke_result_sha256="b" * 64,
         canary_summary_path=canary_summary,
-        expected_canary_summary_sha256=canary_summary_sha256,
         output_path=tmp_path / "profile.json",
     )
 
@@ -1288,6 +1359,12 @@ def test_profile_requires_the_frozen_canary_summary_hash(tmp_path: Path) -> None
     )
 
 
+def test_prepare_profile_has_no_canary_hash_override_parameter() -> None:
+    assert "expected_canary_summary_sha256" not in (
+        inspect.signature(prepare_profile).parameters
+    )
+
+
 @pytest.mark.parametrize(
     "override",
     [
@@ -1309,9 +1386,14 @@ def test_profile_requires_the_frozen_canary_summary_hash(tmp_path: Path) -> None
     ],
 )
 def test_profile_rejects_incomplete_or_failed_canary_summary(
-    tmp_path: Path, override: dict
+    tmp_path: Path, override: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     canary_summary = _canary_summary(tmp_path / "canary-summary.json", **override)
+    monkeypatch.setattr(
+        atomic_profile,
+        "TRANSPORT_CANARY_SUMMARY_SHA256",
+        sha256_bytes(canary_summary.read_bytes()),
+    )
 
     with pytest.raises(HarnessError) as raised:
         prepare_profile(
@@ -1321,7 +1403,6 @@ def test_profile_rejects_incomplete_or_failed_canary_summary(
             usage_snapshot_path=_usage_snapshot(tmp_path / "usage.json"),
             smoke_result_sha256="b" * 64,
             canary_summary_path=canary_summary,
-            expected_canary_summary_sha256=sha256_bytes(canary_summary.read_bytes()),
             output_path=tmp_path / "profile.json",
         )
 
@@ -1336,7 +1417,10 @@ def test_profile_rejects_incomplete_or_failed_canary_summary(
     ],
 )
 def test_profile_requires_current_orientation_manifests(
-    tmp_path: Path, atomic_version: str | None, transport_version: str | None
+    tmp_path: Path,
+    atomic_version: str | None,
+    transport_version: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     replicates = _profile_replicates(tmp_path)
     first = replicates[0]
@@ -1355,6 +1439,11 @@ def test_profile_requires_current_orientation_manifests(
         transport["schema_version"] = transport_version
         transport_path.write_bytes(canonical_json_bytes(transport))
     canary_summary = _canary_summary(tmp_path / "canary-summary.json")
+    monkeypatch.setattr(
+        atomic_profile,
+        "TRANSPORT_CANARY_SUMMARY_SHA256",
+        sha256_bytes(canary_summary.read_bytes()),
+    )
 
     with pytest.raises(HarnessError) as raised:
         prepare_profile(
@@ -1364,7 +1453,6 @@ def test_profile_requires_current_orientation_manifests(
             usage_snapshot_path=_usage_snapshot(tmp_path / "usage.json"),
             smoke_result_sha256="b" * 64,
             canary_summary_path=canary_summary,
-            expected_canary_summary_sha256=sha256_bytes(canary_summary.read_bytes()),
             output_path=tmp_path / "profile.json",
         )
 
@@ -1379,7 +1467,7 @@ def test_profile_requires_current_orientation_manifests(
     ],
 )
 def test_profile_rejects_divergent_response_submission(
-    tmp_path: Path, tamper: str, expected_code: str
+    tmp_path: Path, tamper: str, expected_code: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     replicates = _profile_replicates(tmp_path)
     first = replicates[0]
@@ -1394,6 +1482,11 @@ def test_profile_rejects_divergent_response_submission(
     manifest["response_submission"] = "free_content_json"
     manifest_path.write_bytes(canonical_json_bytes(manifest))
     canary_summary = _canary_summary(tmp_path / "canary-summary.json")
+    monkeypatch.setattr(
+        atomic_profile,
+        "TRANSPORT_CANARY_SUMMARY_SHA256",
+        sha256_bytes(canary_summary.read_bytes()),
+    )
 
     with pytest.raises(HarnessError) as raised:
         prepare_profile(
@@ -1403,7 +1496,6 @@ def test_profile_rejects_divergent_response_submission(
             usage_snapshot_path=_usage_snapshot(tmp_path / "usage.json"),
             smoke_result_sha256="b" * 64,
             canary_summary_path=canary_summary,
-            expected_canary_summary_sha256=sha256_bytes(canary_summary.read_bytes()),
             output_path=tmp_path / "profile.json",
         )
 
