@@ -45,6 +45,7 @@ blocked_by:
 - [Local-ranking atomic bounded-retry contract correction v2.2](../../../prototypes/local-ranking-atomic-bounded-retry-contract-v2.2.md)
 - [Local-ranking atomic Pro/max mechanical continuation protocol v2.2](../../../prototypes/local-ranking-atomic-pro-max-continuation-protocol-v2.2.md)
 - [Local-ranking atomic Pro/max mechanical continuation result v2.2](../../../prototypes/local-ranking-atomic-pro-max-continuation-result-v2.2.md)
+- [Local-ranking atomic tool-output contract v2.3](../../../prototypes/local-ranking-atomic-tool-output-contract-v2.3.md)
 
 ## Question
 
@@ -152,3 +153,13 @@ Continuation 已按 scope 完成：只新增 `call-021` attempts 3/4，其他 23
 canary：去掉 provider `response_format=json_object`，但保持同一 packet/rubric/model/max/本地六字段 validator，
 只测试 prompt-enforced JSON 是否能避免 finalization 退化；失败则停止 DeepSeek Pro/max，转向其他模型族。该
 fallback 尚未获本 result 授权，不能伪装成第 5 次普通 retry。
+
+Robert 随后批准 v2.3 tool-output redesign。Pro/max reasoning/max tokens/rubric/packet/retry/gates 保持不变；primary
+删除 `response_format=json_object`，强制唯一 `submit_judgment` function call，由 tool arguments 承载六字段，
+controller 保留但不解析 reasoning/content，并沿用本地 closed-schema/handle validator。实现完成后先做 1-call
+synthetic 与 spent `call-021` 最多 4-call canary；两者均不产生 vote，且 live calls 仍需实现复核后的单独授权。
+
+Primary canary 通过后必须从 clean commit fresh 运行 `pro-max-calibration-003-tool-output`，不得用新 `call-021`
+拼接旧 23 votes。若 tool canary 机器失败，唯一 fallback 是带两份左右镜像完整 examples 的 JSON-object 合同；
+fallback 再失败就停止该 provider/model evaluator profile，不继续 prompt-only grammar、修复 malformed JSON、解析
+reasoning 或提高 retry ceiling。当前只授权合同与实现交接，尚未授权 Kimi Code 发出任何模型调用。

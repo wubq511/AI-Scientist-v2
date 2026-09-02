@@ -51,16 +51,13 @@ Completions request 下，长 Pro/max reasoning 与 JSON-object finalization 存
 拒绝继续重复同一 request。再次提高 attempt ceiling 会掩盖系统性的 operational failure，并在没有新增设计信息的
 前提下继续消耗 tokens。
 
-## 4. 下一决策边界
+## 4. 已批准的下一合同
 
-最小可行的新假设是：**去掉 provider `response_format=json_object`，改用 prompt-enforced JSON fallback**：
+进一步对抗性审查后，拒绝把 prompt-enforced JSON 作为 primary：它仍把 serialization 可靠性押在自由文本遵循
+上。Robert 已批准 [Atomic tool-output contract v2.3](local-ranking-atomic-tool-output-contract-v2.3.md)：保留
+DeepSeek V4 Pro/max reasoning，以 forced `submit_judgment` tool arguments 提交六字段 judgment，再由现有本地
+validator 生成 canonical response。
 
-- atomic packet、rubric、model、effort、max tokens 与本地六字段 validator 保持不变；
-- 只改变 transport serialization mode；
-- 只在 primary mode 耗尽后触发 fallback，不能由 winner/mirror direction 触发；
-- first valid 仍然立即停止，永不解析 private reasoning；
-- 在批准更大范围的 continuation 前，先用已经 spent 的 `call-021` 做 canary；
-- 如果 canary 仍然 invalid，则停止 DeepSeek Pro/max，改换模型族，而不是继续增加 retry modes。
-
-这属于 adaptive harness engineering，不是 confirmatory semantic evidence。下一次模型调用前必须单独冻结合同；
-当前 v2.2 结果不授权该 fallback。
+只有 OpenCode Go tool canary 机器失败时，才允许 separately frozen、带左右镜像完整 examples 的 JSON-object
+fallback。本 result 的旧 23 votes、四次 invalid 与未来 canary 均不得进入 fresh calibration votes；实现代理也
+不得在没有单独调用授权时发送 canary。
