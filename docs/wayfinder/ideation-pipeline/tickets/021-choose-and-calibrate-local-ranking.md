@@ -48,6 +48,7 @@ blocked_by:
 - [Local-ranking atomic tool-output contract v2.3](../../../prototypes/local-ranking-atomic-tool-output-contract-v2.3.md)
 - [Local-ranking atomic formal-readiness review v2.3](../../../prototypes/local-ranking-atomic-tool-output-formal-readiness-review-v2.3.md)
 - [Local-ranking atomic formal-readiness 补修合同 v2.3.1](../../../prototypes/local-ranking-atomic-tool-output-formal-readiness-amendment-v2.3.1.md)
+- [Local-ranking atomic formal evidence ledger 补充合同 v2.3.2](../../../prototypes/local-ranking-atomic-formal-evidence-ledger-amendment-v2.3.2.md)
 
 ## Question
 
@@ -245,3 +246,12 @@ Black/compileall/diff-check 绿。真实 replay：canary smoke-001 通过增强 
 `5d620f2807f584071d444dc842811f2ea266f43e1811c44d926814e73ff75252` 精确一致，v2.2 r1/o1 25 个真实 attempt 全部可读；
 proof 5 三个 hash 原样保留。Ticket 继续 open；fresh `pro-max-calibration-003-tool-output` 仍需 Codex 先冻结
 profile/Windows bundle/usage snapshot/执行顺序/r1 budget，再向 Robert 单独申请授权。
+
+Codex 对 `562942f` 的 spec review 为 PASS，且独立复验了双解释器 196 tests、真实 canary/legacy replay 与 frozen hashes；
+但 standards review 后的 focused formal-ledger probes 发现，smoke metadata 只做 hash 不做语义校验，正式
+`record_attempt` / `record_failed_attempt` 仍可接受删减后的自洽 evidence 子集，且 receipt/result 中的 transport
+preparation/request hashes 没有绑定 runner 实际发送的 bytes。真实 `call-021` 被删到只有 response/receipt 后重算 hashes，
+当前 recorder 仍返回 `valid`，所以这不是 smoke-only 小修。下一步冻结执行
+`local-ranking-atomic-formal-evidence-ledger-amendment-v2.3.2.md`：只统一 current-tool evidence policy、绑定并保存每个
+attempt 的实际 manifest/prompt/request、按失败类型保留最小 raw evidence，并让 record/replay 同强度 fail closed；不新增
+任何模型质量、性能或人工准入门槛，不改变 frozen tool/prompt/request bytes，不重跑 canary，不发送 live call。
