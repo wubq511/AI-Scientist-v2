@@ -1,7 +1,7 @@
 ---
 title: Choose and calibrate local literature ranking
 type: prototype
-status: open
+status: closed
 assignee: Robert
 blocked_by:
   - 018-define-the-workshop-file-contract.md
@@ -375,3 +375,38 @@ receipts 均显式含 `identity.cost="0"`；为不事后覆盖已归档 identity
 receipts 为准。DeepSeek Pro/high 与 Pro/max 均在 r1 得到 20/24，当前 atomic contract 下的 DeepSeek ladder 已耗尽；不得
 继续 r2/r3、重复 r1 或降低门槛。推荐停止继续构造新 evaluator ladder，以 BM25 作为 v1 parsimony default，同时明确这不是
 BM25 科学胜出；该产品选择及 ticket 关闭待 Robert 明确批准。
+
+## Resolution
+
+Robert 于 2026-09-03 批准停止 evaluator ladder，并选择 **BM25 作为 v1 local literature ranking 的 parsimony default**。
+该决策解决的是“在当前证据下应交付哪个最小默认方案”，不是宣称 BM25 在一般意义上科学优于 E5。
+
+### Frozen v1 ranking contract
+
+- 输入边界：只在 runtime-preflight 已绑定的 3–36 篇 Approved Target Reference Corpus 内排序；v1 relevance 与 scorer 输入使用
+  title + validated `publisher_abstract`。不因本决策引入覆盖不均的全文、derived summary、target citation contexts、全局语料或
+  remote search。
+- query 与文本使用已验证的 `lexical_normalization_v1`；不做 stemming、外部 stopword、synonym 或 ontology expansion。
+- scorer 固定为 Robertson/Sparck Jones positive-IDF BM25：`k1=1.6`、`b=0.5`；query term frequency 不额外加权。
+- title 与 content segment 独立打分，`title_weight=1`；paper score 使用 `max(content_segment_scores) + title_score`，
+  `phrase_bonus=false`。
+- 输出预算固定为 `paper_cap=3`、每篇最多一个 source-faithful evidence segment、`total_segment_cap=3`；不得重复 paper，
+  分数同分按 canonical `paper_id` 确定性排序。
+- v1 不设置不可比 raw-score threshold。合法非空 corpus 必须返回有界结果；输入、统计量或 score 无效时 fail closed，不得静默
+  切换 E5、其他 ranker、旧 corpus 或联网 fallback。
+- Python 3.13 是 reference minor，必须保留 portable CPU 路径。Mac/Windows 已证明 canonical observable payload
+  byte-identical；Windows 继续用于 bulk evidence，Mac 用于 ordinary single-run 与 controller 工作。
+
+### Why BM25, and what the evidence does not prove
+
+Development 中 E5 是三套 qrels 的 best single scorer，但 formal holdout 没有得到稳定方向：judge-A 选择 BM25、judge-B 选择
+E5，consensus 的 E5 nDCG@5 优势只有 `0.008299`，未达到 promotion margin。为补充直接 evidence-set utility 而建立的 evaluator
+qualification 又得到 DeepSeek Pro/high=`20/24`、Pro/max=`20/24`，两者都低于预注册 `22/24` mirror-stability 门槛；因此不能用
+不合格裁判的 votes 事后打破 holdout 分歧。E5 没有承担完“更复杂方案必须证明稳定净收益”的 promotion burden。
+
+BM25 在全部 prototype 中满足 determinism、resource、failure 与跨平台 gates，同时不需要模型 weights、dense runtime 或额外
+约 836 MB 环境。故在科学 winner 未决时，选择它是可回滚、成本最低的工程默认值。E5、RRF 与其他候选均不作为 v1 runtime
+fallback；它们只保留为 rejected/diagnostic evidence。未来若要替换 BM25，必须以新的问题、fresh evidence 和
+Optimization Promotion Gate 重新证明收益，不能续跑 formal 003、复用 spent votes 或降低旧门槛。
+
+本 ticket 的比较、校准与选择职责至此完成。它不实现 production retriever/ranker，也未进入任何 downstream workflow。

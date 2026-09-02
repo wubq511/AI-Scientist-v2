@@ -57,7 +57,7 @@ Windows 核验的 evidence identity，本复核不覆盖原 summary/archive/veri
 receipts 为最终依据。`cost=0` 也不表示没有额度消耗：usage rolling/weekly/monthly 从 `7/36/42%` 上升到
 `12/42/45%`。
 
-## 4. Conclusion and recommended next decision
+## 4. Conclusion and approved next decision
 
 DeepSeek Pro/high 与 Pro/max 都未达到同一个预注册的最低 mirror-stability 门槛，因此 DeepSeek ladder 在当前 atomic
 contract 下已经耗尽。继续 r2/r3、重复 r1、提高 retry 次数或事后降低 `22/24` 都只会在看到结果后改变规则，不能形成
@@ -68,6 +68,6 @@ holdout 已经 `inconclusive`、E5 的 consensus 优势仅 `0.008299`，以及 E
 **停止继续为本 ticket 搭建新 evaluator ladder，采用 BM25 作为 v1 的 parsimony default；把“没有得到科学 winner”作为
 已知不确定性保留。**
 
-该产品选择与 ticket 关闭仍待 Robert 明确批准。若未来目标从“选择一个可交付的 v1 默认值”变为“证明哪一个 ranker
-科学更优”，应另开新的研究问题，使用新的 model family 或重做 ambiguity-aware rubric/data 设计；不能把它伪装成 formal
-003 的续跑。
+Robert 于 2026-09-03 批准该产品选择并关闭 ticket 021。若未来目标从“选择一个可交付的 v1 默认值”变为“证明哪一个
+ranker 科学更优”，应另开新的研究问题，使用新的 model family 或重做 ambiguity-aware rubric/data 设计；不能把它伪装成
+formal 003 的续跑。
