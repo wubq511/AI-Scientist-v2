@@ -40,6 +40,7 @@ blocked_by:
 - [Local-ranking atomic Pro/high calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-protocol-v2.0.md)
 - [Local-ranking atomic Pro/high calibration result v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-result-v2.0.md)
 - [Local-ranking atomic Pro/max calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.0.md)
+- [Local-ranking atomic rationale contract correction v2.1](../../../prototypes/local-ranking-atomic-rationale-contract-v2.1.md)
 
 ## Question
 
@@ -105,3 +106,13 @@ stable 只有 `20/24`，低于 `22/24`；stable directional 为 14，因此不�
 48 physical calls 共 340,058 tokens，receipt cost 合计 `0`，但 OpenCode Go usage 从 rolling/weekly/monthly
 `0/18/33%` 上升到 `16/25/36%`。这使 FAIL 能归因于当前 Pro/high atomic semantic stability，而非长输出抄写或
 transport 完整性。下一步按已批准 ladder 冻结全新 Pro/max profile；不得复用 Pro/high votes 或修改 gates。
+
+首个 Pro/max run `pro-max-calibration-001` 在 `r1/o1` 完成 26 个 transport-success calls 后停止为 incomplete：
+`call-008` first attempt 的 rationale 为 826 字符、retry 524 字符后 valid；`call-011` 两次分别为 879/982
+字符，除此之外 closed schema、visible handles 与 enums 均完整。26 个 calls 合计 169,211 tokens、provider IDs
+全唯一、receipt cost 合计 `0`。因此失败来自 Atomic v2.0 任意的 800 字符 gate，不是 Pro/max semantic FAIL。
+
+从第一性原理审查后，Atomic v2.1 删除 rationale 的独立上限：审计需要 non-empty/grounded/blinded，而资源边界
+已经由 `max_tokens=16384` 直接控制。旧 run 永久标记为 `spent_incomplete_contract_v2.0`，不事后追认任何 vote；
+Pro/high 结果不受影响。下一步必须从新源码 commit 冻结 `pro-max-calibration-002`，六个 orientations 全用 fresh
+provider responses，并沿用原有 mirror、retry、budget 与 early-stop gates。

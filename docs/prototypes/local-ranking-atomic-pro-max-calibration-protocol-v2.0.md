@@ -1,7 +1,11 @@
 # Local-ranking atomic Pro/max calibration protocol v2.0
 
 Protocol date: 2026-09-01（Asia/Shanghai）  
-Status: **Frozen before Pro/max model output**
+Status: **Spent and incomplete; superseded by the v2.1 rationale correction**
+
+2026-09-02 execution note: `r1/o1` stopped after `call-011` exceeded the old rationale-length gate on both attempts. This
+run remains immutable and contributes no calibration votes. See
+[Atomic rationale contract correction v2.1](local-ranking-atomic-rationale-contract-v2.1.md).
 
 ## 1. Escalation reason and fixed boundary
 

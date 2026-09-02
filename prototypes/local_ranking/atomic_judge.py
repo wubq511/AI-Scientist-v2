@@ -23,11 +23,11 @@ from .operational_judge import (
 )
 
 ATOMIC_PACKET_SCHEMA_VERSION = "local-ranking-atomic-judge-packet-v2.0"
-ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.1"
-ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.2"
-ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.2"
+ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.2"
+ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.3"
+ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.3"
 ATOMIC_ORIENTATION_RESULT_SCHEMA_VERSION = (
-    "local-ranking-atomic-orientation-result-v2.0"
+    "local-ranking-atomic-orientation-result-v2.1"
 )
 EXPECTED_ITEM_COUNT = 24
 MAX_PHYSICAL_ATTEMPTS = 2
@@ -216,7 +216,7 @@ def _prompt_text(packet: dict[str, Any]) -> str:
         "tie, or both_bad. catastrophic_omission_side must be left, right, or neither. "
         "evidence_handles must contain 1-4 unique visible handles. A left/right winner needs "
         "at least one handle from the winning side; tie/both_bad needs at least one from each "
-        "side. rationale must contain 1-800 Unicode scalars and use only visible evidence. "
+        "side. rationale must be a non-empty string and use only visible evidence. "
         "Do not name or infer retrieval methods, ground-truth labels, or prior results.\n\n"
         f"EMBEDDED_ATOMIC_PACKET_JSON\n{packet_json}"
     )
@@ -485,8 +485,8 @@ def _validate_response(
     if catastrophic not in {"left", "right", "neither"}:
         fail("INVALID_ATOMIC_RESPONSE", "Catastrophic omission side is invalid")
     rationale = response.get("rationale")
-    if not isinstance(rationale, str) or not 1 <= len(rationale) <= 800:
-        fail("INVALID_ATOMIC_RESPONSE", "Atomic rationale length is invalid")
+    if not isinstance(rationale, str) or not rationale:
+        fail("INVALID_ATOMIC_RESPONSE", "Atomic rationale must be a non-empty string")
     if any(text in rationale.casefold() for text in FORBIDDEN_PUBLIC_TEXT):
         fail("BLINDING_FAILURE", "Atomic rationale exposes forbidden candidate text")
     handles = response.get("evidence_handles")

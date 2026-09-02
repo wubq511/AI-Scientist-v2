@@ -694,6 +694,50 @@ def test_unknown_handle_is_machine_detectable_invalid(tmp_path: Path) -> None:
     assert outcome["validation"]["error"]["code"] == "INVALID_EVIDENCE_HANDLE"
 
 
+def test_rationale_has_no_redundant_semantic_length_ceiling(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    response = _valid_response()
+    response["rationale"] = "Grounded visible evidence. " * 100
+
+    outcome = record_attempt(
+        manifest_path=prepared / "private" / "manifest.json",
+        call_sequence=1,
+        attempt_number=1,
+        response_path=_write(tmp_path / "response.json", response),
+        output_root=tmp_path / "attempt",
+    )
+
+    assert len(response["rationale"]) > 800
+    assert outcome["status"] == "valid"
+
+
+def test_empty_rationale_remains_machine_detectable_invalid(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    response = _valid_response()
+    response["rationale"] = ""
+
+    outcome = record_attempt(
+        manifest_path=prepared / "private" / "manifest.json",
+        call_sequence=1,
+        attempt_number=1,
+        response_path=_write(tmp_path / "response.json", response),
+        output_root=tmp_path / "attempt",
+    )
+
+    assert outcome["status"] == "invalid"
+    assert outcome["validation"]["error"]["code"] == "INVALID_ATOMIC_RESPONSE"
+
+
 def test_resolved_atomic_traces_feed_calibration_end_to_end(tmp_path: Path) -> None:
     replicates = []
     for replicate_number in range(1, 4):
