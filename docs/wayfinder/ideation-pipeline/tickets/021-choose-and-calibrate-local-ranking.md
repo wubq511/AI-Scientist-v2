@@ -46,6 +46,8 @@ blocked_by:
 - [Local-ranking atomic Pro/max mechanical continuation protocol v2.2](../../../prototypes/local-ranking-atomic-pro-max-continuation-protocol-v2.2.md)
 - [Local-ranking atomic Pro/max mechanical continuation result v2.2](../../../prototypes/local-ranking-atomic-pro-max-continuation-result-v2.2.md)
 - [Local-ranking atomic tool-output contract v2.3](../../../prototypes/local-ranking-atomic-tool-output-contract-v2.3.md)
+- [Local-ranking atomic formal-readiness review v2.3](../../../prototypes/local-ranking-atomic-tool-output-formal-readiness-review-v2.3.md)
+- [Local-ranking atomic formal-readiness 补修合同 v2.3.1](../../../prototypes/local-ranking-atomic-tool-output-formal-readiness-amendment-v2.3.1.md)
 
 ## Question
 
@@ -218,3 +220,12 @@ profile manifest 升 v2.2，`prepare` 新增 `--canary-summary`，强制绑定 f
 attempt-1 重放 attempt SHA-256 `5d620f2807f584071d444dc842811f2ea266f43e1811c44d926814e73ff75252` 精确一致，真实
 smoke-001 通过增强 validator；proof 6 用真实 canary-summary 与默认冻结 hash 通过 prepare-profile。Ticket 继续 open；
 fresh `pro-max-calibration-003-tool-output` 仍需 Robert 单独授权。
+
+Codex 对 `c4bbb2e` 的独立 post-repair review 没有直接采信自报结果：双解释器 187 tests、targeted Ruff、真实 v2.2
+25-attempt replay、真实 canary `call-021` replay 与 frozen hashes 均复验通过；但新增 adversarial probes 发现 formal
+readiness 仍有四处缺口。`run_orientation` 没有强制 atomic manifest 为 current v2.5，spent v2.4 可被重新包装后进入
+执行；smoke validator 接受只含 response/receipt/result 的自洽子集，也接受 `usage=null` / `cost=null`，且没有从 raw
+SSE 重建 arguments/chunks/identity；`prepare_profile` 的 Python API 允许 caller 覆盖 frozen canary hash。因此
+`c4bbb2e` 尚未批准进入 fresh 003。下一步只执行
+`local-ranking-atomic-tool-output-formal-readiness-amendment-v2.3.1.md` 的无 live-call 最小补修；不改变任何模型质量门、
+tool/prompt/request bytes 或版本，不连接 Windows、不读取 credential、不发送 model call。
