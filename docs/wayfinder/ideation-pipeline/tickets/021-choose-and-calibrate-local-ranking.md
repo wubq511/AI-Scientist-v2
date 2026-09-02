@@ -41,6 +41,7 @@ blocked_by:
 - [Local-ranking atomic Pro/high calibration result v2.0](../../../prototypes/local-ranking-atomic-pro-high-calibration-result-v2.0.md)
 - [Local-ranking atomic Pro/max calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.0.md)
 - [Local-ranking atomic rationale contract correction v2.1](../../../prototypes/local-ranking-atomic-rationale-contract-v2.1.md)
+- [Local-ranking atomic Pro/max calibration protocol v2.1](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.1.md)
 
 ## Question
 
@@ -116,3 +117,8 @@ transport 完整性。下一步按已批准 ladder 冻结全新 Pro/max profile�
 已经由 `max_tokens=16384` 直接控制。旧 run 永久标记为 `spent_incomplete_contract_v2.0`，不事后追认任何 vote；
 Pro/high 结果不受影响。下一步必须从新源码 commit 冻结 `pro-max-calibration-002`，六个 orientations 全用 fresh
 provider responses，并沿用原有 mirror、retry、budget 与 early-stop gates。
+
+`pro-max-calibration-002` 已从修正 commit `d87e311` 冻结：profile manifest SHA-256 为
+`61dc61072b0358de75d1a01fb2a3151ffad73ea9ba88369aa050ce0122b61c5f`，六个 atomic/transport bindings 见
+v2.1 protocol。调用前 rolling/weekly/monthly usage 为 `0/28/38%`，均为 `ok`。现在按预注册顺序执行
+fresh r1/o1 → r1/o2，再由 pair gate 决定是否允许 r2。
