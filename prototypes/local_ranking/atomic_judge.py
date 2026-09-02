@@ -23,14 +23,16 @@ from .operational_judge import (
 )
 
 ATOMIC_PACKET_SCHEMA_VERSION = "local-ranking-atomic-judge-packet-v2.0"
-ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.2"
-ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.3"
-ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.3"
+ATOMIC_PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-preparation-v2.3"
+LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS = {"local-ranking-atomic-preparation-v2.2"}
+ATOMIC_ATTEMPT_SCHEMA_VERSION = "local-ranking-atomic-attempt-v2.4"
+LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS = {"local-ranking-atomic-attempt-v2.3"}
+ATOMIC_ORIENTATION_TRACE_SCHEMA_VERSION = "local-ranking-atomic-orientation-trace-v2.4"
 ATOMIC_ORIENTATION_RESULT_SCHEMA_VERSION = (
-    "local-ranking-atomic-orientation-result-v2.1"
+    "local-ranking-atomic-orientation-result-v2.2"
 )
 EXPECTED_ITEM_COUNT = 24
-MAX_PHYSICAL_ATTEMPTS = 2
+MAX_PHYSICAL_ATTEMPTS = 4
 ATOMIC_EXECUTION_RECEIPT_SCHEMA_VERSION = (
     "local-ranking-atomic-opencode-go-receipt-v2.0"
 )
@@ -335,7 +337,11 @@ def _load_manifest(
     )
     calls = manifest.get("calls")
     if (
-        manifest.get("schema_version") != ATOMIC_PREPARATION_SCHEMA_VERSION
+        manifest.get("schema_version")
+        not in {
+            ATOMIC_PREPARATION_SCHEMA_VERSION,
+            *LEGACY_ATOMIC_PREPARATION_SCHEMA_VERSIONS,
+        }
         or manifest.get("status") != "ready_for_atomic_execution"
         or manifest.get("call_count") != EXPECTED_ITEM_COUNT
         or not isinstance(calls, list)
@@ -801,7 +807,10 @@ def record_attempt(
         or not isinstance(attempt_number, int)
         or attempt_number not in range(1, MAX_PHYSICAL_ATTEMPTS + 1)
     ):
-        fail("ATTEMPT_LIMIT_EXCEEDED", "Physical attempt number must be 1 or 2")
+        fail(
+            "ATTEMPT_LIMIT_EXCEEDED",
+            f"Physical attempt number must be 1-{MAX_PHYSICAL_ATTEMPTS}",
+        )
     manifest, artifact_root, calls = _load_manifest(manifest_path)
     manifest_file_sha256 = sha256_bytes(manifest_path.read_bytes())
     call = calls.get(call_sequence)
@@ -883,7 +892,10 @@ def record_failed_attempt(
         or not isinstance(attempt_number, int)
         or attempt_number not in range(1, MAX_PHYSICAL_ATTEMPTS + 1)
     ):
-        fail("ATTEMPT_LIMIT_EXCEEDED", "Physical attempt number must be 1 or 2")
+        fail(
+            "ATTEMPT_LIMIT_EXCEEDED",
+            f"Physical attempt number must be 1-{MAX_PHYSICAL_ATTEMPTS}",
+        )
     manifest, artifact_root, calls = _load_manifest(manifest_path)
     manifest_file_sha256 = sha256_bytes(manifest_path.read_bytes())
     call = calls.get(call_sequence)
@@ -967,11 +979,15 @@ def _validate_attempt(
     call = calls_by_id.get(attempt.get("call_id"))
     attempt_number = attempt.get("attempt_number")
     if (
-        attempt.get("schema_version") != ATOMIC_ATTEMPT_SCHEMA_VERSION
+        attempt.get("schema_version")
+        not in {
+            ATOMIC_ATTEMPT_SCHEMA_VERSION,
+            *LEGACY_ATOMIC_ATTEMPT_SCHEMA_VERSIONS,
+        }
         or call is None
         or isinstance(attempt_number, bool)
         or not isinstance(attempt_number, int)
-        or attempt_number not in {1, 2}
+        or attempt_number not in range(1, MAX_PHYSICAL_ATTEMPTS + 1)
         or attempt.get("case_id") != call["case_id"]
         or attempt.get("item_id") != call["item_id"]
         or attempt.get("evaluator") != manifest["evaluator"]
@@ -1084,40 +1100,51 @@ def resolve_orientation(
         numbers = [entry[0]["attempt_number"] for entry in entries]
         if not entries:
             fail("MISSING_LOGICAL_CALL", "Orientation lacks a logical call result")
-        if numbers not in ([1], [1, 2]):
+        if numbers != list(range(1, len(numbers) + 1)) or len(numbers) > (
+            MAX_PHYSICAL_ATTEMPTS
+        ):
             fail(
                 "INVALID_ATTEMPT_SEQUENCE", "Atomic attempts must be consecutive from 1"
             )
-        first = entries[0][0]
-        if first["status"] == "valid":
-            if len(entries) != 1:
+        valid_indexes = [
+            index
+            for index, entry in enumerate(entries)
+            if entry[0]["status"] == "valid"
+        ]
+        if valid_indexes:
+            valid_index = valid_indexes[0]
+            if valid_index != len(entries) - 1 or len(valid_indexes) != 1:
                 fail(
                     "RETRY_AFTER_VALID",
-                    "A valid first response must be accepted without retry",
+                    "The first valid response must be accepted without retry",
                     call_id=call["call_id"],
                 )
-            selected = entries[0]
-            first_valid_count += 1
+            selected = entries[valid_index]
+            if valid_index == 0:
+                first_valid_count += 1
         else:
-            invalid_count += 1
-            invalid_codes[first["validation"]["error"]["code"]] += 1
-            if len(entries) == 1:
+            if len(entries) < MAX_PHYSICAL_ATTEMPTS:
                 fail(
                     "RETRY_REQUIRED",
-                    "Invalid first response needs one exact-prompt retry",
+                    "Invalid response needs another exact-prompt retry",
                     call_id=call["call_id"],
                 )
+            fail(
+                "LOGICAL_CALL_EXHAUSTED",
+                (
+                    "Logical call remained invalid after "
+                    f"{MAX_PHYSICAL_ATTEMPTS} physical attempts"
+                ),
+                call_id=call["call_id"],
+            )
+        if len(entries) > 1:
             retried_count += 1
-            second = entries[1][0]
-            if second["status"] != "valid":
-                invalid_count += 1
-                invalid_codes[second["validation"]["error"]["code"]] += 1
-                fail(
-                    "LOGICAL_CALL_EXHAUSTED",
-                    "Logical call remained invalid after two physical attempts",
-                    call_id=call["call_id"],
-                )
-            selected = entries[1]
+        invalid_entries = [
+            entry for entry in entries if entry[0]["status"] == "invalid"
+        ]
+        invalid_count += len(invalid_entries)
+        for invalid_entry, _ in invalid_entries:
+            invalid_codes[invalid_entry["validation"]["error"]["code"]] += 1
         total_attempts += len(entries)
         entry_response_ids = [
             entry[0]["provider_response_id"]

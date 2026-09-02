@@ -1,7 +1,12 @@
 # Local-ranking atomic Pro/max calibration protocol v2.1
 
 Protocol date: 2026-09-02（Asia/Shanghai）  
-Status: **Frozen before v2.1 Pro/max model output**
+Status: **Spent and incomplete; superseded by the v2.2 bounded-retry correction**
+
+2026-09-02 execution note: fresh `r1/o1` produced 23 first-valid calls, while `call-021` returned two transport-success but
+schema-empty JSON objects and exhausted the two-attempt ceiling. This v2.1 run alone is not a complete orientation; v2.2 may
+carry its unchanged first-valid/invalid attempts into an explicitly hash-bound mechanical continuation. See
+[Atomic bounded-retry correction v2.2](local-ranking-atomic-bounded-retry-contract-v2.2.md).
 
 ## 1. 修正边界
 
@@ -67,4 +72,3 @@ vote。v2.1 六个 orientations 都必须使用 fresh provider responses。
 不得因当前 winner、分数、mirror mismatch 或“结果看起来不好”重试。不得在本次 FAIL 后追加第四组或重跑
 valid r1；若 v2.1 Pro/max 仍未通过，DeepSeek ladder 即在已批准 Atomic contract 下耗尽，应转向 rubric/data
 ambiguity 或其他模型族，而不是继续抽样直到 PASS。
-

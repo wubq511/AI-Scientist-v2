@@ -317,20 +317,20 @@ provider receipt:
 python -m prototypes.local_ranking.atomic_judge record-attempt \
   --manifest <atomic-preparation/private/manifest.json> \
   --call-sequence <1-24> \
-  --attempt-number <1-2> \
+  --attempt-number <1-4> \
   --response <transport-attempt/response.json> \
   --execution-receipt <transport-attempt/receipt.json> \
   --execution-result <transport-attempt/execution-result.json> \
   --output-root <new-call-attempt>
 ```
 
-Only machine-detectable invalid output may receive attempt 2, using exact identical request bytes.
+Only machine-detectable invalid output may receive attempts 2-4, using exact identical request bytes.
 The resolver accepts the first valid response, rejects any retry after a valid response, expands
-handles through the private manifest, and fails after two invalid attempts.
+handles through the private manifest, and fails after four invalid attempts.
 
 For a formal orientation, use the bounded runner instead of issuing calls manually. It executes
 at most four calls concurrently, records HTTP/SSE/non-JSON failures as spent physical attempts,
-retries only invalid calls once with identical request bytes, refuses to resend an ambiguous
+retries only invalid calls up to three times with identical request bytes, refuses to resend an ambiguous
 partial attempt after interruption, and replays a completed run without new API calls:
 
 ```bash
@@ -343,7 +343,7 @@ python -m prototypes.local_ranking.atomic_runner \
 
 Every physical execution writes an immutable `execution-result.json`; the attempt ledger copies
 all referenced transport evidence. Provider failure, truncation, or malformed JSON therefore
-counts toward the same two-attempt ceiling instead of silently disappearing before retry.
+counts toward the same four-attempt ceiling instead of silently disappearing before retry.
 After interruption, a complete execution result can rebuild its missing ledger without another
 request; evidence that ends before the execution result remains ambiguous and fails closed.
 
@@ -357,7 +357,7 @@ python -m prototypes.local_ranking.atomic_judge resolve-orientation \
   --output-root <new-resolved-orientation>
 ```
 
-Supply every attempt from all 24 calls; `--attempt` is repeated 24-48 times. Once three fresh
+Supply every attempt from all 24 calls; `--attempt` is repeated 24-96 times. Once three fresh
 mirror pairs are complete, aggregate their six resolved traces with:
 
 ```bash
@@ -376,7 +376,8 @@ accept an attempt without an exact request/response/provider-receipt binding, an
 IDs must be unique across the six traces. Before semantic calls, use `prepare-smoke` and `run-smoke`
 to prove the frozen concurrency against four transport-only probes; their answers never enter the
 ranking gates. See
-`docs/prototypes/local-ranking-atomic-evaluator-contract-v2.0.md` for the approved boundary.
+`docs/prototypes/local-ranking-atomic-evaluator-contract-v2.0.md` and the v2.2 bounded-retry
+correction for the approved boundary.
 
 Before the first semantic call, capture the authenticated quota state and freeze all six atomic
 and transport manifests into one profile-level budget:
@@ -399,7 +400,7 @@ python -m prototypes.local_ranking.atomic_profile prepare \
 
 The profile manifest fails closed unless all six inputs bind one Pro/high evaluator, one frozen
 source per orientation, concurrency 4, the 16,384-token ceiling, and the exact bounded retry
-policy. Its budget is 144 logical and at most 288 physical calls; early stop can reduce use but
+policy. Its budget is 144 logical and at most 576 physical calls; early stop can reduce use but
 cannot authorize additional calls.
 
 After all four orientations pass, reduce them with:

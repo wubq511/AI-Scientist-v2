@@ -28,7 +28,7 @@ from .errors import HarnessError, fail
 from .opencode_go_chat import SAFE_RESPONSE_HEADERS, _api_key, _utc_now
 from .opencode_go_stream import _extract_stream_response
 
-PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v2.0"
+PREPARATION_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-preparation-v2.1"
 EXECUTION_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-execution-v2.0"
 SMOKE_RESULT_SCHEMA_VERSION = "local-ranking-atomic-opencode-go-smoke-v2.0"
 ATOMIC_MAX_TOKENS = 16_384

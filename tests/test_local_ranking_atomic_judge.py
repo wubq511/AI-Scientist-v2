@@ -448,7 +448,49 @@ def test_resolver_forbids_retry_after_a_valid_response(tmp_path: Path) -> None:
     assert raised.value.code == "RETRY_AFTER_VALID"
 
 
-def test_two_invalid_attempts_exhaust_one_logical_call(tmp_path: Path) -> None:
+def test_retry_correction_accepts_legacy_manifest_and_attempts(tmp_path: Path) -> None:
+    prepared = tmp_path / "prepared"
+    manifest = prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=prepared,
+    )
+    manifest_path = prepared / "private" / "manifest.json"
+    legacy_manifest = json.loads(manifest_path.read_bytes())
+    legacy_manifest["schema_version"] = "local-ranking-atomic-preparation-v2.2"
+    manifest_path.write_bytes(canonical_json_bytes(legacy_manifest))
+    attempt_paths = []
+    for call in manifest["calls"]:
+        response = _write(
+            tmp_path / "responses" / f"{call['call_id']}.json",
+            _valid_response(),
+        )
+        attempt_root = tmp_path / "attempts" / call["call_id"] / "attempt-1"
+        record_attempt(
+            manifest_path=manifest_path,
+            call_sequence=call["sequence"],
+            attempt_number=1,
+            response_path=response,
+            output_root=attempt_root,
+        )
+        attempt_path = attempt_root / "attempt.json"
+        if call["sequence"] == 1:
+            legacy_attempt = json.loads(attempt_path.read_bytes())
+            legacy_attempt["schema_version"] = "local-ranking-atomic-attempt-v2.3"
+            attempt_path.write_bytes(canonical_json_bytes(legacy_attempt))
+        attempt_paths.append(attempt_path)
+
+    trace = resolve_orientation(
+        manifest_path=manifest_path,
+        attempt_paths=attempt_paths,
+        output_root=tmp_path / "resolved",
+    )
+
+    assert trace["status"] == "pass"
+    assert trace["attempt_summary"]["total_physical_attempts"] == 24
+
+
+def test_four_invalid_attempts_exhaust_one_logical_call(tmp_path: Path) -> None:
     prepared = tmp_path / "prepared"
     manifest = prepare_atomic(
         bundle_path=_source_bundle(tmp_path / "source.json"),
@@ -458,7 +500,7 @@ def test_two_invalid_attempts_exhaust_one_logical_call(tmp_path: Path) -> None:
     manifest_path = prepared / "private" / "manifest.json"
     attempt_paths = []
     for call in manifest["calls"]:
-        numbers = (1, 2) if call["sequence"] == 1 else (1,)
+        numbers = range(1, 5) if call["sequence"] == 1 else (1,)
         for attempt_number in numbers:
             response_value = (
                 {"winner": "left"} if call["sequence"] == 1 else _valid_response()
@@ -604,6 +646,112 @@ def test_orientation_runner_retries_only_invalid_response(tmp_path: Path) -> Non
     assert request_count == 25
 
 
+def test_orientation_runner_accepts_first_valid_on_fourth_attempt(
+    tmp_path: Path,
+) -> None:
+    atomic_root = tmp_path / "atomic"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=atomic_root,
+    )
+    manifest_path = atomic_root / "private" / "manifest.json"
+    preparation_root = tmp_path / "transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=manifest_path,
+        output_root=preparation_root,
+        max_concurrency=4,
+    )
+    lock = threading.Lock()
+    request_count = 0
+    first_item_seen = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count, first_item_seen
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        with lock:
+            request_count += 1
+            response_id = f"fourth-attempt-response-{request_count:03d}"
+            is_first_item = "query 0?" in prompt
+            if is_first_item:
+                first_item_seen += 1
+                invalid = first_item_seen < 4
+            else:
+                invalid = False
+        response = {"winner": "left"} if invalid else _valid_response()
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_semantic_stream(response_id=response_id, response=response),
+        )
+
+    result = run_orientation(
+        atomic_manifest_path=manifest_path,
+        preparation_root=preparation_root,
+        output_root=tmp_path / "run-fourth",
+        api_key="test-key",
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert result["run_result"]["status"] == "pass"
+    assert request_count == 27
+    assert result["trace"]["attempt_summary"] == {
+        "first_attempt_valid_count": 23,
+        "invalid_attempt_count": 3,
+        "retried_call_count": 1,
+        "total_physical_attempts": 27,
+    }
+    assert result["trace"]["selected_attempts"][0]["selected_attempt_number"] == 4
+
+
+def test_orientation_runner_stops_after_four_invalid_attempts(tmp_path: Path) -> None:
+    atomic_root = tmp_path / "atomic"
+    prepare_atomic(
+        bundle_path=_source_bundle(tmp_path / "source.json"),
+        replicate_id="r1",
+        output_root=atomic_root,
+    )
+    manifest_path = atomic_root / "private" / "manifest.json"
+    preparation_root = tmp_path / "transport"
+    prepare_atomic_transport(
+        atomic_manifest_path=manifest_path,
+        output_root=preparation_root,
+        max_concurrency=4,
+    )
+    lock = threading.Lock()
+    request_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        prompt = json.loads(request.content)["messages"][0]["content"]
+        with lock:
+            request_count += 1
+            response_id = f"exhausted-response-{request_count:03d}"
+        response = {"winner": "left"} if "query 0?" in prompt else _valid_response()
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=_semantic_stream(response_id=response_id, response=response),
+        )
+
+    run_root = tmp_path / "run-exhausted"
+    with pytest.raises(HarnessError) as raised:
+        run_orientation(
+            atomic_manifest_path=manifest_path,
+            preparation_root=preparation_root,
+            output_root=run_root,
+            api_key="test-key",
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert raised.value.code == "ORIENTATION_INCOMPLETE"
+    assert request_count == 27
+    assert json.loads((run_root / "run-result.json").read_bytes())["status"] == (
+        "incomplete"
+    )
+    assert len(list((run_root / "attempts" / "call-001").glob("*/attempt.json"))) == 4
+
+
 def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> None:
     replicates = []
     for replicate_index in range(1, 4):
@@ -664,7 +812,7 @@ def test_profile_manifest_binds_six_orientations_and_budget(tmp_path: Path) -> N
     assert profile["budget"] == {
         "logical_calls": 144,
         "max_concurrency": 4,
-        "max_physical_calls": 288,
+        "max_physical_calls": 576,
         "max_tokens_per_call": 16_384,
     }
     assert len(profile["replicates"]) == 3

@@ -42,6 +42,7 @@ blocked_by:
 - [Local-ranking atomic Pro/max calibration protocol v2.0](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.0.md)
 - [Local-ranking atomic rationale contract correction v2.1](../../../prototypes/local-ranking-atomic-rationale-contract-v2.1.md)
 - [Local-ranking atomic Pro/max calibration protocol v2.1](../../../prototypes/local-ranking-atomic-pro-max-calibration-protocol-v2.1.md)
+- [Local-ranking atomic bounded-retry contract correction v2.2](../../../prototypes/local-ranking-atomic-bounded-retry-contract-v2.2.md)
 
 ## Question
 
@@ -122,3 +123,15 @@ provider responses，并沿用原有 mirror、retry、budget 与 early-stop gate
 `61dc61072b0358de75d1a01fb2a3151ffad73ea9ba88369aa050ce0122b61c5f`，六个 atomic/transport bindings 见
 v2.1 protocol。调用前 rolling/weekly/monthly usage 为 `0/28/38%`，均为 `ok`。现在按预注册顺序执行
 fresh r1/o1 → r1/o2，再由 pair gate 决定是否允许 r2。
+
+`pro-max-calibration-002` 的 fresh r1/o1 最终仍为 incomplete，但不构成 semantic FAIL：23/24 first attempts
+valid；`call-021` 两次都是完整 200/SSE，却在分别消耗 14,197/11,991 tokens 后只输出 schema-empty 的
+`{": 0}{": 0}` / `{":":","}`。25 calls 合计 183,518 tokens，response IDs 全唯一，receipt cost 合计 `0`。
+
+对抗性审查后，一次性把 invalid-only physical-attempt ceiling 从 2 修正为 4：exact request、no-error-feedback、
+first-valid 和 valid 后禁重试全部不变；attempt 4 仍 invalid 就永久停止，不再上调。缺题、解析 private reasoning、
+自动猜测修复、静默覆盖旧 run-result 以及新增 first-valid-rate gate 均被拒绝。进一步复核确认无需重跑其余 23
+题：`call-021` attempts 1/2 在新旧规则下都仍是 invalid，而其余都是不受 ceiling 变化影响的 first-valid；且
+orientation 2 尚未执行，amendment 不可能由 mirror PASS/FAIL 驱动。下一步保留原 v2.1 incomplete evidence，
+以 hash-bound v2.2 continuation 只发 `call-021` attempt 3，必要时 attempt 4，再将旧、新 attempts 一起重验为
+combined orientation trace。

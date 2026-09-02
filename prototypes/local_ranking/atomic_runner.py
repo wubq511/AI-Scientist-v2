@@ -10,6 +10,7 @@ from typing import Any
 import httpx
 
 from .atomic_judge import (
+    MAX_PHYSICAL_ATTEMPTS,
     _load_manifest,
     _validate_attempt,
     record_attempt,
@@ -25,8 +26,8 @@ from .canonical import (
 from .errors import HarnessError, fail
 from .opencode_go_chat import _api_key
 
-ORIENTATION_RUN_SCHEMA_VERSION = "local-ranking-atomic-orientation-run-v2.0"
-ROUND_SCHEMA_VERSION = "local-ranking-atomic-execution-round-v2.0"
+ORIENTATION_RUN_SCHEMA_VERSION = "local-ranking-atomic-orientation-run-v2.1"
+ROUND_SCHEMA_VERSION = "local-ranking-atomic-execution-round-v2.1"
 
 
 def _load_existing_attempt(
@@ -63,7 +64,7 @@ def _preflight_resume(
     calls_by_id = {call["call_id"]: call for call in calls.values()}
     existing = {}
     for sequence, call in calls.items():
-        for attempt_number in (1, 2):
+        for attempt_number in range(1, MAX_PHYSICAL_ATTEMPTS + 1):
             execution_root, ledger_root = _attempt_paths(
                 output_root,
                 call_id=call["call_id"],
@@ -123,16 +124,24 @@ def _preflight_resume(
                     call_id=call["call_id"],
                     attempt_number=attempt_number,
                 )
-        if (sequence, 2) in existing and (sequence, 1) not in existing:
+        attempt_numbers = sorted(
+            attempt_number
+            for existing_sequence, attempt_number in existing
+            if existing_sequence == sequence
+        )
+        if attempt_numbers != list(range(1, len(attempt_numbers) + 1)):
             fail(
                 "INVALID_ATTEMPT_SEQUENCE",
-                "A second physical attempt exists without attempt 1",
+                "Physical attempts must be consecutive from attempt 1",
                 call_id=call["call_id"],
             )
-        if (sequence, 2) in existing and existing[(sequence, 1)]["status"] == "valid":
+        if any(
+            existing[(sequence, attempt_number)]["status"] == "valid"
+            for attempt_number in attempt_numbers[:-1]
+        ):
             fail(
                 "RETRY_AFTER_VALID",
-                "A valid first response must not have a second physical attempt",
+                "A valid response must not have a later physical attempt",
                 call_id=call["call_id"],
             )
     return existing
@@ -335,27 +344,35 @@ def run_orientation(
         output_root=output_root, attempt_number=1, attempts=first_attempts
     )
 
-    retry_sequences = [
-        sequence
-        for sequence, attempt in sorted(first_attempts.items())
-        if attempt["status"] == "invalid"
-    ]
-    second_attempts: dict[int, dict[str, Any]] = {}
-    if retry_sequences:
+    attempts_by_number = {1: first_attempts}
+    latest_attempts = first_attempts
+    for attempt_number in range(2, MAX_PHYSICAL_ATTEMPTS + 1):
+        retry_sequences = [
+            sequence
+            for sequence, attempt in sorted(latest_attempts.items())
+            if attempt["status"] == "invalid"
+        ]
+        if not retry_sequences:
+            break
+        current_attempts: dict[int, dict[str, Any]] = {}
         with ThreadPoolExecutor(max_workers=preparation["max_concurrency"]) as executor:
             futures = {
-                executor.submit(run_physical, sequence, 2): sequence
+                executor.submit(run_physical, sequence, attempt_number): sequence
                 for sequence in retry_sequences
             }
             for future in as_completed(futures):
-                second_attempts[futures[future]] = future.result()
+                current_attempts[futures[future]] = future.result()
         _checkpoint_round(
-            output_root=output_root, attempt_number=2, attempts=second_attempts
+            output_root=output_root,
+            attempt_number=attempt_number,
+            attempts=current_attempts,
         )
+        attempts_by_number[attempt_number] = current_attempts
+        latest_attempts = current_attempts
 
     exhausted = [
         sequence
-        for sequence, attempt in sorted(second_attempts.items())
+        for sequence, attempt in sorted(latest_attempts.items())
         if attempt["status"] == "invalid"
     ]
     attempt_paths = []
@@ -363,14 +380,15 @@ def run_orientation(
         attempt_paths.append(
             output_root / "attempts" / call["call_id"] / "attempt-1" / "attempt.json"
         )
-        if sequence in second_attempts:
-            attempt_paths.append(
-                output_root
-                / "attempts"
-                / call["call_id"]
-                / "attempt-2"
-                / "attempt.json"
-            )
+        for attempt_number in range(2, MAX_PHYSICAL_ATTEMPTS + 1):
+            if sequence in attempts_by_number.get(attempt_number, {}):
+                attempt_paths.append(
+                    output_root
+                    / "attempts"
+                    / call["call_id"]
+                    / f"attempt-{attempt_number}"
+                    / "attempt.json"
+                )
     if exhausted:
         run_result = {
             "atomic_manifest_sha256": sha256_bytes(atomic_manifest_bytes),
@@ -389,7 +407,10 @@ def run_orientation(
         )
         fail(
             "ORIENTATION_INCOMPLETE",
-            "At least one logical call remained invalid after two physical attempts",
+            (
+                "At least one logical call remained invalid after "
+                f"{MAX_PHYSICAL_ATTEMPTS} physical attempts"
+            ),
             exhausted_call_ids=run_result["exhausted_call_ids"],
         )
     trace = resolve_orientation(

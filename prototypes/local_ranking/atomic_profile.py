@@ -12,6 +12,7 @@ import httpx
 from .atomic_judge import (
     APPROVED_ATOMIC_MODEL_ALIAS,
     EXPECTED_ITEM_COUNT,
+    MAX_PHYSICAL_ATTEMPTS,
     _load_manifest,
 )
 from .atomic_opencode_go import (
@@ -25,7 +26,7 @@ from .errors import HarnessError, fail
 from .opencode_go_chat import _api_key, _utc_now
 
 USAGE_SNAPSHOT_SCHEMA_VERSION = "local-ranking-opencode-go-usage-snapshot-v2.0"
-PROFILE_MANIFEST_SCHEMA_VERSION = "local-ranking-atomic-profile-manifest-v2.0"
+PROFILE_MANIFEST_SCHEMA_VERSION = "local-ranking-atomic-profile-manifest-v2.1"
 USAGE_URL = "https://opencode.ai/zen/go/v1/usage"
 MODELS_URL = "https://opencode.ai/zen/go/v1/models"
 EXPECTED_REPLICATES = 3
@@ -259,7 +260,9 @@ def prepare_profile(
         "budget": {
             "logical_calls": EXPECTED_ITEM_COUNT * 2 * EXPECTED_REPLICATES,
             "max_concurrency": MAX_CONCURRENCY,
-            "max_physical_calls": (EXPECTED_ITEM_COUNT * 2 * EXPECTED_REPLICATES * 2),
+            "max_physical_calls": (
+                EXPECTED_ITEM_COUNT * 2 * EXPECTED_REPLICATES * MAX_PHYSICAL_ATTEMPTS
+            ),
             "max_tokens_per_call": ATOMIC_MAX_TOKENS,
         },
         "early_stop": {
