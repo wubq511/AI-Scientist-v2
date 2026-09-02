@@ -297,3 +297,18 @@ formal evidence execution 与离线 bundle verification。Profile 的完整结�
 live 授权只考虑 r1/o1 → r1/o2：最多 48 logical / 192 physical，r1 incomplete/semantic FAIL 都停止，r1 PASS 也不自动进入
 r2/r3。未新增 first-valid、latency、token、cost、tie-rate 或 winner-direction 门槛。本阶段交 Kimi 执行 prepare/Windows
 离线验证并在回报 hashes 后停止；chat/completions、formal votes 与任何 live runner 仍未授权。
+
+Formal 003 prepare-only 阶段已由 Kimi Code/Kimi K3 按 `local-ranking-atomic-formal-003-preparation-contract-v1.0.md`
+（SHA `a08d7612…952c`）完成，全程零 model-producing request。执行代码为 frozen runtime `8ea6443`（与 controller HEAD
+`326f928` 的 `*.py` diff 为空）。六组 current 族 preparation（r1-r3 × o1/o2，atomic v2.5 / transport v3.1，
+forced_submit_judgment_tool，Pro/max，concurrency 4）已生成并经临时目录重复 prepare 证明 byte-identical；read-only
+usage snapshot（rolling 7% / weekly 36% / monthly 42%，三 period 均 ok）与 profile v2.2（SHA
+`6be3471c0f774f7d88ebfb06cbf322a5dcba1910d5f3b73e87c515248d30762b`，budget 144 logical / 576 physical，r1 首批上限
+48/192 仍待单独授权）已冻结；四个 frozen prerequisites byte-identical 入 bundle。无 secret execution archive（SHA
+`d7acd549d4e17e628da67ec788d5dda5212715d7b0d45644db98f3b593e86795`，1,777,314 bytes，ledger 660 文件）已传至既有
+Windows 执行机新子目录并全程离线验证通过：archive SHA 一致、ledger 双 Pass、六组 preparation 语义校验、六组
+preparation 与 profile 在 Windows Python 3.13.7 UTF-8 下重新生成逐字节一致；Windows verifier 输出 SHA
+`6a0087e832b98ff6572f61ca5cf284740f65681627a0df3afda8f90061659174` 已回传至 `controller/`。Deviation：bundle v1
+archive（`2afcac12…faab`）因 verify-bundle.py 的 cwd 缺陷与 Windows MAX_PATH 限制在首次验证中暴露后被 v2 取代，v1
+从未通过验证、已在 Windows 删除。Mac 双解释器 255/255、lint/format/compileall/diff-check 全绿。Ticket 继续 open；
+prepare-only 证据待 Codex 独立复核后，r1 live calls 才由 Robert 单独授权。
