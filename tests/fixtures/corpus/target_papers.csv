@@ -1,0 +1,3 @@
+paperId,title,abstract,venue,year,citationCount,publicationTypes,abstract_summary,externalIds
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,Target Paper Alpha,Alpha abstract for testing purposes.,Nature Test,2022,50,"['JournalArticle']","Target abstract summary for alpha","{'DOI': '10.1000/alpha'}"
+cccccccccccccccccccccccccccccccccccccccc,Target Paper Beta,Beta abstract for testing purposes.,Science Test,2021,25,"['JournalArticle']","Target abstract summary for beta","{'DOI': '10.1000/beta'}"
