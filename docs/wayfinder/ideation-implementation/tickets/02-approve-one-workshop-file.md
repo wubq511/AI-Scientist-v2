@@ -17,9 +17,11 @@ blocked_by:
 
 **Contract anchors:** [Prevent Target Paper idea leakage](../../ideation-pipeline/tickets/007-prevent-target-paper-idea-leakage.md), [Understand target-to-workshop semantics](../../ideation-pipeline/tickets/014-understand-target-to-workshop-semantics.md), [Define the Workshop File contract](../../ideation-pipeline/tickets/018-define-the-workshop-file-contract.md), [Define the validation and test matrix](../../ideation-pipeline/tickets/027-define-the-validation-and-test-matrix.md).
 
-- [ ] Offline preparation 只把 Target Paper title 与 raw abstract 作为 derivation source；其他私有字段只用于验证，不能成为 model-visible content。
-- [ ] Workshop 使用获批四段 canonical rendering、opaque case identity 与独立 private manifest，并记录 immutable derivation/validation attempts。
-- [ ] Deterministic gate 覆盖 schema、bytes、identity 与 exact/normalized/n-gram leakage；independent semantic decision 与 derivation attempt 分离。
-- [ ] 任一 gate 失败只产生 rejected draft，不产生 Approved Workshop，也不回退到 raw abstract、旧 Workshop、cluster-only 或其他 case 输入。
-- [ ] 交付 `VM-UNIT-01`、`VM-UNIT-04`、`VM-CONTRACT-018-01`、`VM-CONTRACT-018-02` 与 `VM-LEAKAGE-01`，并保持全部已有测试通过。
+- [x] Offline preparation 只把 Target Paper title 与 raw abstract 作为 derivation source；其他私有字段只用于验证，不能成为 model-visible content。
+- [x] Workshop 使用获批四段 canonical rendering、opaque case identity 与独立 private manifest，并记录 immutable derivation/validation attempts。
+- [x] Deterministic gate 覆盖 schema、bytes、identity 与 exact/normalized/n-gram leakage；independent semantic decision 与 derivation attempt 分离。
+- [x] 任一 gate 失败只产生 rejected draft，不产生 Approved Workshop，也不回退到 raw abstract、旧 Workshop、cluster-only 或其他 case 输入。
+- [x] 交付 `VM-UNIT-01`、`VM-UNIT-04`、`VM-CONTRACT-018-01`、`VM-CONTRACT-018-02` 与 `VM-LEAKAGE-01`，并保持全部已有测试通过。
 - [ ] 脱敏记录 fixtures、规则版本、命令、pass/fail 与 hashes，且 Robert 完成本票验收。
+
+验证证据：[Workshop approval boundary 验证证据](../../../research/workshop-approval-evidence.md)。自动化与脱敏证据已完成；最后一项仅等待 Robert 对真实 private semantic review packet 与本票交付作独立验收。
