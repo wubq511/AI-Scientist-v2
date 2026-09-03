@@ -1,0 +1,15 @@
+{
+  "schema_version": "deepseek-cny-price-table-v1.0.0",
+  "model_id": "deepseek-v4-pro",
+  "currency": "CNY",
+  "registered_at": "2026-09-03",
+  "source_url": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/",
+  "peak_windows_utc": [
+    {"days": ["mon", "tue", "wed", "thu", "fri"], "start": "01:00", "end": "04:00"},
+    {"days": ["mon", "tue", "wed", "thu", "fri"], "start": "06:00", "end": "10:00"}
+  ],
+  "rates_per_million_tokens": {
+    "peak": {"cache_hit": "0.30", "cache_miss": "9.0", "output": "27.0"},
+    "off_peak": {"cache_hit": "0.15", "cache_miss": "4.5", "output": "13.5"}
+  }
+}

@@ -21,6 +21,13 @@ EXPECTED_IMPORT_CLOSURE = ImportClosure(
     internal_modules=frozenset(
         {
             "ai_scientist",
+            "ai_scientist.ideation",
+            "ai_scientist.ideation.admission",
+            "ai_scientist.ideation.canonical",
+            "ai_scientist.ideation.errors",
+            "ai_scientist.ideation.pricing",
+            "ai_scientist.ideation.retrieval",
+            "ai_scientist.ideation.run_store",
             "ai_scientist.llm",
             "ai_scientist.perform_ideation_temp_free",
             "ai_scientist.tools",

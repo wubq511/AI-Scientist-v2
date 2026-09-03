@@ -196,6 +196,9 @@ artifacts/local-ranking-prototype/
 # Private ideation input preparation and approval evidence
 artifacts/ideation-inputs/
 
+# Private Ideation Run evidence (raw Evidence Chains)
+artifacts/ideation-runs/
+
 # final papers
 final_papers/
 

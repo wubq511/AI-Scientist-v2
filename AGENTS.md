@@ -2,7 +2,7 @@
 
 ## Project Structure & Scope
 
-`ai_scientist/` contains the Python package. Ideation starts in `perform_ideation_temp_free.py`; model adapters live in `llm.py`, and literature tools in `tools/`. `data/raw/` is the ignored interview dataset. `.agents/skills/` defines workflows; `work-logs/` is shared memory across agents and sessions. Treat `docs/task/` as private, ignored background.
+`ai_scientist/` contains the Python package. Ideation starts in `perform_ideation_temp_free.py` (`new-run` subcommand admits an Ideation Run; the retained `legacy` subcommand keeps the pre-fork baseline until ticket 13); model adapters live in `llm.py`, literature tools in `tools/`, and the run admission boundary in `ideation/` (`run_store.py`, `pricing.py`, `retrieval.py`, `admission.py`). `data/raw/` is the ignored interview dataset. `artifacts/ideation-runs/<run_id>/` is the private, gitignored raw Evidence Chain root for admitted runs. `.agents/skills/` defines workflows; `work-logs/` is shared memory across agents and sessions. Treat `docs/task/` as private, ignored background.
 
 The interview scope ends at workshop/topic preparation, target-scoped reference retrieval, idea generation, and validation. Never invoke `launch_scientist_bfts.py` or enter BFTS, experiments, plotting, write-up, or review workflows.
 
@@ -22,6 +22,7 @@ and `pytest.ini` keeps collection out of retained evidence copies under `artifac
 ```bash
 python -m pip install -r requirements.txt -r requirements-dev.txt
 python ai_scientist/perform_ideation_temp_free.py --help
+python ai_scientist/perform_ideation_temp_free.py new-run --help
 python -m pytest -q
 python -m compileall ai_scientist
 python -m black --check ai_scientist

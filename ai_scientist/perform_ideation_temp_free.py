@@ -17,12 +17,9 @@ from ai_scientist.llm import (
 from ai_scientist.tools.semantic_scholar import SemanticScholarSearchTool
 from ai_scientist.tools.base_tool import BaseTool
 
-# Create tool instances
-semantic_scholar_tool = SemanticScholarSearchTool()
-
-# Define tools at the top of the file
-tools = [
-    semantic_scholar_tool,
+# Legacy tool instances are created lazily inside the factory below so that
+# importing this module has no import-time side effects.
+tools: List[Any] = [
     {
         "name": "FinalizeIdea",
         "description": """Finalize your idea by providing the idea details.
@@ -38,27 +35,33 @@ The IDEA JSON should include the following fields:
     },
 ]
 
-# Create a tools dictionary for easy lookup
-tools_dict = {tool.name: tool for tool in tools if isinstance(tool, BaseTool)}
 
-# Create a string with the tool descriptions
-tool_descriptions = "\n\n".join(
-    (
-        f"- **{tool.name}**: {tool.description}"
-        if isinstance(tool, BaseTool)
-        else f"- **{tool['name']}**: {tool['description']}"
+def _legacy_tools() -> List[Any]:
+    """Create the legacy tool instances on demand (no import side effects)."""
+    return [SemanticScholarSearchTool()] + list(tools)
+
+
+def _tool_catalog() -> tuple[Dict[str, Any], str, str]:
+    """Build the tool lookup, descriptions, and prompt name list."""
+    catalog = _legacy_tools()
+    tools_lookup = {tool.name: tool for tool in catalog if isinstance(tool, BaseTool)}
+    descriptions = "\n\n".join(
+        (
+            f"- **{tool.name}**: {tool.description}"
+            if isinstance(tool, BaseTool)
+            else f"- **{tool['name']}**: {tool['description']}"
+        )
+        for tool in catalog
     )
-    for tool in tools
-)
+    names = [
+        f'"{tool.name}"' if isinstance(tool, BaseTool) else f'"{tool["name"]}"'
+        for tool in catalog
+    ]
+    return tools_lookup, descriptions, ", ".join(names)
 
-# Extract tool names for the prompt
-tool_names = [
-    f'"{tool.name}"' if isinstance(tool, BaseTool) else f'"{tool["name"]}"'
-    for tool in tools
-]
-tool_names_str = ", ".join(tool_names)
 
-system_prompt = f"""You are an experienced AI researcher who aims to propose high-impact research ideas resembling exciting grant proposals. Feel free to propose any novel ideas or experiments; make sure they are novel. Be very creative and think out of the box. Each proposal should stem from a simple and elegant question, observation, or hypothesis about the topic. For example, they could involve very interesting and simple interventions or investigations that explore new possibilities or challenge existing assumptions. Clearly clarify how the proposal distinguishes from the existing literature.
+def _build_system_prompt(tool_descriptions: str, tool_names_str: str) -> str:
+    return f"""You are an experienced AI researcher who aims to propose high-impact research ideas resembling exciting grant proposals. Feel free to propose any novel ideas or experiments; make sure they are novel. Be very creative and think out of the box. Each proposal should stem from a simple and elegant question, observation, or hypothesis about the topic. For example, they could involve very interesting and simple interventions or investigations that explore new possibilities or challenge existing assumptions. Clearly clarify how the proposal distinguishes from the existing literature.
 
 Ensure that the proposal does not require resources beyond what an academic lab could afford. These proposals should lead to papers that are publishable at top ML conferences.
 
@@ -94,6 +97,7 @@ IDEA JSON:
 Ensure the JSON is properly formatted for automatic parsing.
 
 Note: You should perform at least one literature search before finalizing your idea to ensure it is well-informed by existing research."""
+
 
 # Define the initial idea generation prompt
 idea_generation_prompt = """{workshop_description}
@@ -134,6 +138,11 @@ def generate_temp_free_idea(
     num_reflections: int = 5,
     reload_ideas: bool = True,
 ) -> List[Dict]:
+    # Build the tool catalog and prompts lazily: importing this module has no
+    # side effects; tool instances are created only when a run is executed.
+    tools_dict, tool_descriptions, tool_names_str = _tool_catalog()
+    system_prompt = _build_system_prompt(tool_descriptions, tool_names_str)
+
     idea_str_archive = []
     # load ideas from file
     if reload_ideas and osp.exists(idea_fname):
@@ -266,37 +275,95 @@ def generate_temp_free_idea(
     return ideas
 
 
-if __name__ == "__main__":
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate AI scientist proposals - template free"
     )
-    parser.add_argument(
+    subparsers = parser.add_subparsers(dest="entry")
+
+    # Safe ideation entry: request, nine-step preflight, cost approval, and
+    # Run Admission. No model, ranker, device, output-root, or resume control.
+    new_run = subparsers.add_parser(
+        "new-run", help="Admit one Ideation Run without any paid work."
+    )
+    new_run.add_argument("--case-id", required=True)
+    new_run.add_argument("--workshop", required=True)
+    new_run.add_argument("--workshop-sha256", required=True)
+    new_run.add_argument("--corpus", required=True)
+    new_run.add_argument("--corpus-sha256", required=True)
+    new_run.add_argument("--max-num-generations", type=int, required=True)
+    new_run.add_argument("--num-reflections", type=int, required=True)
+    new_run.add_argument(
+        "--non-interactive",
+        action="store_true",
+        help="Refuse the interactive cost approval (fails closed).",
+    )
+
+    # Retained legacy baseline entry (expand-contract; removed by ticket 13).
+    legacy = subparsers.add_parser(
+        "legacy", help="Retained pre-fork baseline path (ticket 13 removes it)."
+    )
+    legacy.add_argument(
         "--model",
         type=str,
         default="gpt-4o-2024-05-13",
         choices=AVAILABLE_LLMS,
         help="Model to use for AI Scientist.",
     )
-    parser.add_argument(
+    legacy.add_argument(
         "--max-num-generations",
         type=int,
         default=1,
         help="Maximum number of proposal generations.",
     )
-    parser.add_argument(
+    legacy.add_argument(
         "--workshop-file",
         type=str,
         default="ideas/i_cant_believe_its_not_better.md",
         help="Path to the workshop description file.",
     )
-    parser.add_argument(
+    legacy.add_argument(
         "--num-reflections",
         type=int,
         default=5,
         help="Number of reflection rounds per proposal.",
     )
-    args = parser.parse_args()
+    return parser
 
+
+def _run_new_run(args: argparse.Namespace) -> int:
+    from ai_scientist.ideation.admission import NewRunRequest, admit_new_run
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    request = NewRunRequest(
+        case_id=args.case_id,
+        workshop=args.workshop,
+        workshop_sha256=args.workshop_sha256,
+        corpus=args.corpus,
+        corpus_sha256=args.corpus_sha256,
+        max_num_generations=args.max_num_generations,
+        num_reflections=args.num_reflections,
+    )
+    try:
+        result = admit_new_run(
+            Path.cwd(),
+            request,
+            interactive=not args.non_interactive,
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "preflight_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 2
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_legacy(args: argparse.Namespace) -> int:
     # Create the LLM client
     client, client_model = create_client(args.model)
 
@@ -317,3 +384,18 @@ if __name__ == "__main__":
         num_reflections=args.num_reflections,
     )
     print(f"{args.workshop_file} generated {len(ideas)} ideas.")
+    return 0
+
+
+if __name__ == "__main__":
+    from pathlib import Path
+
+    _parser = _build_parser()
+    _args = _parser.parse_args()
+    if _args.entry == "new-run":
+        raise SystemExit(_run_new_run(_args))
+    if _args.entry == "legacy":
+        raise SystemExit(_run_legacy(_args))
+    # No subcommand: print the same help text and exit like --help.
+    _parser.print_help()
+    raise SystemExit(0)
