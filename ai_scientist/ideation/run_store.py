@@ -13,7 +13,7 @@ import os
 from pathlib import Path
 import re
 import uuid
-from typing import Any
+from typing import Any, NoReturn
 
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
 from .contract import _now
@@ -29,6 +29,12 @@ REQUEST_NAME = "request.json"
 ADMISSION_NAME = "admission.json"
 SEAL_NAME = "seal.json"
 EVENTS_DIR = "events"
+ARTIFACTS_DIR = "artifacts"
+# Run-local subtrees that never hold committed evidence (tickets 023/025):
+# staging/ carries in-flight bytes before the atomic rename; quarantine/
+# receives approved rename-before-event orphan artifacts at resume time.
+STAGING_DIR_NAME = "staging"
+QUARANTINE_DIR_NAME = "quarantine"
 
 ALLOWED_IDEA_FILENAMES: frozenset[str] = frozenset(
     {"idea.json", "grounding.json", "sidecar.json"}
@@ -82,27 +88,10 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _write_exclusive(path: Path, data: bytes, *, label: str) -> None:
-    """Durably write `data` to `path` once; an existing file fails closed."""
-    if path.exists() or path.is_symlink():
-        fail(
-            "ARTIFACT_EXISTS",
-            f"{label} already exists; write-once artifacts cannot be overwritten",
-        )
-    parent = path.parent
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except BaseException:
-        try:
-            path.unlink()
-        except OSError:
-            pass
-        raise
-    _fsync_directory(parent)
+def _storage_failed(action: str, label: str, exc: OSError) -> NoReturn:
+    """Storage/IO failures are suspend-class per the ticket-025 table."""
+    detail = exc.strerror or str(exc)
+    fail("STORAGE_WRITE_FAILED", f"Cannot {action} {label}: {detail}")
 
 
 class RunStore:
@@ -136,20 +125,99 @@ class RunStore:
         _fsync_directory(self.runs_root)
         return RunHandle(parsed)
 
+    # -- Atomic commit path (ticket 025) -----------------------------------
+    #
+    # Every committed byte lands through the same path: staging write inside
+    # the run root -> fsync -> SHA-256 -> rename to the final path -> fsync
+    # directories. A crash before the rename leaves only staging residue
+    # (cleared best-effort at resume); a crash between rename and the event
+    # append leaves an orphan final artifact (quarantined at resume). Neither
+    # is ever referenced by the event chain.
+
+    def _stage_bytes(self, staging_path: Path, data: bytes, *, label: str) -> None:
+        """Write `data` to a fresh staging file and fsync it and its directory.
+
+        Narrow overridable seam for storage/interruption fault injection
+        (VM-FAULT-02/VM-FAULT-03).
+        """
+        try:
+            descriptor = os.open(
+                staging_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                try:
+                    staging_path.unlink()
+                except OSError:
+                    pass
+                raise
+            _fsync_directory(staging_path.parent)
+        except OSError as exc:
+            _storage_failed("stage", label, exc)
+
+    def _rename_staged(self, staging_path: Path, target: Path, *, label: str) -> None:
+        """Rename a staged file into its final path; existing targets fail closed.
+
+        Narrow overridable seam for storage/interruption fault injection.
+        """
+        if target.exists() or target.is_symlink():
+            try:
+                staging_path.unlink()
+            except OSError:
+                pass
+            fail(
+                "ARTIFACT_EXISTS",
+                f"{label} already exists; write-once artifacts cannot be overwritten",
+            )
+        try:
+            os.rename(staging_path, target)
+            _fsync_directory(target.parent)
+            _fsync_directory(staging_path.parent)
+        except OSError as exc:
+            _storage_failed("commit", label, exc)
+
+    def _commit_file(
+        self, run_root: Path, relative: Path, data: bytes, *, label: str
+    ) -> str:
+        """Commit `data` at `relative` under `run_root`; return its SHA-256."""
+        try:
+            staging_dir = run_root / STAGING_DIR_NAME
+            staging_dir.mkdir(parents=True, exist_ok=True)
+            (run_root / relative.parent).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _storage_failed("prepare", label, exc)
+        staging_path = staging_dir / str(uuid.uuid4())
+        try:
+            self._stage_bytes(staging_path, data, label=label)
+        except OSError as exc:
+            _storage_failed("stage", label, exc)
+        digest = sha256_bytes(data)
+        try:
+            self._rename_staged(staging_path, run_root / relative, label=label)
+        except OSError as exc:
+            _storage_failed("commit", label, exc)
+        return digest
+
     def write_request(self, run_id: str, document: object) -> str:
         """Write the write-once run request and return its SHA-256."""
         run_root = self._run_root(run_id)
         run_root.mkdir(parents=True, exist_ok=True)
         data = canonical_json_bytes(document)
-        _write_exclusive(run_root / REQUEST_NAME, data, label="request.json")
-        return sha256_bytes(data)
+        return self._commit_file(
+            run_root, Path(REQUEST_NAME), data, label="request.json"
+        )
 
     def write_admission(self, run_id: str, document: object) -> str:
         """Write the write-once Run Admission and return its SHA-256."""
         run_root = self._run_root(run_id)
         data = canonical_json_bytes(document)
-        _write_exclusive(run_root / ADMISSION_NAME, data, label="admission.json")
-        return sha256_bytes(data)
+        return self._commit_file(
+            run_root, Path(ADMISSION_NAME), data, label="admission.json"
+        )
 
     def write_operation_artifact(
         self,
@@ -177,12 +245,10 @@ class RunStore:
             / "attempts"
             / f"{attempt_seq:06d}"
         )
-        target_dir = run_root / rel_parent
-        target_dir.mkdir(parents=True, exist_ok=True)
         rel_path = (rel_parent / filename).as_posix()
-        target_file = run_root / rel_path
-        _write_exclusive(target_file, data, label=label or filename)
-        sha = sha256_bytes(data)
+        sha = self._commit_file(
+            run_root, Path(rel_path), data, label=label or filename
+        )
         return rel_path, len(data), sha
 
     def write_idea_artifact(
@@ -215,12 +281,10 @@ class RunStore:
             )
         run_root = self._run_root(run_id)
         rel_parent = Path("artifacts/ideas") / f"{idea_index:06d}"
-        target_dir = run_root / rel_parent
-        target_dir.mkdir(parents=True, exist_ok=True)
         rel_path = (rel_parent / filename).as_posix()
-        target_file = run_root / rel_path
-        _write_exclusive(target_file, data, label=label or filename)
-        sha = sha256_bytes(data)
+        sha = self._commit_file(
+            run_root, Path(rel_path), data, label=label or filename
+        )
         return rel_path, len(data), sha
 
     def write_artifact(
@@ -250,11 +314,7 @@ class RunStore:
                 f"Artifact path must be normalized under the run root: {relative_path}",
             )
         run_root = self._run_root(run_id)
-        target_dir = run_root / relative.parent
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_file = run_root / relative
-        _write_exclusive(target_file, data, label=label or relative.name)
-        sha = sha256_bytes(data)
+        sha = self._commit_file(run_root, relative, data, label=label or relative.name)
         return relative.as_posix(), len(data), sha
 
     def write_seal(self, run_id: str, document: object) -> str:
@@ -281,8 +341,7 @@ class RunStore:
                 )
         run_root = self._run_root(run_id)
         data = canonical_json_bytes(document)
-        _write_exclusive(run_root / SEAL_NAME, data, label="seal.json")
-        return sha256_bytes(data)
+        return self._commit_file(run_root, Path(SEAL_NAME), data, label="seal.json")
 
     def build_artifact_inventory(self, run_id: str) -> list[dict[str, Any]]:
         """Collect all committed artifacts under artifacts/, sorted by relative_path."""
@@ -356,23 +415,34 @@ class RunStore:
         *,
         prev_event_hash: str | None = None,
     ) -> EventRecord:
-        """Append one immutable event to the linked hash chain."""
+        """Append one immutable event to the linked hash chain.
+
+        writer_epoch is a fencing token (ticket 023): epochs are monotonically
+        non-decreasing along the chain, so a stale writer's append fails
+        closed with STALE_WRITER_EPOCH. Epoch-less lifecycle events (the
+        preflight prefix) are exempt.
+        """
         run_root = self._run_root(run_id)
         events_dir = run_root / EVENTS_DIR
-        events_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            events_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _storage_failed("prepare", "events directory", exc)
 
         existing = sorted(
             path
             for path in events_dir.iterdir()
             if path.is_file() and re.fullmatch(r"[0-9]{8}\.json", path.name)
         )
+        last_document: dict[str, Any] | None = None
         if existing:
             last_path = existing[-1]
             last_seq = int(last_path.stem)
             last_bytes = last_path.read_bytes()
-            last_document = parse_json_bytes(last_bytes, label=f"event {last_seq}")
-            if not isinstance(last_document, dict):
+            parsed_last = parse_json_bytes(last_bytes, label=f"event {last_seq}")
+            if not isinstance(parsed_last, dict):
                 fail("INVALID_EVENT", f"Event {last_seq} is not a JSON object")
+            last_document = parsed_last
             if last_document.get("event_hash") != sha256_bytes(
                 canonical_json_bytes(
                     {
@@ -394,6 +464,25 @@ class RunStore:
                 "MISSING_EVENT",
                 "The supplied prev_event_hash does not extend the canonical chain",
             )
+
+        incoming_epoch = event.get("writer_epoch")
+        if incoming_epoch is not None:
+            if (
+                not isinstance(incoming_epoch, int)
+                or isinstance(incoming_epoch, bool)
+                or incoming_epoch < 1
+            ):
+                fail(
+                    "INVALID_EPOCH",
+                    f"writer_epoch must be a positive integer, got {incoming_epoch}",
+                )
+            latest_epoch = self._latest_writer_epoch(existing, last_document)
+            if latest_epoch is not None and incoming_epoch < latest_epoch:
+                fail(
+                    "STALE_WRITER_EPOCH",
+                    f"writer_epoch {incoming_epoch} is stale; the chain is already "
+                    f"owned by writer epoch {latest_epoch}",
+                )
 
         document: dict[str, Any] = {
             "schema_version": EVIDENCE_EVENT_SCHEMA_VERSION,
@@ -424,14 +513,45 @@ class RunStore:
         document["event_hash"] = event_hash
 
         data = canonical_json_bytes(document)
-        event_path = events_dir / f"{event_seq:08d}.json"
-        _write_exclusive(event_path, data, label=f"event {event_seq}")
+        self._commit_file(
+            run_root,
+            Path(EVENTS_DIR) / f"{event_seq:08d}.json",
+            data,
+            label=f"event {event_seq}",
+        )
         return EventRecord(
             run_id=run_id,
             event_seq=event_seq,
             event_hash=event_hash,
             prev_event_hash=document["prev_event_hash"],
         )
+
+    def _latest_writer_epoch(
+        self, existing: list[Path], last_document: dict[str, Any] | None
+    ) -> int | None:
+        """Return the newest writer_epoch on the chain (epochs are monotone)."""
+        document = last_document
+        for index in range(len(existing) - 1, -1, -1):
+            if document is None:
+                parsed = parse_json_bytes(
+                    existing[index].read_bytes(), label=f"event {existing[index].stem}"
+                )
+                if not isinstance(parsed, dict):
+                    fail(
+                        "INVALID_EVENT",
+                        f"Event {existing[index].stem} is not a JSON object",
+                    )
+                document = parsed
+            epoch = document.get("writer_epoch")
+            if epoch is not None:
+                if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
+                    fail(
+                        "INVALID_EVENT",
+                        f"Event {existing[index].stem} carries an invalid writer_epoch",
+                    )
+                return epoch
+            document = None
+        return None
 
     def verify_chain(self, run_id: str) -> int:
         """Verify the full event hash chain; return the verified event count."""
@@ -468,3 +588,132 @@ class RunStore:
             expected_prev = expected_event_hash
             count += 1
         return count
+
+    # -- Resume support (ticket 10) -----------------------------------------
+
+    def run_root_exists(self, run_id: str) -> bool:
+        """True when the exact run root exists; a symlinked root fails closed."""
+        run_root = self._run_root(run_id)
+        if run_root.is_symlink():
+            fail("SYMLINK_FORBIDDEN", f"The run root is a symlink: {run_id}")
+        return run_root.is_dir()
+
+    def artifact_exists(self, run_id: str, relative_path: str) -> bool:
+        """True when the run-root-relative regular file exists."""
+        run_root = self._run_root(run_id)
+        target = run_root / relative_path
+        return target.is_file() and not target.is_symlink()
+
+    def read_events(self, run_id: str) -> list[dict[str, Any]]:
+        """Load all events in sequence order. Not a verifier: callers must run
+        verify_chain first when integrity matters (resume always does)."""
+        run_root = self._run_root(run_id)
+        events_dir = run_root / EVENTS_DIR
+        if not events_dir.is_dir():
+            return []
+        documents: list[dict[str, Any]] = []
+        for path in sorted(events_dir.iterdir()):
+            if path.is_file() and re.fullmatch(r"[0-9]{8}\.json", path.name):
+                document = parse_json_bytes(
+                    path.read_bytes(), label=f"event {path.stem}"
+                )
+                if not isinstance(document, dict):
+                    fail("INVALID_EVENT", f"Event {path.stem} is not a JSON object")
+                documents.append(document)
+        return documents
+
+    def list_committed_artifact_paths(self, run_id: str) -> list[str]:
+        """List all files under artifacts/ as run-root-relative POSIX paths.
+
+        Any symlink inside the committed namespace fails closed.
+        """
+        run_root = self._run_root(run_id)
+        artifacts_dir = run_root / ARTIFACTS_DIR
+        if artifacts_dir.is_symlink():
+            fail("SYMLINK_FORBIDDEN", "The artifacts directory is a symlink")
+        if not artifacts_dir.is_dir():
+            return []
+        paths: list[str] = []
+        for path in sorted(artifacts_dir.rglob("*")):
+            if path.is_symlink():
+                fail(
+                    "SYMLINK_FORBIDDEN",
+                    f"Committed artifact is a symlink: "
+                    f"{path.relative_to(run_root).as_posix()}",
+                )
+            if path.is_file():
+                paths.append(path.relative_to(run_root).as_posix())
+        return paths
+
+    def clear_staging(self, run_id: str) -> None:
+        """Best-effort removal of staging residue after chain verification.
+
+        Staging bytes are never evidence (ticket 025); cleanup failure must not
+        block a resume.
+        """
+        run_root = self._run_root(run_id)
+        staging_dir = run_root / STAGING_DIR_NAME
+        if staging_dir.is_symlink() or not staging_dir.is_dir():
+            return
+        for path in sorted(staging_dir.rglob("*"), reverse=True):
+            try:
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                elif path.is_dir():
+                    path.rmdir()
+            except OSError:
+                pass
+
+    def quarantine_artifact(
+        self, run_id: str, relative_path: str, *, incident: str
+    ) -> dict[str, Any]:
+        """Move an orphan final artifact into the run-local quarantine area.
+
+        The approved rename-before-event crash window can leave a final
+        artifact that no event references (tickets 023/025). The bytes are
+        preserved under quarantine/<incident>/ and leave the committed
+        artifacts/ namespace. Returns the incident record for the
+        `orphans_quarantined` lifecycle event.
+        """
+        if (
+            not isinstance(relative_path, str)
+            or "\\" in relative_path
+            or not relative_path
+        ):
+            fail("INVALID_PATH", "Orphan path must be a POSIX relative path")
+        relative = Path(relative_path)
+        if relative.is_absolute() or any(
+            part in {"", ".", ".."} for part in relative.parts
+        ):
+            fail("INVALID_PATH", f"Orphan path is not normalized: {relative_path}")
+        if not isinstance(incident, str) or not re.fullmatch(r"[a-z0-9-]+", incident):
+            fail("INVALID_PATH", f"Invalid quarantine incident name: {incident}")
+        run_root = self._run_root(run_id)
+        source = run_root / relative
+        if source.is_symlink() or not source.is_file():
+            fail("MISSING_ARTIFACT", f"Orphan artifact is missing: {relative_path}")
+        data = source.read_bytes()
+        target_relative = Path(QUARANTINE_DIR_NAME) / incident / relative
+        target = run_root / target_relative
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(source, target)
+            _fsync_directory(target.parent)
+            _fsync_directory(source.parent)
+        except OSError as exc:
+            _storage_failed("quarantine", relative_path, exc)
+        # Prune parent directories left empty under artifacts/ (best-effort).
+        artifacts_root = run_root / ARTIFACTS_DIR
+        parent = source.parent
+        while parent != artifacts_root and parent != run_root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+        return {
+            "byte_length": len(data),
+            "quarantine_path": target_relative.as_posix(),
+            "relative_path": relative_path,
+            "sha256": sha256_bytes(data),
+        }
