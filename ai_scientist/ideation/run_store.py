@@ -22,11 +22,17 @@ from .errors import fail
 RUN_REQUEST_SCHEMA_VERSION = "run-request-v1.0.0"
 RUN_ADMISSION_SCHEMA_VERSION = "run-admission-v1.0.0"
 EVIDENCE_EVENT_SCHEMA_VERSION = "evidence-event-v1.0.0"
+RUN_SEAL_SCHEMA_VERSION = "run-seal-v1.0.0"
 
 RUNS_ROOT_RELPATH = Path("artifacts/ideation-runs")
 REQUEST_NAME = "request.json"
 ADMISSION_NAME = "admission.json"
+SEAL_NAME = "seal.json"
 EVENTS_DIR = "events"
+
+ALLOWED_IDEA_FILENAMES: frozenset[str] = frozenset(
+    {"idea.json", "grounding.json", "sidecar.json"}
+)
 
 RUN_ID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}" r"-[0-9a-f]{12}\Z"
@@ -179,6 +185,99 @@ class RunStore:
         sha = sha256_bytes(data)
         return rel_path, len(data), sha
 
+    def write_idea_artifact(
+        self,
+        run_id: str,
+        idea_index: int,
+        filename: str,
+        data: bytes,
+        *,
+        label: str | None = None,
+    ) -> tuple[str, int, str]:
+        """Exclusively write an idea artifact under artifacts/ideas/<idea_index:06d>/.
+
+        Returns (relative_path, byte_length, sha256).
+        """
+        if (
+            not isinstance(idea_index, int)
+            or isinstance(idea_index, bool)
+            or idea_index < 0
+            or idea_index > 999999
+        ):
+            fail(
+                "INVALID_COORDINATE",
+                "idea_index must be an integer between 0 and 999999",
+            )
+        if filename not in ALLOWED_IDEA_FILENAMES:
+            fail(
+                "INVALID_PATH",
+                f"Artifact filename must be one of {sorted(ALLOWED_IDEA_FILENAMES)}, got '{filename}'",
+            )
+        run_root = self._run_root(run_id)
+        rel_parent = Path("artifacts/ideas") / f"{idea_index:06d}"
+        target_dir = run_root / rel_parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        rel_path = (rel_parent / filename).as_posix()
+        target_file = run_root / rel_path
+        _write_exclusive(target_file, data, label=label or filename)
+        sha = sha256_bytes(data)
+        return rel_path, len(data), sha
+
+    def write_seal(self, run_id: str, document: object) -> str:
+        """Write the write-once run seal and return its SHA-256."""
+        if not isinstance(document, dict):
+            fail("INVALID_SEAL", "Seal document must be a dictionary")
+        if document.get("schema_version") != RUN_SEAL_SCHEMA_VERSION:
+            fail(
+                "INVALID_SEAL",
+                f"Invalid seal schema_version: {document.get('schema_version')}",
+            )
+        if document.get("run_id") != run_id:
+            fail("INVALID_SEAL", "Seal document run_id does not match target run_id")
+        for req_field in (
+            "terminal_outcome",
+            "request_sha256",
+            "admission_sha256",
+            "final_event",
+            "artifact_inventory",
+        ):
+            if req_field not in document:
+                fail(
+                    "INVALID_SEAL", f"Seal document missing required field: {req_field}"
+                )
+        run_root = self._run_root(run_id)
+        data = canonical_json_bytes(document)
+        _write_exclusive(run_root / SEAL_NAME, data, label="seal.json")
+        return sha256_bytes(data)
+
+    def build_artifact_inventory(self, run_id: str) -> list[dict[str, Any]]:
+        """Collect all committed artifacts under artifacts/, sorted by relative_path."""
+        run_root = self._run_root(run_id)
+        artifacts_dir = run_root / "artifacts"
+        if not artifacts_dir.is_dir():
+            return []
+
+        files: list[dict[str, Any]] = []
+        for path in artifacts_dir.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                rel_path = path.relative_to(run_root).as_posix()
+                data = path.read_bytes()
+                media_type = (
+                    "application/json"
+                    if rel_path.endswith(".json")
+                    else "application/octet-stream"
+                )
+                files.append(
+                    {
+                        "byte_length": len(data),
+                        "media_type": media_type,
+                        "relative_path": rel_path,
+                        "sha256": sha256_bytes(data),
+                    }
+                )
+        files.sort(key=lambda item: item["relative_path"])
+        return files
+
     def read_artifact(
         self,
         run_id: str,
@@ -204,6 +303,17 @@ class RunStore:
                 expected=expected_sha256,
             )
         return data
+
+    def read_event(self, run_id: str, event_seq: int) -> dict[str, Any]:
+        """Read and parse an event from events/<event_seq:08d>.json."""
+        if (
+            not isinstance(event_seq, int)
+            or isinstance(event_seq, bool)
+            or event_seq < 1
+        ):
+            fail("INVALID_COORDINATE", "event_seq must be an integer >= 1")
+        data = self.read_artifact(run_id, f"{EVENTS_DIR}/{event_seq:08d}.json")
+        return parse_json_bytes(data, label=f"event {event_seq}")
 
     def append_event(
         self,

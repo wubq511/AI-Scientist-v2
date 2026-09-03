@@ -326,11 +326,57 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_new_run(args: argparse.Namespace) -> int:
-    from ai_scientist.ideation.admission import NewRunRequest, admit_new_run
+def run_new_run(
+    workspace_root: Path,
+    request: Any,
+    *,
+    command: list[str] | None = None,
+    stream: Any = None,
+    adapter: Any = None,
+    retriever: Any = None,
+    store: Any = None,
+    execute: bool = False,
+) -> dict[str, Any]:
+    """Admit and optionally execute an Ideation Run with injected components."""
+    from ai_scientist.ideation.admission import admit_new_run
+
+    admission_result = admit_new_run(
+        workspace_root,
+        request,
+        stream=stream,
+        command=command,
+    )
+    if not execute:
+        return admission_result
+
+    from ai_scientist.ideation.controller import IdeationController
+
+    controller = IdeationController(
+        workspace_root,
+        admission_result["run_id"],
+        store=store,
+        adapter=adapter,
+        retriever=retriever,
+    )
+    return controller.run()
+
+
+def _run_new_run(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+    stream: Any = None,
+    adapter: Any = None,
+    retriever: Any = None,
+    store: Any = None,
+    execute: bool | None = None,
+) -> int:
+    import os
+    from ai_scientist.ideation.admission import NewRunRequest
     from ai_scientist.ideation.canonical import canonical_json_bytes
     from ai_scientist.ideation.errors import IdeationInputError
 
+    root = workspace_root or Path.cwd()
     request = NewRunRequest(
         case_id=args.case_id,
         workshop=args.workshop,
@@ -340,10 +386,14 @@ def _run_new_run(args: argparse.Namespace) -> int:
         max_num_generations=args.max_num_generations,
         num_reflections=args.num_reflections,
     )
+    if execute is None:
+        execute = adapter is not None or os.environ.get("IDEATION_EXECUTE") == "1"
+
     try:
-        result = admit_new_run(
-            Path.cwd(),
+        result = run_new_run(
+            root,
             request,
+            stream=stream,
             command=[
                 "python",
                 "ai_scientist/perform_ideation_temp_free.py",
@@ -363,6 +413,10 @@ def _run_new_run(args: argparse.Namespace) -> int:
                 "--num-reflections",
                 str(args.num_reflections),
             ],
+            adapter=adapter,
+            retriever=retriever,
+            store=store,
+            execute=execute,
         )
     except IdeationInputError as exc:
         error = {
