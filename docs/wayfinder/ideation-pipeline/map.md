@@ -57,12 +57,11 @@ status: open
 - [Define the validation and test matrix](tickets/027-define-the-validation-and-test-matrix.md): 九层验证矩阵落为独立契约文档 `docs/agents/validation-matrix.md`——索引既有 runtime gate、新定义开发期测试层；委托阈值走版本化规则集 + 契约可推导值 + calibration-pending 三类；证据沿用 010；028/029/030 以行 ID 消费。
 - [Define the optimization promotion gate](tickets/029-define-the-optimization-promotion-gate.md): 确立 Optimization Promotion 机制——证据驱动的设计变更过双 gate（Plan/Promotion）+ pre-registered 判据与 Regression Budget，bugfix 与未定设计豁免；Design Epoch 证据可比性规则供 028 引用；契约落 `docs/agents/promotion-gate.md` v1.0。
 - [Define canaries and scale gates](tickets/028-define-canaries-and-scale-gates.md): 三波结构（smoke 1 → canary 12 → 终波）+ 分层 Canary（035/036 共享、含边缘案例、名单私有）；¥30 硬上限优先队列；Scale Gate = 硬阻断清零 + 逐 case success + 矩阵 028 行 + Robert 批准；终波规模由 gate 按面试需要定（预期 ~50，不要求全量 237），031 修订为终波按批批准；契约落 `docs/agents/canary-and-scale-gates.md` v1.0。
+- [Define final delivery and commit sequence](tickets/030-define-final-delivery-and-commit-sequence.md): 单一 spec 与 13 张 VM-anchored tracer-bullet implementation tickets 已批准并发布；第一票为无行为变化地基，最后一票 contract legacy path，035/036 保留到 Canary 期。
 
 ## Not yet specified
 
-<!-- see "Fog of war": in-scope fog you can't ticket yet; graduates as the frontier advances -->
-
-- 最终面试叙事应如何优先呈现失败或降级 run 中浮现的发现。
+<!-- 当前无未决项；035/036 已有明确问题，只等待 Canary evidence。 -->
 
 ## Out of scope
 
