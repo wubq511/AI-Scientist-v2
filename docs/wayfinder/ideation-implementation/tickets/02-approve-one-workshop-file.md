@@ -2,7 +2,7 @@
 title: Approve one Workshop File
 type: implementation
 status: open
-assignee: null
+assignee: codex
 blocked_by:
   - 01-establish-the-testable-ideation-foundation.md
 ---

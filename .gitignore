@@ -193,6 +193,9 @@ slurm_logs/
 # Throwaway local-ranking comparison raw evidence
 artifacts/local-ranking-prototype/
 
+# Private ideation input preparation and approval evidence
+artifacts/ideation-inputs/
+
 # final papers
 final_papers/
 

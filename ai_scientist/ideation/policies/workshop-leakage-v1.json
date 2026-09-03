@@ -1,0 +1,1 @@
+{"calibration_status":"pending","comparison_sources":["target.raw_abstract","target.abstract_summary","reference.contexts"],"ngram_tokens":8,"normalization_version":"ideation-text-normalization-v1.0","schema_version":"workshop-leakage-policy-v1.0","version":"workshop-leakage-rules-v1.0"}
