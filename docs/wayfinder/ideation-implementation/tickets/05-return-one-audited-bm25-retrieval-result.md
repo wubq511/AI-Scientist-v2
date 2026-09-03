@@ -26,7 +26,7 @@ blocked_by:
 
 ## Implementation Evidence
 
-- 实现 commits：本票交付 commit（随 close-out 提交）。
+- 实现 commits：`1eeb542 add: implement audited BM25 retrieval result (ticket 05)`。
 - 脱敏证据：[Scoped Literature Retriever 验证证据](../../../research/scoped-retrieval-evidence.md)。
 - 验证矩阵行 `VM-UNIT-05`、`VM-CONTRACT-020-01`、`VM-CONTRACT-020-02`、`VM-CONTRACT-020-03`、`VM-CONTRACT-020-04`、`VM-REPLAY-03` 全部通过（`tests/test_scoped_retrieval.py` 21 项）；全量 `354 passed`。
 - 双轴 code review（Standards 与 Spec 两轴）核验通过，零 hard findings。
