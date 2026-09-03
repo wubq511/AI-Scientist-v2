@@ -16,16 +16,19 @@ For every result, record why it is trustworthy. Before resuming, read relevant w
 
 ## Development & Validation Commands
 
-This repository has no build step or automated test suite.
+This repository has no build step. The automated pytest suite lives under `tests/`,
+and `pytest.ini` keeps collection out of retained evidence copies under `artifacts/`.
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.txt -r requirements-dev.txt
 python ai_scientist/perform_ideation_temp_free.py --help
+python -m pytest -q
 python -m compileall ai_scientist
 python -m black --check ai_scientist
 ```
 
-Add deterministic `tests/test_*.py`; run `python -m pytest -q` after adding `pytest` as a development dependency. Fail closed on isolation, schema, metadata, and model errors. Never bypass failed checks.
+Add deterministic `tests/test_*.py`; run `python -m pytest -q`. Fail closed on
+isolation, schema, metadata, and model errors. Never bypass failed checks.
 
 ## Coding Style & Naming
 

@@ -1,0 +1,23 @@
+# Retained upstream/downstream dependencies; not the ideation-only runtime contract.
+# Install requirements.txt as well when exercising retained legacy provider paths.
+boto3==1.43.87
+botocore==1.43.87
+coolname==5.0.0
+dataclasses-json==0.6.7
+datasets==5.0.1
+funcy==2.0
+genson==1.4.0
+humanize==4.16.0
+jsonschema==4.26.0
+matplotlib==3.11.1
+numpy==2.5.2
+omegaconf==2.3.1
+pymupdf4llm==1.28.2
+pypdf==6.16.2
+python-igraph==1.0.0
+rich==15.0.0
+seaborn==0.13.2
+shutup==0.3.0
+tqdm==4.70.0
+transformers==5.16.1
+wandb==0.29.0

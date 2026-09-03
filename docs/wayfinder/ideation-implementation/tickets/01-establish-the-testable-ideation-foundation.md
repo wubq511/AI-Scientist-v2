@@ -2,7 +2,7 @@
 title: Establish the testable ideation foundation
 type: implementation
 status: open
-assignee: null
+assignee: codex
 blocked_by: []
 ---
 
