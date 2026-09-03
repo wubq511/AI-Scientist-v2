@@ -17,6 +17,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = REPO_ROOT / "tests/fixtures/workshop"
 CASE_ID = "case-0123456789abcdef0123456789abcdef"
 TARGET_ID = "a" * 40
+ALT_TARGET_ID = "c" * 40
+RAW_ABSTRACT = (
+    "People with chronic migraine experience fluctuating symptoms that complicate "
+    "timely care. This study introduces PulseMap, a personalized cueing system "
+    "that combines wearable signals with daily diaries, and reports earlier "
+    "warnings with fewer false alarms."
+)
+ABSTRACT_SUMMARY = (
+    "PulseMap combines wearable sensing and symptom diaries to improve "
+    "individualized early-warning accuracy."
+)
+REFERENCE_CONTEXT = (
+    "The PulseMap intervention fuses wearable measurements and diaries before "
+    "personalized cueing."
+)
+
+SEMANTIC_CHECKS = {
+    "abstract_is_neutral_problem_scope",
+    "allows_multiple_method_families",
+    "keywords_are_established_terms",
+    "no_answer_leakage",
+    "no_identity_leakage",
+    "target_relevant",
+    "title_is_identity_free_problem_area",
+    "tldr_is_open_question_or_tension",
+    "written_in_english",
+}
 
 
 def _sha256(data: bytes) -> str:
@@ -145,16 +172,14 @@ def _semantic_decision(
     *,
     approved: bool,
     reviewer: str = "fixture-reviewer",
+    failed_checks: frozenset[str] = frozenset(),
 ) -> Path:
     attempt = json.loads(attempt_manifest.read_text(encoding="utf-8"))
     candidate_path = workspace / attempt["candidate"]["path"]
     path = workspace / "reviews/semantic-decision.json"
-    checks = {
-        "allows_multiple_method_families": approved,
-        "no_answer_leakage": approved,
-        "no_identity_leakage": approved,
-        "target_relevant": True,
-    }
+    checks = {name: name not in failed_checks for name in SEMANTIC_CHECKS}
+    if not approved and not failed_checks:
+        checks["no_answer_leakage"] = False
     _write_json(
         path,
         {
@@ -170,7 +195,7 @@ def _semantic_decision(
             ),
             "reviewed_at": "2026-09-03T02:03:04.000000Z",
             "reviewer": reviewer,
-            "schema_version": "workshop-semantic-decision-v1.0",
+            "schema_version": "workshop-semantic-decision-v1.1",
         },
     )
     return path
@@ -187,7 +212,7 @@ def test_text_normalization_has_stable_tokens_and_rejects_invalid_values() -> No
     )
 
     with pytest.raises(IdeationInputError, match="INVALID_TEXT"):
-        normalize_text(7)  # type: ignore[arg-type]
+        normalize_text(7)
     with pytest.raises(IdeationInputError, match="INVALID_UNICODE"):
         normalize_text("bad\ud800")
 
@@ -355,6 +380,55 @@ def test_workshop_cli_rejects_exact_and_normalized_private_sources(
     assert private_text not in json.dumps(report)
 
 
+@pytest.mark.parametrize(
+    "source_text",
+    [RAW_ABSTRACT, ABSTRACT_SUMMARY, REFERENCE_CONTEXT],
+    ids=["raw-abstract", "abstract-summary", "reference-context"],
+)
+@pytest.mark.parametrize("match_kind", ["exact", "normalized", "ngram"])
+def test_workshop_cli_rejects_each_private_comparison_source_and_match_kind(
+    tmp_path: Path,
+    source_text: str,
+    match_kind: str,
+) -> None:
+    workspace = _workspace(tmp_path)
+    if match_kind == "exact":
+        private_text = source_text
+        expected_rule = "WORKSHOP-LEAKAGE-EXACT"
+    elif match_kind == "normalized":
+        private_text = source_text.upper().replace("-", "—")
+        expected_rule = "WORKSHOP-LEAKAGE-NORMALIZED"
+    else:
+        private_text = " ".join(tokenize_text(source_text)[:8])
+        expected_rule = "WORKSHOP-LEAKAGE-NGRAM"
+    candidate = (
+        "# Title: Migraine care questions\n\n"
+        "## Keywords\nchronic migraine, clinical forecasting\n\n"
+        "## TL;DR\nWhich research directions remain open?\n\n"
+        f"## Abstract\n{private_text}\n"
+    )
+    (workspace / "drafts/private-source.md").write_text(
+        candidate, encoding="utf-8", newline=""
+    )
+    preparation = _prepare(workspace)
+    _derivation_record(workspace, preparation)
+
+    validation = _validate(
+        workspace,
+        preparation,
+        attempt_id="attempt-001",
+        candidate="drafts/private-source.md",
+    )
+
+    assert validation.returncode == 2, validation.stderr
+    attempt_manifest = workspace / json.loads(validation.stdout)["attempt_manifest"]
+    report = json.loads(
+        (attempt_manifest.parent / "validation-report.json").read_text(encoding="utf-8")
+    )
+    assert expected_rule in {failure["rule_id"] for failure in report["failures"]}
+    assert private_text not in json.dumps(report)
+
+
 def test_workshop_cli_retains_semantic_rejection_and_rejects_self_review(
     tmp_path: Path,
 ) -> None:
@@ -404,6 +478,90 @@ def test_workshop_cli_retains_semantic_rejection_and_rejects_self_review(
     assert not (resolution / "workshop-manifest.json").exists()
 
 
+def test_workshop_semantic_gate_covers_english_and_each_section_contract(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    (workspace / "drafts/chinese.md").write_text(
+        "# Title: 偏头痛预测中的不确定性\n\n"
+        "## Keywords\n偏头痛, 症状变化, 临床预测\n\n"
+        "## TL;DR\n哪些研究方向仍然开放？\n\n"
+        "## Abstract\n偏头痛的发生时间与严重程度会随个体和日常条件变化。\n",
+        encoding="utf-8",
+        newline="",
+    )
+    preparation = _prepare(workspace)
+    _derivation_record(workspace, preparation)
+    validation = _validate(
+        workspace,
+        preparation,
+        attempt_id="attempt-001",
+        candidate="drafts/chinese.md",
+    )
+    assert validation.returncode == 0, validation.stderr
+    attempt_manifest = workspace / json.loads(validation.stdout)["attempt_manifest"]
+    decision = _semantic_decision(
+        workspace,
+        attempt_manifest,
+        approved=False,
+        failed_checks=frozenset(
+            {
+                "abstract_is_neutral_problem_scope",
+                "keywords_are_established_terms",
+                "title_is_identity_free_problem_area",
+                "tldr_is_open_question_or_tension",
+                "written_in_english",
+            }
+        ),
+    )
+
+    rejection = _run(
+        workspace,
+        "approve",
+        "--attempt-manifest",
+        attempt_manifest.relative_to(workspace).as_posix(),
+        "--semantic-decision",
+        decision.relative_to(workspace).as_posix(),
+    )
+
+    assert rejection.returncode == 2, rejection.stderr
+    assert json.loads(rejection.stdout)["status"] == "rejected_semantic"
+
+
+def test_workshop_case_cannot_be_reprepared_with_a_different_target(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target_path = workspace / "data/raw/target_papers.csv"
+    target_path.write_text(
+        target_path.read_text(encoding="utf-8")
+        + f'{ALT_TARGET_ID},Different Target,An unrelated raw abstract.,"{{}}",Unrelated summary.\n',
+        encoding="utf-8",
+        newline="",
+    )
+    _prepare(workspace)
+
+    second = _run(
+        workspace,
+        "prepare",
+        "--case-id",
+        CASE_ID,
+        "--target-paper-id",
+        ALT_TARGET_ID,
+        "--preparation-id",
+        "preparation-002",
+    )
+
+    assert second.returncode == 1
+    assert "FROZEN_SOURCE_MISMATCH" in second.stderr
+    assert not (
+        preparation_root := workspace
+        / "artifacts/ideation-inputs/workshops"
+        / CASE_ID
+        / "preparations/preparation-002"
+    ).exists(), preparation_root
+
+
 def test_workshop_approval_rejects_a_tampered_semantic_review_packet(
     tmp_path: Path,
 ) -> None:
@@ -421,6 +579,40 @@ def test_workshop_approval_rejects_a_tampered_semantic_review_packet(
     attempt_manifest = workspace / payload["attempt_manifest"]
     semantic_packet = workspace / payload["semantic_review_packet"]
     semantic_packet.write_bytes(semantic_packet.read_bytes() + b" ")
+    decision = _semantic_decision(workspace, attempt_manifest, approved=True)
+
+    approval = _run(
+        workspace,
+        "approve",
+        "--attempt-manifest",
+        attempt_manifest.relative_to(workspace).as_posix(),
+        "--semantic-decision",
+        decision.relative_to(workspace).as_posix(),
+    )
+
+    assert approval.returncode == 1
+    assert "HASH_MISMATCH" in approval.stderr
+    assert not (attempt_manifest.parent / "resolution").exists()
+
+
+@pytest.mark.parametrize("artifact_name", [f"{CASE_ID}.md", "validation-report.json"])
+def test_workshop_approval_rejects_hash_tampered_attempt_artifacts(
+    tmp_path: Path,
+    artifact_name: str,
+) -> None:
+    workspace = _workspace(tmp_path)
+    preparation = _prepare(workspace)
+    _derivation_record(workspace, preparation)
+    validation = _validate(
+        workspace,
+        preparation,
+        attempt_id="attempt-001",
+        candidate="drafts/valid.md",
+    )
+    assert validation.returncode == 0, validation.stderr
+    attempt_manifest = workspace / json.loads(validation.stdout)["attempt_manifest"]
+    tampered = attempt_manifest.parent / artifact_name
+    tampered.write_bytes(tampered.read_bytes() + b" ")
     decision = _semantic_decision(workspace, attempt_manifest, approved=True)
 
     approval = _run(
@@ -499,10 +691,16 @@ def test_approved_manifest_retains_all_prior_rejected_attempts(tmp_path: Path) -
         "attempt-002",
         "attempt-003",
     ]
-    assert manifest["attempts"][0]["deterministic_status"] == "fail"
+    assert manifest["attempts"][0]["validation"]["deterministic_status"] == "fail"
     assert manifest["attempts"][0]["semantic_status"] == "not_run"
+    assert manifest["attempts"][0]["derivation"]["actor"] == "fixture-author"
+    assert manifest["attempts"][0]["semantic_review"] is None
     assert manifest["attempts"][1]["semantic_status"] == "rejected"
+    assert manifest["attempts"][1]["semantic_review"]["rationale"]
     assert manifest["attempts"][2]["semantic_status"] == "approved"
+    assert manifest["attempts"][2]["semantic_review"]["reviewer"] == (
+        "fixture-reviewer"
+    )
 
 
 def test_workshop_validation_fails_closed_when_the_source_snapshot_drifts(
@@ -538,6 +736,23 @@ def test_workshop_validation_fails_closed_when_the_source_snapshot_drifts(
             b"# Title: Valid label\n\n## Keywords\none\n\n## TL;DR\nQuestion?\n\n"
             b"## Abstract\nNeutral scope.\n\n## Method\nForbidden.\n",
             "WORKSHOP-SCHEMA",
+        ),
+        (
+            b"# Title: Invalid UTF-8\n\n## Keywords\none\n\n## TL;DR\nQuestion?\n\n"
+            b"## Abstract\nNeutral scope.\xff\n",
+            "WORKSHOP-CANONICAL-UTF8",
+        ),
+        (
+            "# Title: Cafe\u0301 research\n\n## Keywords\none\n\n## TL;DR\nQuestion?\n\n"
+            "## Abstract\nNeutral scope.\n".encode("utf-8"),
+            "WORKSHOP-CANONICAL-NFC",
+        ),
+        (
+            f"# Title: Valid label\n\n## Keywords\none\n\n## TL;DR\nQuestion?\n\n"
+            f"## Abstract\nThe private paper identifier is {TARGET_ID}.\n".encode(
+                "utf-8"
+            ),
+            "WORKSHOP-IDENTITY-ID",
         ),
     ],
 )
