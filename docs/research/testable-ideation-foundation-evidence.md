@@ -102,4 +102,6 @@ S2_API_KEY=baseline-smoke COLUMNS=80 \
 
 ## Code review
 
-固定点 `cd25f36` 的首次双轴 review 结果：Standards 轴 3 项、Spec 轴 1 项；最严重问题均为 exact environment lock、命令、pass/fail 与 commit evidence 尚未进入已提交 diff。其余问题为 session commit 占位未回填及 work log ticket 引用未链接；没有 scope creep、实现语义错误或 baseline code smell。本报告、相邻 lock、ticket evidence 链接与 session log 回填共同处理这些发现；修复后复核结果随最终 session evidence 记录。
+固定点 `cd25f36` 的首次双轴 review 结果：Standards 轴 3 项、Spec 轴 1 项；最严重问题均为 exact environment lock、命令、pass/fail 与 commit evidence 尚未进入已提交 diff。其余问题为 session commit 占位未回填及 work log ticket 引用未链接；没有 scope creep、实现语义错误或 baseline code smell。本报告、相邻 lock、ticket evidence 链接与 session log 回填共同处理这些发现。
+
+修复后对 `cd25f36...f5b2418` 复核：Standards pass（0 hard violation、0 baseline smell）；Spec pass（0 missing/partial、0 scope creep、0 implementation error）。Ticket 保持 open，最后一项等待 Robert 验收不是实现缺陷。
