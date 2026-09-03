@@ -13,7 +13,7 @@ new-run 安全入口已落地：请求 schema 校验、exclusive-create run root
 ## 固定实现边界
 
 - 开工固定点：`add45bd4403a6b15ab13cee058231483e8010f58`（`fix: backfill closure commit SHA in session log`）。
-- 实现 commits：`cbaa99b add: implement Ideation Run admission without paid work`、`631e209 fix: harden admission preflight per two-axis review`、`6783c46 fix: close re-review findings in admission boundary`。
+- 实现 commits：`cbaa99b add: implement Ideation Run admission without paid work`、`631e209 fix: harden admission preflight per two-axis review`、`6783c46 fix: close re-review findings in admission boundary`、`7d4884e fix: reject denormalized relative paths; prove canonical negatives`（验收自查补缺）。
 - CLI 面：`python ai_scientist/perform_ideation_temp_free.py new-run --help`；运行说明见 `AGENTS.md`。
 - 模块职责：`run_store.py` 负责 run root、write-once 文档与 event hash chain；`pricing.py` 负责 versioned 价格表、上界与逐 attempt 计价；`retrieval.py` 只构造绑定获批 corpus 的 retriever（检索执行归 05 票）；`admission.py` 负责九步序列与 Run Admission。
 
@@ -76,6 +76,15 @@ S2_API_KEY=baseline-smoke COLUMNS=80 \
 固定点 `add45bd` 的首轮双轴 review：Standards 8 项（最高信号：不可能的 adjacency 守卫、双生 schema 常量、`_now` 三重复制、死 helper）；Spec 10 项（最实质：step-1 仅有 argparse 层、corpus 验证偏浅、`--non-interactive` 超合同、路径绕过守卫）。修复 commit `631e209` 处理全部可执行项：schema 校验前移、corpus/report/versions 全验、路径走 `workspace_relative_path`、删除超合同 flag 与死代码、统一常量、复用 `contract._now`。
 
 对修复后 HEAD 的双轴复核：Spec 轴 0 findings（六个修复全部核实、九步顺序与价格合同不变）；Standards 轴余 2 项——manifest 非 dict 值会以 `AttributeError` 逃逸 typed failure 路径（真实失败面）、`_now` 在 `run_store` 仍存一份。修复 commit `6783c46` 引入 `_mapping_field` 使全部 manifest 字段 fail closed、删除 `run_store._now` 与死 `_read_request_hash`、`_run_preflight_steps` 签名改用 `RunHandle`。复核遗留的 judgement calls（loader 返回 string-keyed dict、`attempt_cost` 仅测试触达）记录如下：前者是 023 事件 payload 的序列化边界所需，后者是 VM-UNIT-06 的合同测试对象（022 定义、本票交付的 unit 行），不构成投机泛型。
+
+## 验收自查与补缺（2026-09-03 晚间追加）
+
+验收复核发现两处机检缺口并已在 `7d4884e` 补齐：
+
+- `VM-UNIT-02` 负向条款（duplicate keys、NaN/Infinity、float 值、非 NFC、unpaired surrogate、非法 UTF-8）此前无直接测试；新增 4 项测试实证 `canonical_json_bytes`/`parse_json_bytes` 全部 fail closed，并固化 canonical rendering 形状（sorted/compact/LF/末尾单 newline）。
+- `VM-CONTRACT-023-01` 路径负向中，`./x` 与 `x/` 因 pathlib `parts` 丢弃前导 `./`、尾部 `/` 而绕过检查——这是实现缺陷。`workspace_relative_path` 现在在解析前拒绝非归一化形状（`./`、尾部 `/`、外侧空白），以 stash 修复前后做了 RED→GREEN 实证；backslash/absolute/`..`/symlink 负向集一并入测。
+
+补缺后全量 `333 passed in 43.84s`、Black 触及范围合规、compileall exit 0。
 
 ## Trust boundary
 
