@@ -1,7 +1,9 @@
 # 可测试 Ideation 地基验证证据
 
-日期：2026-09-03  
-Implementation ticket：[Establish the testable ideation foundation](../wayfinder/ideation-implementation/tickets/01-establish-the-testable-ideation-foundation.md)  
+日期：2026-09-03
+
+Implementation ticket：[Establish the testable ideation foundation](../wayfinder/ideation-implementation/tickets/01-establish-the-testable-ideation-foundation.md)
+
 验证矩阵：`VM-CONTRACT-024-01`、`VM-ENV-01`
 
 ## 结论
