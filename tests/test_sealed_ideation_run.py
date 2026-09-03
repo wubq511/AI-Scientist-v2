@@ -1031,9 +1031,13 @@ def test_adversarial_duplicate_idea_name_in_run_is_rejected(
 def test_adversarial_finalize_without_prior_retrieval_is_rejected(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """Prove that finalizing an idea without prior SearchLiterature in the run fails on the retrieval backstop."""
+    """Prove that finalizing an idea without prior SearchLiterature in the run fails on the retrieval backstop.
+
+    Since ticket 09 the run-level backstop seals an explicit terminal `failed`
+    outcome instead of raising out of the controller.
+    """
     import io
-    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.run_store import RUN_SEAL_SCHEMA_VERSION as _SEAL_SCHEMA
 
     workspace = _workspace(tmp_path)
     corpus_rel, corpus_sha = _approved_corpus(workspace)
@@ -1092,8 +1096,20 @@ def test_adversarial_finalize_without_prior_retrieval_is_rejected(
         num_reflections=2,
     )
 
-    with pytest.raises(IdeationInputError, match="RETRIEVAL_BACKSTOP_FAILED"):
-        run_new_run(workspace, request, adapter=adapter, execute=True)
+    result = run_new_run(workspace, request, adapter=adapter, execute=True)
+    assert result["status"] == "sealed"
+    assert result["terminal_outcome"] == "failed"
+    assert result["reason_code"] == "RETRIEVAL_BACKSTOP_FAILED"
+
+    run_root = workspace / "artifacts/ideation-runs" / result["run_id"]
+    seal_bytes = (run_root / "seal.json").read_bytes()
+    seal = parse_json_bytes(seal_bytes, label="seal.json")
+    assert seal["schema_version"] == _SEAL_SCHEMA
+    assert seal["terminal_outcome"] == "failed"
+    assert seal["terminal_summary"]["disposition_counts"] == {
+        "finalized": 0,
+        "budget_exhausted": 1,
+    }
 
 
 def test_adversarial_idea_structure_rejects_surrogates_and_null_bytes() -> None:

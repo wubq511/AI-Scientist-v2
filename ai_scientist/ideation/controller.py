@@ -1,12 +1,13 @@
-"""Ideation Run Controller (tickets 07, 023, 024, 025, 038).
+"""Ideation Run Controller (tickets 07, 08, 09, 023, 024, 025, 026, 038).
 
 Drives the approved generation/reflection loop for an admitted Ideation Run:
 executes model inference rounds via DeepSeek adapter, invokes Scoped Literature
-Retriever for evidence, enforces the FinalizeIdea gate (payload hygiene, seven-field
-structure, and Declared Grounding against returned literature), commits accepted
-ideas atomically before advancing to the next generation, verifies the run-level
-backstop, emits strictly linked immutable evidence events, and seals the run with
-a canonical seal.json.
+Retriever for evidence, enforces the FinalizeIdea gate (payload hygiene,
+seven-field structure, Declared Grounding, and within-run duplicates in the
+approved fixed priority), commits accepted ideas atomically before advancing to
+the next generation, seals terminal outcomes -- success or explicit failed --
+with a canonical seal.json, and suspends without a seal on environment-class
+failures.
 """
 
 from __future__ import annotations
@@ -24,10 +25,13 @@ from .canonical import (
 )
 from .contract import _now
 from .deepseek import (
+    DEEPSEEK_ADAPTER_SCHEMA_VERSION,
     DeepSeekAdapter,
     DeepSeekMessage,
     DeepSeekRequest,
+    ModelRoundError,
     ModelRoundResult,
+    TERMINAL_FAILURES,
 )
 from .errors import IdeationInputError, fail
 from .retrieval import ScopedLiteratureRetriever, bind_corpus
@@ -55,6 +59,83 @@ MODEL_FIXABLE_ERROR_CODES: frozenset[str] = frozenset(
         "DUPLICATE_IDEA_NAME",
         "DUPLICATE_IDEA",
     }
+)
+
+# Terminal (non-model-fixable) codes that seal the run `failed` (Ticket 025).
+# Sealed failure reasons are the approved closed vocabulary only:
+# - Controller terminal conditions (Ticket 026 hygiene gate, 020 backstop).
+# - Deterministic adapter failures from the closed taxonomy (Ticket 025
+#   terminal row), surfaced as `reason_kind=provider`.
+# - Retriever/evidence boundary failures (Ticket 020), surfaced verbatim as
+#   `reason_kind=retriever_evidence`.
+CONTROLLER_TERMINAL_CODES: frozenset[str] = frozenset(
+    {
+        "PAYLOAD_HYGIENE_VIOLATION",
+        "PAYLOAD_CORRUPT",
+        "RETRIEVAL_BACKSTOP_FAILED",
+    }
+)
+
+ADAPTER_TERMINAL_CODES: frozenset[str] = TERMINAL_FAILURES
+
+RETRIEVER_EVIDENCE_TERMINAL_CODES: frozenset[str] = frozenset(
+    {
+        "AUDIT_RELEASE_GATE_FAILED",
+        "HASH_MISMATCH",
+        "IDENTITY_MISMATCH",
+        "INVALID_CORPUS",
+        "INVALID_SCORE",
+        "MISSING_CORPUS",
+        "NO_ELIGIBLE_CANDIDATES",
+        "PATH_ESCAPE",
+        "SYMLINK_FORBIDDEN",
+    }
+)
+
+TERMINAL_OUTCOME_CODES: frozenset[str] = (
+    CONTROLLER_TERMINAL_CODES
+    | ADAPTER_TERMINAL_CODES
+    | RETRIEVER_EVIDENCE_TERMINAL_CODES
+)
+
+# Versioned payload hygiene pattern list (Ticket 026 / VM-LEAKAGE-02).
+# Patterns derive from the tickets 023/024 identifier formats: the `case_id`
+# schema shape, canonical SHA-256 hex digests, canonical lowercase UUIDv4 run
+# identifiers, the fixed run trust roots, and internal lifecycle artifact
+# names. Retrieved paper_id values are 40-hex (ticket 020) and deliberately
+# NOT matched: they are model-visible evidence, not private identifiers.
+PAYLOAD_HYGIENE_PATTERNS_VERSION = "payload-hygiene-patterns-v1.0.0"
+PAYLOAD_HYGIENE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("case_id_format", re.compile(r"case-[0-9a-f]{32}")),
+    ("sha256_hex", re.compile(r"\b[0-9a-f]{64}\b")),
+    (
+        "uuidv4_format",
+        re.compile(
+            r"\b[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b"
+        ),
+    ),
+    (
+        "run_root_path",
+        re.compile(r"artifacts/ideation-runs/|evidence/ideation-runs/|ideation-runs/"),
+    ),
+    (
+        "internal_evidence_path",
+        re.compile(
+            r"data/raw/|artifacts/operations/|artifacts/ideas/|artifacts/validations/"
+            r"|projections/|events/|reviews/"
+        ),
+    ),
+    (
+        "internal_artifact_filename",
+        re.compile(
+            r"\b(admission|request|seal|bundle-manifest)\.json\b|\bgrounding\.json\b|\bsidecar\.json\b"
+        ),
+    ),
+)
+
+# Model-visible FinalizeIdea surface re-parseable from raw submission bytes.
+HYGIENE_SCAN_ARGUMENTS_PATTERN = re.compile(
+    r"ARGUMENTS:\s*(.*?)(?:\nTHOUGHT:|\Z)", re.DOTALL | re.IGNORECASE
 )
 
 REQUIRED_IDEA_FIELDS: tuple[str, ...] = (
@@ -175,6 +256,15 @@ Ensure the JSON is properly formatted for automatic parsing.
 Note: You should perform at least one literature search before finalizing your idea to ensure it is well-informed by existing research."""
 
 
+def _failure_message(exc: ModelRoundError) -> str:
+    """Extract the provider failure message from a ModelRoundError."""
+    failure = getattr(exc, "failure", None)
+    message = getattr(failure, "message", None)
+    if isinstance(message, str) and message:
+        return message
+    return str(exc)
+
+
 def parse_action_and_arguments(response_text: str) -> tuple[str, dict[str, Any]]:
     """Extract and parse ACTION and ARGUMENTS from model response."""
     action_match = ACTION_PATTERN.search(response_text)
@@ -214,6 +304,31 @@ def _check_string_hygiene(val: str, field_name: str) -> None:
             fail(
                 "PAYLOAD_CORRUPT", f"Field '{field_name}' contains surrogate code point"
             )
+
+
+def scan_payload_hygiene(text: str) -> list[dict[str, Any]]:
+    """Scan raw FinalizeIdea submission text for private identifier patterns.
+
+    Returns one entry per hit: {"pattern_id", "pattern_version", "span"}.
+    The report deliberately carries no secret material: only the matched
+    pattern identity and its character span (Ticket 026 / VM-LEAKAGE-02).
+    """
+    hits: list[dict[str, Any]] = []
+    for pattern_id, pattern in PAYLOAD_HYGIENE_PATTERNS:
+        for match in pattern.finditer(text):
+            hits.append(
+                {
+                    "pattern_id": pattern_id,
+                    "pattern_version": PAYLOAD_HYGIENE_PATTERNS_VERSION,
+                    "span": [match.start(), match.end()],
+                }
+            )
+    return hits
+
+
+def _scan_submission_hygiene(arguments_text: str) -> list[dict[str, Any]]:
+    """Hygiene-scan the raw ARGUMENTS submission block, parse errors included."""
+    return scan_payload_hygiene(arguments_text)
 
 
 def validate_idea_structure(idea: Any) -> dict[str, Any]:
@@ -435,26 +550,137 @@ class IdeationController:
         system_prompt = build_system_prompt()
 
         for gen_idx in range(self.max_num_generations):
-            self._execute_generation(gen_idx, system_prompt)
+            try:
+                sealed = self._execute_generation(gen_idx, system_prompt)
+            except IdeationInputError as exc:
+                # Deterministic retriever/evidence boundary failures terminate
+                # the run through an explicit failed seal; no retry, no
+                # fallback, and no model-fixable masking (Ticket 020/025).
+                return self._seal_failed_run(exc.code, exc.message or str(exc))
+            except ModelRoundError as exc:
+                # Adapter failures follow the closed disposition table
+                # (Ticket 025): terminal provider failures seal `failed`;
+                # suspend-class failures propagate for Run Suspension.
+                if exc.disposition == "terminal":
+                    return self._seal_failed_run(exc.code, _failure_message(exc))
+                raise
+            if sealed is not None:
+                # A terminal condition inside the generation (e.g. hygiene
+                # hit) already sealed the run; stop immediately.
+                return sealed
 
         # Run-level backstop check (Ticket 020 / Ticket 025):
         # The run must have retrieved at least one non-empty retrieval result across all generations.
         if not self.run_has_non_empty_retrieval:
-            fail(
+            return self._seal_failed_run(
                 "RETRIEVAL_BACKSTOP_FAILED",
                 "Run completed without obtaining any non-empty literature retrieval results",
+                detail_artifact_name="backstop-violation.json",
+                detail={
+                    "generations_executed": self.max_num_generations,
+                    "disposition_counts": dict(self.disposition_counts),
+                    "idea_count": len(self.accepted_ideas),
+                },
             )
 
-        # Terminal event & Seal
+        return self._seal_success_run()
+
+    def _seal_success_run(self) -> dict[str, Any]:
+        """Commit the terminal event and canonical seal for a successful run."""
+        return self._write_terminal_seal(
+            outcome="success",
+            summary={
+                "disposition_counts": dict(self.disposition_counts),
+                "idea_count": len(self.accepted_ideas),
+                "outcome": "success",
+            },
+            result_payload={},
+        )
+
+    def _seal_failed_run(
+        self,
+        reason_code: str,
+        reason_message: str,
+        *,
+        detail_artifact_name: str | None = None,
+        detail: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Seal an explicit terminal `failed` outcome (Ticket 025/026/020).
+
+        The failure class is recorded as the final terminal event payload, an
+        optional sanitized violation report artifact is persisted before the
+        terminal event so the seal inventory can reference it, and the run is
+        closed with a canonical seal.json. No model round follows a terminal
+        failure and no lower-priority model-fixable feedback can mask it.
+        """
+        if reason_code in ADAPTER_TERMINAL_CODES:
+            reason_kind = "provider"
+        elif reason_code in RETRIEVER_EVIDENCE_TERMINAL_CODES:
+            reason_kind = "retriever_evidence"
+        elif reason_code in CONTROLLER_TERMINAL_CODES:
+            reason_kind = "controller"
+        else:
+            fail(
+                "INVALID_FAILURE_CODE",
+                f"Reason code is not an approved terminal outcome code: {reason_code}",
+            )
+
+        terminal_summary: dict[str, Any] = {
+            "disposition_counts": dict(self.disposition_counts),
+            "idea_count": len(self.accepted_ideas),
+            "outcome": "failed",
+            "reason_code": reason_code,
+            "reason_kind": reason_kind,
+        }
+
+        detail_ref: dict[str, Any] | None = None
+        if detail_artifact_name is not None:
+            detail_doc: dict[str, Any] = {
+                "message": reason_message,
+                "reason_code": reason_code,
+            }
+            if detail is not None:
+                detail_doc.update(detail)
+            detail_bytes = canonical_json_bytes(detail_doc)
+            detail_rel, detail_len, detail_sha = self.store.write_artifact(
+                self.run_id,
+                f"artifacts/failures/{detail_artifact_name}",
+                detail_bytes,
+                label="terminal failure detail",
+            )
+            detail_ref = {
+                "byte_length": detail_len,
+                "media_type": "application/json",
+                "relative_path": detail_rel,
+                "role": "terminal_failure_detail",
+                "sha256": detail_sha,
+            }
+
+        return self._write_terminal_seal(
+            outcome="failed",
+            summary=terminal_summary,
+            result_payload={"reason_code": reason_code},
+            extra_artifact_refs=[detail_ref] if detail_ref else [],
+        )
+
+    def _write_terminal_seal(
+        self,
+        *,
+        outcome: str,
+        summary: dict[str, Any],
+        result_payload: dict[str, Any],
+        extra_artifact_refs: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Append the terminal event, verify the chain, and write seal.json."""
+        terminal_payload: dict[str, Any] = dict(summary)
+        artifact_refs: list[dict[str, Any]] = list(extra_artifact_refs or [])
+        if artifact_refs:
+            terminal_payload["artifact_refs"] = artifact_refs
         terminal_record = self.store.append_event(
             self.run_id,
             {
                 "event_type": "terminal",
-                "payload": {
-                    "disposition_counts": dict(self.disposition_counts),
-                    "idea_count": len(self.accepted_ideas),
-                    "outcome": "success",
-                },
+                "payload": terminal_payload,
                 "writer_epoch": self.writer_epoch,
             },
         )
@@ -474,24 +700,22 @@ class IdeationController:
             "run_id": self.run_id,
             "schema_version": RUN_SEAL_SCHEMA_VERSION,
             "sealed_at": _now(),
-            "terminal_outcome": "success",
-            "terminal_summary": {
-                "disposition_counts": dict(self.disposition_counts),
-                "idea_count": len(self.accepted_ideas),
-                "outcome": "success",
-            },
+            "terminal_outcome": outcome,
+            "terminal_summary": summary,
         }
 
         seal_sha = self.store.write_seal(self.run_id, seal_document)
         self.store.verify_chain(self.run_id)
 
-        return {
+        result = {
             "idea_count": len(self.accepted_ideas),
             "run_id": self.run_id,
             "seal_sha256": seal_sha,
             "status": "sealed",
-            "terminal_outcome": "success",
+            "terminal_outcome": outcome,
         }
+        result.update(result_payload)
+        return result
 
     def _record_model_fixable_error(
         self,
@@ -543,8 +767,72 @@ class IdeationController:
         )
         return feedback_text
 
-    def _execute_generation(self, gen_idx: int, system_prompt: str) -> None:
-        """Execute a single generation with reflection rounds."""
+    def _record_hygiene_hit(
+        self,
+        *,
+        hits: list[dict[str, Any]],
+        operation_seq: int,
+        pipeline_pos: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Record a terminal payload hygiene violation and seal the run failed.
+
+        The private violation report (pattern id + span only, no secret bytes)
+        is persisted before the terminal event so the seal inventory carries
+        the full failure evidence. No feedback text is produced: the model
+        never sees this round again (Ticket 026 hygiene = terminal).
+        """
+        report_doc = {
+            "action": "FinalizeIdea",
+            "hits": hits,
+            "hit_count": len(hits),
+            "patterns_version": PAYLOAD_HYGIENE_PATTERNS_VERSION,
+        }
+        report_bytes = canonical_json_bytes(report_doc)
+        report_rel, report_len, report_sha = self.store.write_operation_artifact(
+            self.run_id,
+            operation_seq,
+            1,
+            "hygiene-violation.json",
+            report_bytes,
+            label="payload hygiene violation report",
+        )
+        report_ref = {
+            "byte_length": report_len,
+            "media_type": "application/json",
+            "relative_path": report_rel,
+            "role": "hygiene_violation_report",
+            "sha256": report_sha,
+        }
+        self.store.append_event(
+            self.run_id,
+            {
+                "artifact_refs": [report_ref],
+                "event_type": "action_outcome",
+                "payload": {
+                    "action": "FinalizeIdea",
+                    "error_code": "PAYLOAD_HYGIENE_VIOLATION",
+                    "hit_count": len(hits),
+                    "outcome": "hygiene_hit",
+                    "patterns_version": PAYLOAD_HYGIENE_PATTERNS_VERSION,
+                    "schema_version": ACTION_OUTCOME_SCHEMA_VERSION,
+                },
+                "pipeline_position": pipeline_pos,
+                "writer_epoch": self.writer_epoch,
+            },
+        )
+        return self._seal_failed_run(
+            "PAYLOAD_HYGIENE_VIOLATION",
+            "FinalizeIdea submission matched a private identifier hygiene pattern",
+        )
+
+    def _execute_generation(
+        self, gen_idx: int, system_prompt: str
+    ) -> dict[str, Any] | None:
+        """Execute a single generation with reflection rounds.
+
+        Returns the sealed run result when a terminal condition sealed the run
+        mid-generation (payload hygiene hit), otherwise None.
+        """
         pipeline_pos = {
             "generation_index": gen_idx,
             "idea_index": None,
@@ -688,6 +976,22 @@ class IdeationController:
                 )
 
             elif action == "FinalizeIdea":
+                # Finalization gate priority 1: payload hygiene scan on the raw
+                # submission bytes (Ticket 038 gate order). A pattern hit is a
+                # terminal condition; it must never be masked by, or converted
+                # into, lower-priority model-fixable feedback (Ticket 026).
+                arguments_match = HYGIENE_SCAN_ARGUMENTS_PATTERN.search(response_text)
+                if arguments_match:
+                    hygiene_hits = _scan_submission_hygiene(
+                        arguments_match.group(1).strip()
+                    )
+                    if hygiene_hits:
+                        return self._record_hygiene_hit(
+                            hits=hygiene_hits,
+                            operation_seq=model_op_seq,
+                            pipeline_pos=pipeline_pos,
+                        )
+
                 # Check closed two-key arguments structure (Ticket 038)
                 if not isinstance(arguments, dict):
                     last_tool_results = self._record_model_fixable_error(

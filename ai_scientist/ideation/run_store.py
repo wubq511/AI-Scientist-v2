@@ -223,6 +223,40 @@ class RunStore:
         sha = sha256_bytes(data)
         return rel_path, len(data), sha
 
+    def write_artifact(
+        self,
+        run_id: str,
+        relative_path: str,
+        data: bytes,
+        *,
+        label: str | None = None,
+    ) -> tuple[str, int, str]:
+        """Exclusively write a run artifact at a fixed template relative path.
+
+        The path must be a normalized run-root-relative POSIX path without
+        escape segments; parents are created as needed. Returns
+        (relative_path, byte_length, sha256).
+        """
+        if not isinstance(relative_path, str) or "\\" in relative_path:
+            fail("INVALID_PATH", "Artifact path must be a POSIX relative path")
+        relative = Path(relative_path)
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            fail(
+                "INVALID_PATH",
+                f"Artifact path must be normalized under the run root: {relative_path}",
+            )
+        run_root = self._run_root(run_id)
+        target_dir = run_root / relative.parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = run_root / relative
+        _write_exclusive(target_file, data, label=label or relative.name)
+        sha = sha256_bytes(data)
+        return relative.as_posix(), len(data), sha
+
     def write_seal(self, run_id: str, document: object) -> str:
         """Write the write-once run seal and return its SHA-256."""
         if not isinstance(document, dict):
