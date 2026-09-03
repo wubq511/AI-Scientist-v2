@@ -29,7 +29,7 @@ from .deepseek import (
     DeepSeekRequest,
     ModelRoundResult,
 )
-from .errors import fail
+from .errors import IdeationInputError, fail
 from .retrieval import ScopedLiteratureRetriever, bind_corpus
 from .run_store import (
     RUN_SEAL_SCHEMA_VERSION,
@@ -39,6 +39,23 @@ from .run_store import (
 IDEA_SIDECAR_SCHEMA_VERSION = "idea-sidecar-v1.0.0"
 ACTION_OUTCOME_SCHEMA_VERSION = "action-outcome-v1.0.0"
 WORKSHOP_RENDERING_VERSION = "raw_markdown_v1"
+
+MODEL_FIXABLE_ERROR_CODES: frozenset[str] = frozenset(
+    {
+        "PARSE_ERROR",
+        "UNKNOWN_ACTION",
+        "INVALID_ARGUMENTS_JSON",
+        "INVALID_QUERY",
+        "QUERY_TOO_LONG",
+        "GATE_REJECTED",
+        "INVALID_IDEA_STRUCTURE",
+        "INVALID_GROUNDING",
+        "EMPTY_GROUNDING",
+        "UNRETRIEVED_PAPER",
+        "DUPLICATE_IDEA_NAME",
+        "DUPLICATE_IDEA",
+    }
+)
 
 REQUIRED_IDEA_FIELDS: tuple[str, ...] = (
     "Name",
@@ -476,6 +493,56 @@ class IdeationController:
             "terminal_outcome": "success",
         }
 
+    def _record_model_fixable_error(
+        self,
+        *,
+        action: str | None,
+        error_code: str,
+        error_message: str,
+        operation_seq: int,
+        pipeline_pos: dict[str, Any],
+    ) -> str:
+        """Record model-fixable error feedback, write artifact, and append action_outcome event."""
+        feedback_text = (
+            f"Error [{error_code}]: {error_message}"
+            if error_code not in error_message
+            else error_message
+        )
+        feedback_bytes = feedback_text.encode("utf-8")
+        rel_path, byte_length, sha = self.store.write_operation_artifact(
+            self.run_id,
+            operation_seq,
+            1,
+            "feedback.txt",
+            feedback_bytes,
+            label="model-fixable error feedback",
+        )
+        self.store.append_event(
+            self.run_id,
+            {
+                "artifact_refs": [
+                    {
+                        "byte_length": byte_length,
+                        "media_type": "text/plain",
+                        "relative_path": rel_path,
+                        "role": "model_fixable_feedback",
+                        "sha256": sha,
+                    }
+                ],
+                "event_type": "action_outcome",
+                "payload": {
+                    "action": action or "unknown",
+                    "error_code": error_code,
+                    "feedback": feedback_text,
+                    "outcome": "model_fixable_error",
+                    "schema_version": ACTION_OUTCOME_SCHEMA_VERSION,
+                },
+                "pipeline_position": pipeline_pos,
+                "writer_epoch": self.writer_epoch,
+            },
+        )
+        return feedback_text
+
     def _execute_generation(self, gen_idx: int, system_prompt: str) -> None:
         """Execute a single generation with reflection rounds."""
         pipeline_pos = {
@@ -550,18 +617,52 @@ class IdeationController:
             msg_history.append({"role": "user", "content": prompt_text})
             msg_history.append({"role": "assistant", "content": response_text})
 
-            action, arguments = parse_action_and_arguments(response_text)
+            # Parse ACTION and ARGUMENTS
+            try:
+                action, arguments = parse_action_and_arguments(response_text)
+            except IdeationInputError as exc:
+                if exc.code in MODEL_FIXABLE_ERROR_CODES:
+                    last_tool_results = self._record_model_fixable_error(
+                        action="unknown",
+                        error_code=exc.code,
+                        error_message=exc.message or str(exc),
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
+                    )
+                    continue
+                raise
+
             if action not in MODEL_VISIBLE_ACTIONS:
-                fail("UNKNOWN_ACTION", f"Action '{action}' is not model-visible")
+                last_tool_results = self._record_model_fixable_error(
+                    action=action,
+                    error_code="UNKNOWN_ACTION",
+                    error_message=f"Action '{action}' is not model-visible. Allowed actions are 'SearchLiterature' and 'FinalizeIdea'.",
+                    operation_seq=model_op_seq,
+                    pipeline_pos=pipeline_pos,
+                )
+                continue
 
             if action == "SearchLiterature":
                 retrieval_op_seq = self._next_op_seq()
+                try:
+                    retrieval_payload = self.retriever.search(
+                        arguments,
+                        operation_seq=retrieval_op_seq,
+                        attempt_seq=1,
+                    )
+                except IdeationInputError as exc:
+                    if exc.code in MODEL_FIXABLE_ERROR_CODES:
+                        last_tool_results = self._record_model_fixable_error(
+                            action="SearchLiterature",
+                            error_code=exc.code,
+                            error_message=exc.message or str(exc),
+                            operation_seq=retrieval_op_seq,
+                            pipeline_pos=pipeline_pos,
+                        )
+                        continue
+                    raise
+
                 generation_retrieval_op_seqs.append(retrieval_op_seq)
-                retrieval_payload = self.retriever.search(
-                    arguments,
-                    operation_seq=retrieval_op_seq,
-                    attempt_seq=1,
-                )
                 papers = retrieval_payload.get("papers", [])
                 if papers:
                     self.run_has_non_empty_retrieval = True
@@ -587,29 +688,118 @@ class IdeationController:
                 )
 
             elif action == "FinalizeIdea":
-                # Per-generation gate (Ticket 025): Must have obtained >= 1 non-empty retrieval result in this generation
-                if not generation_retrieved_paper_ids:
-                    fail(
-                        "GATE_REJECTED",
-                        "Cannot finalize idea without at least one non-empty literature retrieval in this generation",
+                # Check closed two-key arguments structure (Ticket 038)
+                if not isinstance(arguments, dict):
+                    last_tool_results = self._record_model_fixable_error(
+                        action="FinalizeIdea",
+                        error_code="INVALID_ARGUMENTS_JSON",
+                        error_message="FinalizeIdea arguments must be a JSON object",
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
                     )
+                    continue
 
-                idea_obj = arguments.get("idea")
-                grounding_obj = arguments.get("grounding")
+                extra_args = set(arguments.keys()) - {"idea", "grounding"}
+                if extra_args:
+                    last_tool_results = self._record_model_fixable_error(
+                        action="FinalizeIdea",
+                        error_code="INVALID_IDEA_STRUCTURE",
+                        error_message=f"FinalizeIdea arguments contain unknown fields: {sorted(extra_args)}. Allowed fields are exactly 'idea' and 'grounding'",
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
+                    )
+                    continue
 
-                validated_idea = validate_idea_structure(idea_obj)
-                validated_grounding = validate_declared_grounding(
-                    grounding_obj, generation_retrieved_paper_ids
-                )
+                if "idea" not in arguments:
+                    last_tool_results = self._record_model_fixable_error(
+                        action="FinalizeIdea",
+                        error_code="INVALID_IDEA_STRUCTURE",
+                        error_message="FinalizeIdea arguments missing required 'idea' field",
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
+                    )
+                    continue
 
+                if "grounding" not in arguments:
+                    last_tool_results = self._record_model_fixable_error(
+                        action="FinalizeIdea",
+                        error_code="INVALID_GROUNDING",
+                        error_message="FinalizeIdea arguments missing required 'grounding' field",
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
+                    )
+                    continue
+
+                # Validate idea 7-field structure
+                try:
+                    validated_idea = validate_idea_structure(arguments.get("idea"))
+                except IdeationInputError as exc:
+                    if exc.code in MODEL_FIXABLE_ERROR_CODES:
+                        last_tool_results = self._record_model_fixable_error(
+                            action="FinalizeIdea",
+                            error_code=exc.code,
+                            error_message=exc.message or str(exc),
+                            operation_seq=model_op_seq,
+                            pipeline_pos=pipeline_pos,
+                        )
+                        continue
+                    raise
+
+                # Grounding Gate check: Must have obtained >= 1 non-empty retrieval result in this generation
+                if not generation_retrieved_paper_ids:
+                    last_tool_results = self._record_model_fixable_error(
+                        action="FinalizeIdea",
+                        error_code="GATE_REJECTED",
+                        error_message="Cannot finalize idea without at least one non-empty literature search in this generation. Use SearchLiterature first.",
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
+                    )
+                    continue
+
+                # Validate Declared Grounding against eligible retrieved papers in this generation
+                try:
+                    validated_grounding = validate_declared_grounding(
+                        arguments.get("grounding"), generation_retrieved_paper_ids
+                    )
+                except IdeationInputError as exc:
+                    if exc.code in MODEL_FIXABLE_ERROR_CODES:
+                        last_tool_results = self._record_model_fixable_error(
+                            action="FinalizeIdea",
+                            error_code=exc.code,
+                            error_message=exc.message or str(exc),
+                            operation_seq=model_op_seq,
+                            pipeline_pos=pipeline_pos,
+                        )
+                        continue
+                    raise
+
+                # Duplicate checks within this run
                 if any(
                     prev["Name"] == validated_idea["Name"]
                     for prev in self.accepted_ideas
                 ):
-                    fail(
-                        "DUPLICATE_IDEA_NAME",
-                        f"An idea named '{validated_idea['Name']}' was already accepted in this run",
+                    last_tool_results = self._record_model_fixable_error(
+                        action="FinalizeIdea",
+                        error_code="DUPLICATE_IDEA_NAME",
+                        error_message=f"An idea named '{validated_idea['Name']}' was already accepted in this run. Propose an interestingly new proposal.",
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
                     )
+                    continue
+
+                if any(
+                    prev["Title"].strip().lower()
+                    == validated_idea["Title"].strip().lower()
+                    for prev in self.accepted_ideas
+                ):
+                    last_tool_results = self._record_model_fixable_error(
+                        action="FinalizeIdea",
+                        error_code="DUPLICATE_IDEA",
+                        error_message=f"Idea title '{validated_idea['Title']}' is a near-duplicate of an already accepted proposal in this run. Propose an interestingly new proposal.",
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
+                    )
+                    continue
 
                 # Commit accepted idea atomically
                 idea_idx = len(self.accepted_ideas)

@@ -1002,14 +1002,36 @@ def test_adversarial_duplicate_idea_name_in_run_is_rejected(
         num_reflections=2,
     )
 
-    with pytest.raises(IdeationInputError, match="DUPLICATE_IDEA_NAME"):
-        run_new_run(workspace, request, adapter=adapter, execute=True)
+    result = run_new_run(workspace, request, adapter=adapter, execute=True)
+    assert result["status"] == "sealed"
+    assert result["idea_count"] == 1
+    assert result["terminal_outcome"] == "success"
+
+    seal_bytes = (
+        workspace / "artifacts/ideation-runs" / result["run_id"] / "seal.json"
+    ).read_bytes()
+    seal = parse_json_bytes(seal_bytes, label="seal.json")
+    assert seal["terminal_summary"]["disposition_counts"] == {
+        "finalized": 1,
+        "budget_exhausted": 1,
+    }
+    assert seal["terminal_summary"]["idea_count"] == 1
+
+    # Verify model-fixable error feedback artifact exists for duplicate attempt (op 7)
+    fb_path = (
+        workspace
+        / "artifacts/ideation-runs"
+        / result["run_id"]
+        / "artifacts/operations/000007/attempts/000001/feedback.txt"
+    )
+    assert fb_path.is_file()
+    assert "DUPLICATE_IDEA_NAME" in fb_path.read_text(encoding="utf-8")
 
 
 def test_adversarial_finalize_without_prior_retrieval_is_rejected(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """Prove that finalizing an idea without prior SearchLiterature in the generation fails closed."""
+    """Prove that finalizing an idea without prior SearchLiterature in the run fails on the retrieval backstop."""
     import io
     from ai_scientist.ideation.errors import IdeationInputError
 
@@ -1034,13 +1056,23 @@ def test_adversarial_finalize_without_prior_retrieval_is_rejected(
     }
 
     stub_responses = [
-        # Model tries to finalize idea in round 0 without any prior SearchLiterature
+        # Round 0: Model tries to finalize idea without any prior SearchLiterature
         TransportResponse(
             200,
             {"content-type": "application/json"},
             _make_response_bytes(
                 f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(idea)}, "grounding": ["some_paper"]}}',
                 "r1",
+            ),
+            30.0,
+        ),
+        # Round 1: Model tries again without searching -> exhausts reflection budget
+        TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            _make_response_bytes(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(idea)}, "grounding": ["some_paper"]}}',
+                "r2",
             ),
             30.0,
         ),
@@ -1060,7 +1092,7 @@ def test_adversarial_finalize_without_prior_retrieval_is_rejected(
         num_reflections=2,
     )
 
-    with pytest.raises(IdeationInputError, match="GATE_REJECTED"):
+    with pytest.raises(IdeationInputError, match="RETRIEVAL_BACKSTOP_FAILED"):
         run_new_run(workspace, request, adapter=adapter, execute=True)
 
 
