@@ -22,6 +22,34 @@ WORKSHOP_POLICY_PATH = Path("ai_scientist/ideation/policies/workshop-leakage-v1.
 WORKSHOP_POLICY_SHA256 = (
     "5147d6b1d951e2de0f50fb132955e053e638ffd3daa6292c08a047f8fdc21f61"
 )
+CORPUS_CONTRACT_VERSION = "corpus-contract-v1.0"
+CORPUS_SCHEMA_VERSION = "corpus-schema-v1.0"
+CORPUS_NORMALIZATION_VERSION = "source-text-nfc-lf-trim-v1"
+CORPUS_ENRICHMENT_POLICY_VERSION = "reference-authority-v1.0"
+CORPUS_VALIDATOR_VERSION = "corpus-validator-v1.0"
+CORPUS_MANIFEST_SCHEMA_VERSION = "corpus-manifest-v1.0"
+CORPUS_VALIDATION_REPORT_SCHEMA_VERSION = "corpus-validation-report-v1.0"
+CORPUS_APPROVAL_DECISION_SCHEMA_VERSION = "corpus-approval-decision-v1.0"
+CORPUS_POLICY_PATH = Path("ai_scientist/ideation/policies/reference-authority-v1.json")
+CORPUS_POLICY_SHA256 = (
+    "65b0d9aa5942eb164370fb6d7162fbd6b4a629488a6093e0e0ebfd44eb1e6a5f"
+)
+CORPUS_QUARANTINED_FIELDS = frozenset(
+    {
+        "targetPaperId",
+        "contexts",
+        "intents",
+        "isInfluential",
+        "citationCount",
+        "abstract_summary",
+        "query",
+        "score",
+        "rank",
+    }
+)
+CORPUS_KNOWN_BAD_TEXTS = frozenset({"falls,", "Statistics Working Papers Series"})
+CORPUS_ALLOWED_CONTENT_TYPES = frozenset({"publisher_abstract", "official_full_text"})
+CORPUS_ALLOWED_CONTENT_STATUSES = frozenset({"validated", "not_published"})
 SOURCE_ALLOWLIST = ["title", "abstract"]
 SEMANTIC_CHECKS = (
     "abstract_is_neutral_problem_scope",
