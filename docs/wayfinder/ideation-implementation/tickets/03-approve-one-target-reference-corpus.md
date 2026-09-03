@@ -1,7 +1,7 @@
 ---
 title: Approve one Target Reference Corpus
 type: implementation
-status: in-review
+status: closed
 assignee: codex
 blocked_by:
   - 02-approve-one-workshop-file.md
@@ -13,7 +13,7 @@ blocked_by:
 
 **Blocked by:** 02: Approve one Workshop File.
 
-**Status:** in-review
+**Status:** accepted
 
 **Contract anchors:** [Freeze literature before ideation](../../ideation-pipeline/tickets/003-freeze-literature-before-ideation.md), [Audit metadata gaps and enrichment sources](../../ideation-pipeline/tickets/016-audit-metadata-gaps-and-enrichment-sources.md), [Define the frozen corpus contract](../../ideation-pipeline/tickets/019-define-the-frozen-corpus-contract.md), [Understand dataset routing metadata](../../ideation-pipeline/tickets/033-understand-dataset-routing-metadata.md).
 

@@ -84,7 +84,9 @@ def validate_all_corpora(
 
     with tempfile.TemporaryDirectory(dir=workspace_root) as tmp_dir:
         tmp_workspace = Path(tmp_dir)
-        rel_artifact_root = tmp_workspace.relative_to(workspace_root).as_posix()
+        rel_artifact_root = (
+            tmp_workspace.resolve().relative_to(workspace_root.resolve()).as_posix()
+        )
         for target_id in target_ids:
             opaque_case_id = f"case-{sha256_bytes(f'deterministic-validation-case-v1:{target_id}'.encode('utf-8'))[:32]}"
             try:

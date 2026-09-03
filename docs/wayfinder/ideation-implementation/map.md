@@ -34,3 +34,4 @@ Ticket frontmatter is authoritative for status and blocking edges. Each ticket i
 
 - [Establish the testable ideation foundation](tickets/01-establish-the-testable-ideation-foundation.md)：以三类精确依赖合同、入口传递 import allowlist、Python 3.13 clean-environment 全量 pytest 与逐字节 CLI baseline 建立零 runtime 行为漂移的可测试地基。
 - [Approve one Workshop File](tickets/02-approve-one-workshop-file.md)：以离线 prepare/validate/approve 三阶段生命周期隔离、严格四段 canonical rendering、exact/normalized/8-token leakage 确定性门禁与独立评审人九项语义检查建立零泄露、带不可篡改 attempt provenance 的 Workshop 审批边界。
+- [Approve one Target Reference Corpus](tickets/03-approve-one-target-reference-corpus.md)：以生命周期隔离的 build/validate/approve 流程、冻结权威证据政策（修复 3 篇损坏摘要与 18 条缺失 venue 警告）、全量 fail-closed 11 项确定性检验器与严格 Quarantine 隔离建立自包含的语料审批边界，并完成全量 237 个 Targets 的离线零成本预处理验证。
