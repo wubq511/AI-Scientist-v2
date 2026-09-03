@@ -361,6 +361,8 @@ def _run_preflight_steps(
         corpus_sha256=corpus["sha256"],
         case_id=corpus["case_id"],
         record_count=corpus["record_count"],
+        run_id=run.run_id,
+        store=store,
     )
     _append_step(
         store,

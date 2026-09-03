@@ -145,6 +145,66 @@ class RunStore:
         _write_exclusive(run_root / ADMISSION_NAME, data, label="admission.json")
         return sha256_bytes(data)
 
+    def write_operation_artifact(
+        self,
+        run_id: str,
+        operation_seq: int,
+        attempt_seq: int,
+        filename: str,
+        data: bytes,
+        *,
+        label: str | None = None,
+    ) -> tuple[str, int, str]:
+        """Exclusively write an operation attempt artifact.
+
+        Returns (relative_path, byte_length, sha256), where relative_path
+        is relative to the run root per ticket 023.
+        """
+        if operation_seq < 1 or attempt_seq < 1:
+            fail("INVALID_COORDINATE", "Operation and attempt sequences must be >= 1")
+        if "/" in filename or "\\" in filename or not filename.strip():
+            fail("INVALID_PATH", "Artifact filename must be a bare filename")
+        run_root = self._run_root(run_id)
+        rel_parent = (
+            Path("artifacts/operations")
+            / f"{operation_seq:06d}"
+            / "attempts"
+            / f"{attempt_seq:06d}"
+        )
+        target_dir = run_root / rel_parent
+        target_dir.mkdir(parents=True, exist_ok=True)
+        rel_path = (rel_parent / filename).as_posix()
+        target_file = run_root / rel_path
+        _write_exclusive(target_file, data, label=label or filename)
+        sha = sha256_bytes(data)
+        return rel_path, len(data), sha
+
+    def read_artifact(
+        self,
+        run_id: str,
+        relative_path: str,
+        expected_sha256: str | None = None,
+        *,
+        label: str | None = None,
+    ) -> bytes:
+        """Read a run artifact and optionally verify its SHA-256."""
+        run_root = self._run_root(run_id)
+        target = run_root / relative_path
+        try:
+            resolved = target.resolve(strict=True)
+        except OSError:
+            fail("MISSING_ARTIFACT", f"{label or relative_path} does not exist")
+        if not resolved.is_relative_to(run_root.resolve()):
+            fail("PATH_ESCAPE", "Artifact path escapes the run root")
+        data = target.read_bytes()
+        if expected_sha256 is not None and sha256_bytes(data) != expected_sha256:
+            fail(
+                "HASH_MISMATCH",
+                f"{label or relative_path} hash mismatch",
+                expected=expected_sha256,
+            )
+        return data
+
     def append_event(
         self,
         run_id: str,
@@ -200,6 +260,14 @@ class RunStore:
             "payload": event.get("payload", {}),
             "prev_event_hash": computed_prev,
         }
+        if "writer_epoch" in event:
+            document["writer_epoch"] = event["writer_epoch"]
+        if "operation" in event:
+            document["operation"] = event["operation"]
+        if "pipeline_position" in event:
+            document["pipeline_position"] = event["pipeline_position"]
+        if "artifact_refs" in event:
+            document["artifact_refs"] = event["artifact_refs"]
         if "request_sha256" in event:
             document["request_sha256"] = event["request_sha256"]
         if "admission_sha256" in event:
