@@ -477,9 +477,17 @@ def _parse_preparation(value: object) -> dict[str, Any]:
 
 
 def _load_bound_preparation(
-    workspace: Path, manifest_path: Path
+    workspace: Path,
+    manifest_path: Path,
+    *,
+    expected_sha256: str | None = None,
 ) -> tuple[dict[str, Any], bytes, SourceSnapshot, LeakagePolicy]:
     value, manifest_bytes = read_json(manifest_path, label="preparation manifest")
+    if expected_sha256 is not None and sha256_bytes(manifest_bytes) != expected_sha256:
+        fail(
+            "HASH_MISMATCH",
+            "bound preparation manifest does not match its approved SHA-256",
+        )
     preparation = _parse_preparation(value)
     if manifest_path.name != "preparation-manifest.json":
         fail("INVALID_PATH", "Preparation manifest filename is invalid")

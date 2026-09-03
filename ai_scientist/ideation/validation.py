@@ -36,7 +36,11 @@ from .contract import (
     _now,
 )
 from .errors import fail
-from .preparation import _load_bound_preparation, _parse_ref
+from .preparation import (
+    _assert_frozen_case_binding,
+    _load_bound_preparation,
+    _parse_ref,
+)
 from .schema import (
     boolean,
     case_id as parse_case_id,
@@ -369,6 +373,8 @@ def validate_workshop(
     preparation, preparation_bytes, snapshot, policy = _load_bound_preparation(
         workspace, manifest_path
     )
+    case_root = manifest_path.parent.parent.parent
+    _assert_frozen_case_binding(workspace, case_root, preparation)
     parsed_attempt_id = stage_id(attempt_id, label="attempt_id")
     candidate_path = workspace_relative_path(workspace, candidate, label="candidate")
     derivation_path = workspace_relative_path(
@@ -385,7 +391,6 @@ def validate_workshop(
     ):
         fail("HASH_MISMATCH", "Derivation record binds a different authoring source")
 
-    case_root = manifest_path.parent.parent.parent
     if _approved_resolution_exists(case_root):
         fail("WORKSHOP_ALREADY_APPROVED", "This case already has an Approved Workshop")
     attempt_root = case_root / "attempts" / parsed_attempt_id
@@ -653,13 +658,13 @@ def _load_attempt(workspace: Path, attempt_manifest_path: Path) -> LoadedAttempt
         attempt["preparation_manifest"]["path"],
         label="attempt.preparation_manifest.path",
     )
-    preparation_bytes = read_exact(
+    preparation, preparation_bytes, snapshot, policy = _load_bound_preparation(
+        workspace,
         preparation_path,
-        attempt["preparation_manifest"]["sha256"],
-        label="bound preparation manifest",
+        expected_sha256=attempt["preparation_manifest"]["sha256"],
     )
-    preparation, _, snapshot, policy = _load_bound_preparation(
-        workspace, preparation_path
+    _assert_frozen_case_binding(
+        workspace, preparation_path.parent.parent.parent, preparation
     )
     if attempt["case_id"] != preparation["case_id"]:
         fail("IDENTITY_MISMATCH", "Attempt and preparation cases differ")

@@ -562,6 +562,47 @@ def test_workshop_case_cannot_be_reprepared_with_a_different_target(
     ).exists(), preparation_root
 
 
+def test_workshop_validation_rejects_a_conflicting_restored_preparation(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    target_path = workspace / "data/raw/target_papers.csv"
+    target_path.write_text(
+        target_path.read_text(encoding="utf-8")
+        + f'{ALT_TARGET_ID},Different Target,An unrelated raw abstract.,"{{}}",Unrelated summary.\n',
+        encoding="utf-8",
+        newline="",
+    )
+    first = _prepare(workspace)
+    stashed = workspace / "stashed-preparation-001"
+    first.parent.rename(stashed)
+    second = _run(
+        workspace,
+        "prepare",
+        "--case-id",
+        CASE_ID,
+        "--target-paper-id",
+        ALT_TARGET_ID,
+        "--preparation-id",
+        "preparation-002",
+    )
+    assert second.returncode == 0, second.stderr
+    second_preparation = workspace / json.loads(second.stdout)["preparation_manifest"]
+    stashed.rename(first.parent)
+    _derivation_record(workspace, second_preparation)
+
+    validation = _validate(
+        workspace,
+        second_preparation,
+        attempt_id="attempt-001",
+        candidate="drafts/valid.md",
+    )
+
+    assert validation.returncode == 1
+    assert "FROZEN_SOURCE_MISMATCH" in validation.stderr
+    assert not (second_preparation.parent.parent.parent / "attempts").exists()
+
+
 def test_workshop_approval_rejects_a_tampered_semantic_review_packet(
     tmp_path: Path,
 ) -> None:
@@ -613,6 +654,37 @@ def test_workshop_approval_rejects_hash_tampered_attempt_artifacts(
     attempt_manifest = workspace / json.loads(validation.stdout)["attempt_manifest"]
     tampered = attempt_manifest.parent / artifact_name
     tampered.write_bytes(tampered.read_bytes() + b" ")
+    decision = _semantic_decision(workspace, attempt_manifest, approved=True)
+
+    approval = _run(
+        workspace,
+        "approve",
+        "--attempt-manifest",
+        attempt_manifest.relative_to(workspace).as_posix(),
+        "--semantic-decision",
+        decision.relative_to(workspace).as_posix(),
+    )
+
+    assert approval.returncode == 1
+    assert "HASH_MISMATCH" in approval.stderr
+    assert not (attempt_manifest.parent / "resolution").exists()
+
+
+def test_workshop_approval_rejects_a_hash_tampered_preparation_manifest(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    preparation = _prepare(workspace)
+    _derivation_record(workspace, preparation)
+    validation = _validate(
+        workspace,
+        preparation,
+        attempt_id="attempt-001",
+        candidate="drafts/valid.md",
+    )
+    assert validation.returncode == 0, validation.stderr
+    attempt_manifest = workspace / json.loads(validation.stdout)["attempt_manifest"]
+    preparation.write_bytes(preparation.read_bytes() + b" ")
     decision = _semantic_decision(workspace, attempt_manifest, approved=True)
 
     approval = _run(
