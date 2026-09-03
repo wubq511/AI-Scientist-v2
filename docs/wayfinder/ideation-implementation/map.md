@@ -29,3 +29,7 @@ Ticket frontmatter is authoritative for status and blocking edges. Each ticket i
 11. [Validate and export a trustworthy Evidence Chain](tickets/11-validate-and-export-a-trustworthy-evidence-chain.md)
 12. [Evaluate every finalized idea after seal](tickets/12-evaluate-every-finalized-idea-after-seal.md)
 13. [Contract the legacy path and prove handoff readiness](tickets/13-contract-the-legacy-path-and-prove-handoff-readiness.md)
+
+## Decisions so far
+
+- [Establish the testable ideation foundation](tickets/01-establish-the-testable-ideation-foundation.md)：以三类精确依赖合同、入口传递 import allowlist、Python 3.13 clean-environment 全量 pytest 与逐字节 CLI baseline 建立零 runtime 行为漂移的可测试地基。
