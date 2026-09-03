@@ -13,7 +13,14 @@ import shutil
 
 import pytest
 
-from ai_scientist.ideation.canonical import canonical_json_bytes, sha256_bytes
+from ai_scientist.ideation.canonical import (
+    canonical_json_bytes,
+    parse_json_bytes,
+    sha256_bytes,
+)
+from ai_scientist.ideation.canonical import (
+    workspace_relative_path as run_store_canonical_workspace_relative_path,
+)
 from ai_scientist.ideation.errors import IdeationInputError
 from ai_scientist.ideation import run_store
 
@@ -212,3 +219,69 @@ def test_run_events_never_leak_across_runs(tmp_path: Path) -> None:
     assert run_a.run_id != run_b.run_id
     assert _run_file(workspace, run_a.event_path(1)).is_file()
     assert not _run_file(workspace, run_b.event_path(1)).exists()
+
+
+def test_canonical_bytes_reject_non_canonical_values() -> None:
+    """VM-UNIT-02: NaN/Infinity, floats, non-NFC strings fail closed."""
+    for bad_value in [float("nan"), float("inf"), 1.5]:
+        with pytest.raises(IdeationInputError, match="NON_CANONICAL_JSON"):
+            canonical_json_bytes({"x": bad_value})
+    with pytest.raises(IdeationInputError, match="NON_CANONICAL_JSON"):
+        canonical_json_bytes({"x": "cafe\u0301"})
+    with pytest.raises(IdeationInputError, match="NON_CANONICAL_JSON"):
+        canonical_json_bytes({"x": "bad\ud800"})
+    with pytest.raises(IdeationInputError, match="NON_CANONICAL_JSON"):
+        canonical_json_bytes(["not", "serializable", object()])
+
+
+def test_parse_json_rejects_duplicate_keys_and_non_finite_constants() -> None:
+    """VM-UNIT-02: duplicate keys, NaN, Infinity are rejected on read."""
+    with pytest.raises(IdeationInputError, match="INVALID_JSON"):
+        parse_json_bytes(b'{"a": 1, "a": 2}', label="document")
+    for constant in (b"NaN", b"Infinity", b"-Infinity"):
+        with pytest.raises(IdeationInputError, match="INVALID_JSON"):
+            parse_json_bytes(b'{"a": ' + constant + b"}", label="document")
+    with pytest.raises(IdeationInputError, match="INVALID_UTF8"):
+        parse_json_bytes(b'{"a": "\xff"}', label="document")
+
+
+def test_canonical_bytes_shape_is_sorted_compact_lf_single_newline() -> None:
+    """VM-UNIT-02: the canonical rendering contract itself."""
+    data = canonical_json_bytes({"b": 1, "a": ["x", "y"]})
+    assert data == b'{"a":["x","y"],"b":1}\n'
+    assert data.decode("utf-8") == data.decode("utf-8").strip() + "\n"
+    assert b"\r" not in data
+    assert b", " not in data and b": " not in data
+
+
+def test_workspace_relative_path_rejects_unnormalized_shapes(
+    tmp_path: Path,
+) -> None:
+    """VM-CONTRACT-023-01: absolute, backslash, dot-dot, and denormalized
+    relative shapes all fail closed before any resolution."""
+    workspace = tmp_path
+    for bad in [
+        "../outside.json",
+        "/etc/hosts",
+        "a\\b.json",
+        "a/../b.json",
+        "./x.json",
+        "x/",
+        " x",
+        "",
+    ]:
+        with pytest.raises(IdeationInputError, match="INVALID_PATH"):
+            run_store_canonical_workspace_relative_path(workspace, bad, label="t")
+
+
+def test_workspace_relative_path_rejects_symlink_traversal(tmp_path: Path) -> None:
+    """VM-CONTRACT-023-01: a symlinked path component is refused."""
+    workspace = tmp_path
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "data").mkdir()
+    (workspace / "data" / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(IdeationInputError, match="SYMLINK_FORBIDDEN"):
+        run_store_canonical_workspace_relative_path(
+            workspace, "data/link/x.json", label="t"
+        )

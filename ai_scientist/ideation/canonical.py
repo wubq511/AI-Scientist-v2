@@ -134,6 +134,8 @@ def workspace_relative_path(workspace_root: Path, value: object, *, label: str) 
         fail("INVALID_PATH", f"{label} must be a non-empty relative POSIX path")
     if "\\" in value:
         fail("INVALID_PATH", f"{label} must use POSIX separators")
+    if value != value.strip() or value.startswith("./") or value.endswith("/"):
+        fail("INVALID_PATH", f"{label} must be normalized and workspace-relative")
     relative = Path(value)
     if relative.is_absolute() or any(
         part in {"", ".", ".."} for part in relative.parts
