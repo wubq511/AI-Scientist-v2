@@ -13,5 +13,18 @@ class IdeationInputError(RuntimeError):
         self.details = details
 
 
+class RunInterrupted(BaseException):
+    """SIGINT/SIGTERM abort of a run writer (ticket 10, contract 025).
+
+    Derived from BaseException so that `except Exception` classification
+    paths (adapter transport mapping, retriever audit recording, storage
+    cleanup) never swallow or reclassify an operator interruption.
+    """
+
+    def __init__(self, signal_name: str) -> None:
+        super().__init__(f"Run interrupted by {signal_name}")
+        self.signal_name = signal_name
+
+
 def fail(code: str, message: str, **details: Any) -> NoReturn:
     raise IdeationInputError(code, message, **details)

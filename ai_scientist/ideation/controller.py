@@ -12,10 +12,14 @@ failures.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
-from typing import Any, Sequence
+import signal
+import threading
+from typing import Any, Iterator, Sequence
 
 from .canonical import (
     canonical_json_bytes,
@@ -33,7 +37,7 @@ from .deepseek import (
     ModelRoundResult,
     TERMINAL_FAILURES,
 )
-from .errors import IdeationInputError, fail
+from .errors import IdeationInputError, RunInterrupted, fail
 from .retrieval import ScopedLiteratureRetriever, bind_corpus
 from .run_store import (
     RUN_SEAL_SCHEMA_VERSION,
@@ -267,6 +271,34 @@ def _failure_message(exc: ModelRoundError) -> str:
     return str(exc)
 
 
+@contextmanager
+def _signal_interrupt_guard() -> Iterator[None]:
+    """Abort the run writer immediately on SIGINT/SIGTERM (ticket 025).
+
+    The handler raises RunInterrupted inside the main thread, so an in-flight
+    blocking transport call is not awaited (PEP 475: a raising handler is not
+    retried). Outside the main thread no handler can be installed; injection
+    of RunInterrupted remains possible for tests.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def _handler(signum: int, frame: Any) -> None:
+        raise RunInterrupted(signal.Signals(signum).name)
+
+    previous = {
+        sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)
+    }
+    for sig, handler in ((signal.SIGINT, _handler), (signal.SIGTERM, _handler)):
+        signal.signal(sig, handler)
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
 def parse_action_and_arguments(response_text: str) -> tuple[str, dict[str, Any]]:
     """Extract and parse ACTION and ARGUMENTS from model response."""
     action_match = ACTION_PATTERN.search(response_text)
@@ -445,6 +477,95 @@ def format_retrieval_for_reflection(payload: dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
+# Terminal failure message for a payload hygiene hit (Ticket 026). Kept as a
+# module constant so resume-time rebuild seals the identical message.
+HYGIENE_FAILURE_MESSAGE = (
+    "FinalizeIdea submission matched a private identifier hygiene pattern"
+)
+
+
+@dataclass
+class _GenerationState:
+    """Mutable per-generation control state.
+
+    On resume the state is rebuilt from the committed event chain and
+    artifacts instead of being accumulated live (ticket 10).
+    """
+
+    msg_history: list[dict[str, str]] = field(default_factory=list)
+    last_tool_results: str = ""
+    retrieved_paper_ids: set[str] = field(default_factory=set)
+    retrieval_op_seqs: list[int] = field(default_factory=list)
+    finalized: bool = False
+
+
+@dataclass(frozen=True)
+class PendingResponse:
+    """A committed model response whose action processing was interrupted.
+
+    `retrieval_op_seq`/`retrieval_attempt_seq` carry the coordinates of an
+    orphaned retrieval request when the interruption happened mid-retrieval
+    (the retrieval is re-executed under the same operation_seq).
+    """
+
+    response_text: str
+    model_op_seq: int
+    retrieval_op_seq: int | None
+    retrieval_attempt_seq: int
+
+
+@dataclass(frozen=True)
+class PendingReexecute:
+    """An interrupted model call re-executed under the same operation_seq."""
+
+    op_seq: int
+    next_attempt_seq: int
+
+
+@dataclass(frozen=True)
+class RoundResume:
+    """Resume coordinates for the generation interrupted mid-round."""
+
+    start_round: int
+    state: _GenerationState
+    pending: PendingResponse | PendingReexecute | None
+
+
+@dataclass(frozen=True)
+class SealFailedCompletion:
+    """The run must still be sealed `failed` for a committed terminal failure."""
+
+    reason_code: str
+    reason_message: str
+
+
+@dataclass(frozen=True)
+class SealTerminalCompletion:
+    """The terminal event is committed; only seal.json is missing."""
+
+    outcome: str
+    summary: dict[str, Any]
+    event_seq: int
+    event_hash: str
+
+
+@dataclass(frozen=True)
+class ResumePlan:
+    """Control state rebuilt from the evidence chain for a resumed run."""
+
+    writer_epoch: int
+    op_seq: int
+    accepted_ideas: tuple[dict[str, Any], ...]
+    idea_str_archive: tuple[str, ...]
+    disposition_counts: dict[str, int]
+    run_has_non_empty_retrieval: bool
+    remaining_model_rounds: int
+    bookkeeping: tuple[dict[str, Any], ...]
+    start_generation: int
+    round_resume: RoundResume | None
+    terminal: SealFailedCompletion | SealTerminalCompletion | None
+
+
 class IdeationController:
     """Coordinates the full execution of an admitted Ideation Run."""
 
@@ -457,11 +578,13 @@ class IdeationController:
         adapter: DeepSeekAdapter | None = None,
         retriever: ScopedLiteratureRetriever | None = None,
         writer_epoch: int = 1,
+        resume_plan: ResumePlan | None = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve(strict=True)
         self.run_id = run_id
         self.store = store or RunStore(self.workspace_root)
         self.writer_epoch = writer_epoch
+        self.resume_plan = resume_plan
 
         # Load and verify write-once admission
         admission_bytes = self.store.read_artifact(self.run_id, "admission.json")
@@ -469,12 +592,22 @@ class IdeationController:
         self.admission_sha = sha256_bytes(admission_bytes)
         self.request_sha = self.admission["request_sha256"]
 
-        # Verify admission event pin in evidence chain
-        admitted_event = self.store.read_event(self.run_id, 8)
-        if (
-            admitted_event.get("event_type") != "admitted"
-            or admitted_event.get("admission_sha256") != self.admission_sha
-        ):
+        # Verify admission event pin in evidence chain. The `admitted` event
+        # is located by type, not by fixed sequence: a preflight re-run during
+        # resume (ticket 10) rewrites the preflight events, so its position is
+        # not stable.
+        admitted_events = [
+            event
+            for event in self.store.read_events(self.run_id)
+            if event.get("event_type") == "admitted"
+        ]
+        if len(admitted_events) != 1:
+            fail(
+                "ADMISSION_TAMPERED",
+                "Evidence chain must contain exactly one admitted event",
+            )
+        admitted_event = admitted_events[0]
+        if admitted_event.get("admission_sha256") != self.admission_sha:
             fail(
                 "ADMISSION_TAMPERED",
                 "admission.json content does not match admission hash pinned in event chain",
@@ -543,12 +676,65 @@ class IdeationController:
         return self.op_seq
 
     def run(self) -> dict[str, Any]:
+        """Execute the complete generation loop through final seal.
+
+        SIGINT/SIGTERM aborts immediately: the writer best-effort appends an
+        `interrupted` lifecycle event and the run stays unsealed for a later
+        resume (ticket 025: Run Suspension is not a Terminal Outcome).
+
+        When constructed with a `resume_plan` (ticket 10), the controller
+        restores the rebuilt control state, applies bookkeeping completions,
+        and continues from the interruption point instead of starting over.
+        """
+        with _signal_interrupt_guard():
+            try:
+                if self.resume_plan is not None:
+                    return self._run_resumed(self.resume_plan)
+                return self._run_loop()
+            except RunInterrupted as exc:
+                self._record_interrupted(exc.signal_name)
+                raise
+
+    def _record_interrupted(self, signal_name: str) -> None:
+        """Best-effort `interrupted` event; a recording failure never masks
+        the abort (kill -9/power loss leaves no event; the resume-time chain
+        verification is the backstop with identical semantics)."""
+        try:
+            self.store.append_event(
+                self.run_id,
+                {
+                    "event_type": "interrupted",
+                    "payload": {"signal": signal_name},
+                    "writer_epoch": self.writer_epoch,
+                },
+            )
+        except Exception:
+            pass
+
+    def _run_loop(self) -> dict[str, Any]:
         """Execute the complete generation loop through final seal."""
         system_prompt = build_system_prompt()
+        sealed = self._run_generations(system_prompt, 0)
+        if sealed is not None:
+            return sealed
+        return self._finish_run()
 
-        for gen_idx in range(self.max_num_generations):
+    def _run_generations(
+        self,
+        system_prompt: str,
+        start_generation: int,
+        round_resume: RoundResume | None = None,
+    ) -> dict[str, Any] | None:
+        """Run generations from `start_generation`; return a mid-loop seal or None."""
+        for gen_idx in range(start_generation, self.max_num_generations):
             try:
-                sealed = self._execute_generation(gen_idx, system_prompt)
+                sealed = self._execute_generation(
+                    gen_idx,
+                    system_prompt,
+                    round_resume=(
+                        round_resume if gen_idx == start_generation else None
+                    ),
+                )
             except IdeationInputError as exc:
                 # Retriever/evidence boundary failures in the approved terminal
                 # vocabulary terminate the run through an explicit failed seal;
@@ -570,7 +756,10 @@ class IdeationController:
                 # A terminal condition inside the generation (e.g. hygiene
                 # hit) already sealed the run; stop immediately.
                 return sealed
+        return None
 
+    def _finish_run(self) -> dict[str, Any]:
+        """Run-level backstop check and terminal success seal."""
         # Run-level backstop check (Ticket 020 / Ticket 025):
         # The run must have retrieved at least one non-empty retrieval result across all generations.
         if not self.run_has_non_empty_retrieval:
@@ -586,6 +775,87 @@ class IdeationController:
             )
 
         return self._seal_success_run()
+
+    def _run_resumed(self, plan: ResumePlan) -> dict[str, Any]:
+        """Restore rebuilt control state and continue from the interruption.
+
+        Bookkeeping completions are applied first (events/artifacts whose
+        commit was interrupted mid-sequence are finished under the new writer
+        epoch), then the plan either completes a pending seal or resumes the
+        generation loop at the rebuilt position.
+        """
+        self.op_seq = plan.op_seq
+        self.accepted_ideas = list(plan.accepted_ideas)
+        self.idea_str_archive = list(plan.idea_str_archive)
+        self.disposition_counts = dict(plan.disposition_counts)
+        self.run_has_non_empty_retrieval = plan.run_has_non_empty_retrieval
+
+        for entry in plan.bookkeeping:
+            kind = entry["kind"]
+            if kind == "append_event":
+                self.store.append_event(self.run_id, entry["event"])
+            elif kind == "model_fixable_feedback":
+                self._record_model_fixable_error(
+                    action=entry["action"],
+                    error_code=entry["error_code"],
+                    error_message=entry["error_message"],
+                    operation_seq=entry["operation_seq"],
+                    pipeline_pos=entry["pipeline_pos"],
+                )
+            else:
+                fail(
+                    "RUN_CORRUPT",
+                    f"Unknown resume bookkeeping entry kind: {kind}",
+                )
+
+        terminal = plan.terminal
+        if isinstance(terminal, SealFailedCompletion):
+            return self._seal_failed_run(terminal.reason_code, terminal.reason_message)
+        if isinstance(terminal, SealTerminalCompletion):
+            return self._write_missing_seal(terminal)
+
+        system_prompt = build_system_prompt()
+        sealed = self._run_generations(
+            system_prompt, plan.start_generation, plan.round_resume
+        )
+        if sealed is not None:
+            return sealed
+        return self._finish_run()
+
+    def _write_missing_seal(self, completion: SealTerminalCompletion) -> dict[str, Any]:
+        """Write seal.json for a run whose terminal event is already committed
+        (the interruption landed between terminal event and seal write)."""
+        self.store.verify_chain(self.run_id)
+
+        inventory = self.store.build_artifact_inventory(self.run_id)
+        seal_document = {
+            "admission_sha256": self.admission_sha,
+            "artifact_inventory": inventory,
+            "final_event": {
+                "event_hash": completion.event_hash,
+                "event_seq": completion.event_seq,
+            },
+            "request_sha256": self.request_sha,
+            "run_id": self.run_id,
+            "schema_version": RUN_SEAL_SCHEMA_VERSION,
+            "sealed_at": _now(),
+            "terminal_outcome": completion.outcome,
+            "terminal_summary": completion.summary,
+        }
+
+        seal_sha = self.store.write_seal(self.run_id, seal_document)
+        self.store.verify_chain(self.run_id)
+
+        result = {
+            "idea_count": len(self.accepted_ideas),
+            "run_id": self.run_id,
+            "seal_sha256": seal_sha,
+            "status": "sealed",
+            "terminal_outcome": completion.outcome,
+        }
+        if completion.outcome == "failed":
+            result["reason_code"] = completion.summary["reason_code"]
+        return result
 
     def _seal_success_run(self) -> dict[str, Any]:
         """Commit the terminal event and canonical seal for a successful run."""
@@ -819,40 +1089,56 @@ class IdeationController:
         )
         return self._seal_failed_run(
             "PAYLOAD_HYGIENE_VIOLATION",
-            "FinalizeIdea submission matched a private identifier hygiene pattern",
+            HYGIENE_FAILURE_MESSAGE,
         )
 
     def _execute_generation(
-        self, gen_idx: int, system_prompt: str
+        self,
+        gen_idx: int,
+        system_prompt: str,
+        round_resume: RoundResume | None = None,
     ) -> dict[str, Any] | None:
         """Execute a single generation with reflection rounds.
 
         Returns the sealed run result when a terminal condition sealed the run
         mid-generation (payload hygiene hit), otherwise None.
+
+        With `round_resume` (ticket 10) the generation.started event is not
+        re-appended, the rebuilt state continues, and the interrupted round
+        either replays its committed response or re-executes the model call
+        under the same operation_seq with the next attempt_seq.
         """
-        pipeline_pos = {
-            "generation_index": gen_idx,
-            "idea_index": None,
-            "reflection_index": 0,
-        }
-        self.store.append_event(
-            self.run_id,
-            {
-                "event_type": "generation.started",
-                "payload": {"generation_index": gen_idx},
-                "pipeline_position": pipeline_pos,
-                "writer_epoch": self.writer_epoch,
-            },
-        )
+        if round_resume is None:
+            pipeline_pos = {
+                "generation_index": gen_idx,
+                "idea_index": None,
+                "reflection_index": 0,
+            }
+            self.store.append_event(
+                self.run_id,
+                {
+                    "event_type": "generation.started",
+                    "payload": {"generation_index": gen_idx},
+                    "pipeline_position": pipeline_pos,
+                    "writer_epoch": self.writer_epoch,
+                },
+            )
+            state = _GenerationState()
+            start_round = 0
+        else:
+            state = round_resume.state
+            start_round = round_resume.start_round
 
         prev_ideas_string = "\n\n".join(self.idea_str_archive)
-        msg_history: list[dict[str, str]] = []
-        last_tool_results = ""
-        generation_retrieved_paper_ids: set[str] = set()
-        generation_retrieval_op_seqs: list[int] = []
-        generation_finalized = False
+        # Aliases into the (possibly rebuilt) state keep the round loop body
+        # identical between the fresh and resumed paths.
+        msg_history = state.msg_history
+        last_tool_results = state.last_tool_results
+        generation_retrieved_paper_ids = state.retrieved_paper_ids
+        generation_retrieval_op_seqs = state.retrieval_op_seqs
+        generation_finalized = state.finalized
 
-        for ref_round in range(self.num_reflections):
+        for ref_round in range(start_round, self.num_reflections):
             pipeline_pos = {
                 "generation_index": gen_idx,
                 "idea_index": (
@@ -873,34 +1159,64 @@ class IdeationController:
                     num_reflections=self.num_reflections,
                 )
 
-            # Assemble messages for this round
-            messages = [DeepSeekMessage(role="system", content=system_prompt)]
-            for hist in msg_history:
-                messages.append(
-                    DeepSeekMessage(role=hist["role"], content=hist["content"])
+            pending = (
+                round_resume.pending
+                if round_resume is not None and ref_round == start_round
+                else None
+            )
+
+            retrieval_reuse: tuple[int, int] | None = None
+            if isinstance(pending, PendingResponse):
+                # The response is already committed and the round's messages
+                # are already in the rebuilt history; skip the model call.
+                model_op_seq = pending.model_op_seq
+                response_text = pending.response_text
+                if pending.retrieval_op_seq is not None:
+                    retrieval_reuse = (
+                        pending.retrieval_op_seq,
+                        pending.retrieval_attempt_seq,
+                    )
+            else:
+                # Assemble messages for this round
+                messages = [DeepSeekMessage(role="system", content=system_prompt)]
+                for hist in msg_history:
+                    messages.append(
+                        DeepSeekMessage(role=hist["role"], content=hist["content"])
+                    )
+                messages.append(DeepSeekMessage(role="user", content=prompt_text))
+
+                req = DeepSeekRequest(
+                    max_tokens=self.admission["model"]["max_tokens"],
+                    messages=tuple(messages),
+                    output_mode="text",
+                    reasoning_effort=self.admission["model"]["reasoning_effort"],
+                    user_id=f"run-{self.run_id[:8]}",
                 )
-            messages.append(DeepSeekMessage(role="user", content=prompt_text))
 
-            # Model inference operation
-            model_op_seq = self._next_op_seq()
-            req = DeepSeekRequest(
-                max_tokens=self.admission["model"]["max_tokens"],
-                messages=tuple(messages),
-                output_mode="text",
-                reasoning_effort=self.admission["model"]["reasoning_effort"],
-                user_id=f"run-{self.run_id[:8]}",
-            )
+                if isinstance(pending, PendingReexecute):
+                    # Re-execute the interrupted call under the same
+                    # operation_seq with the next attempt_seq (ticket 10).
+                    model_op_seq = pending.op_seq
+                    round_result: ModelRoundResult = self.adapter.execute_round(
+                        req,
+                        model_op_seq,
+                        pipeline_position=pipeline_pos,
+                        writer_epoch=self.writer_epoch,
+                        initial_attempt_seq=pending.next_attempt_seq,
+                    )
+                else:
+                    # Model inference operation
+                    model_op_seq = self._next_op_seq()
+                    round_result = self.adapter.execute_round(
+                        req,
+                        model_op_seq,
+                        pipeline_position=pipeline_pos,
+                        writer_epoch=self.writer_epoch,
+                    )
 
-            round_result: ModelRoundResult = self.adapter.execute_round(
-                req,
-                model_op_seq,
-                pipeline_position=pipeline_pos,
-                writer_epoch=self.writer_epoch,
-            )
-
-            response_text = round_result.visible_content
-            msg_history.append({"role": "user", "content": prompt_text})
-            msg_history.append({"role": "assistant", "content": response_text})
+                response_text = round_result.visible_content
+                msg_history.append({"role": "user", "content": prompt_text})
+                msg_history.append({"role": "assistant", "content": response_text})
 
             # Finalization gate priority 0 (raw-submission hygiene, Ticket 038):
             # When this round attempts FinalizeIdea, the raw submission bytes
@@ -947,12 +1263,19 @@ class IdeationController:
                 continue
 
             if action == "SearchLiterature":
-                retrieval_op_seq = self._next_op_seq()
+                if retrieval_reuse is not None:
+                    # Resume replay: the retrieval request was committed but
+                    # produced no retrieval event; re-execute under the same
+                    # operation_seq with the next attempt_seq (ticket 10).
+                    retrieval_op_seq, retrieval_attempt_seq = retrieval_reuse
+                else:
+                    retrieval_op_seq = self._next_op_seq()
+                    retrieval_attempt_seq = 1
                 try:
                     retrieval_payload = self.retriever.search(
                         arguments,
                         operation_seq=retrieval_op_seq,
-                        attempt_seq=1,
+                        attempt_seq=retrieval_attempt_seq,
                     )
                 except IdeationInputError as exc:
                     if exc.code in MODEL_FIXABLE_ERROR_CODES:

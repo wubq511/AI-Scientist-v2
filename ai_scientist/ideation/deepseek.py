@@ -481,6 +481,7 @@ def validate_provider_response(
     output_mode: str,
     attempt_seq: int = 1,
     duration_ms: float = 0.0,
+    in_call_attempt_seq: int | None = None,
 ) -> tuple[
     str,
     str | None,
@@ -496,7 +497,14 @@ def validate_provider_response(
     Returns:
       (visible_content, reasoning_content, tool_calls, response_id, system_fingerprint, finish_reason, usage, parsed_body)
     Raises ModelRoundError with typed ModelRoundFailure on any contract violation.
+
+    `attempt_seq` is the physical attempt coordinate recorded in evidence;
+    `in_call_attempt_seq` is the position within this call's bounded retry
+    budget (the two differ only on resume re-execution, ticket 10).
     """
+    in_call_position = (
+        in_call_attempt_seq if in_call_attempt_seq is not None else attempt_seq
+    )
 
     def _fail(
         code: str, message: str, raw_err: Any = None, http_st: int | None = status_code
@@ -512,7 +520,7 @@ def validate_provider_response(
                 retry_disposition=(
                     "retry_candidate"
                     if code in RETRYABLE_FAILURE_CODES
-                    and attempt_seq < MAX_ATTEMPTS_PER_OPERATION
+                    and in_call_position < MAX_ATTEMPTS_PER_OPERATION
                     else "none"
                 ),
                 duration_ms=duration_ms,
@@ -780,9 +788,26 @@ def validate_provider_response(
     )
 
 
+def parse_stored_response_content(body_bytes: bytes) -> str:
+    """Re-validate a committed provider response artifact; return visible content.
+
+    Used by resume replay (ticket 10): the bytes were validated when
+    committed, so re-validation either passes deterministically or fails
+    closed as evidence corruption.
+    """
+    (visible_content, *_rest) = validate_provider_response(
+        200,
+        {"content-type": "application/json"},
+        body_bytes,
+        output_mode="text",
+        attempt_seq=1,
+        duration_ms=0.0,
+    )
+    return visible_content
+
+
 class StubTransport:
     """Deterministic, scriptable transport for offline testing and fault injection."""
-
     def __init__(
         self,
         responses: Sequence[
@@ -863,8 +888,15 @@ class DeepSeekAdapter:
         *,
         pipeline_position: dict[str, Any] | None = None,
         writer_epoch: int = 1,
+        initial_attempt_seq: int = 1,
     ) -> ModelRoundResult:
-        """Execute a model round with bounded retry, Provider Attempts, and evidence chain persistence."""
+        """Execute a model round with bounded retry, Provider Attempts, and evidence chain persistence.
+
+        `initial_attempt_seq` is 1 for a fresh operation; a resume re-executes
+        an in-flight operation under the same `op_seq` with the next physical
+        attempt coordinate (contract 025: attempt 3+ only ever comes from a
+        resume). Each call keeps its own <=2 attempt budget (ticket 022).
+        """
         # Audit Release Gate: Ensure execution has admitted run audit context
         if self.store is None or self.run_id is None:
             fail(
@@ -876,6 +908,16 @@ class DeepSeekAdapter:
             fail(
                 "INVALID_COORDINATE",
                 f"op_seq must be a positive integer, got {op_seq}",
+            )
+
+        if (
+            not isinstance(initial_attempt_seq, int)
+            or isinstance(initial_attempt_seq, bool)
+            or initial_attempt_seq < 1
+        ):
+            fail(
+                "INVALID_COORDINATE",
+                f"initial_attempt_seq must be a positive integer, got {initial_attempt_seq}",
             )
 
         if (
@@ -933,7 +975,8 @@ class DeepSeekAdapter:
         attempts_executed = 0
         last_failure: ModelRoundFailure | None = None
 
-        for attempt_seq in range(1, MAX_ATTEMPTS_PER_OPERATION + 1):
+        for attempt_offset in range(MAX_ATTEMPTS_PER_OPERATION):
+            attempt_seq = initial_attempt_seq + attempt_offset
             attempts_executed += 1
             attempt_started_at = _now()
             t0 = time.perf_counter()
@@ -1049,6 +1092,7 @@ class DeepSeekAdapter:
                     attempt_seq=attempt_seq,
                     duration_ms=elapsed_ms,
                     output_mode=validated_req.output_mode,
+                    in_call_attempt_seq=attempts_executed,
                 )
             except ModelRoundError as mre:
                 last_failure = mre.failure
@@ -1124,9 +1168,9 @@ class DeepSeekAdapter:
                     writer_epoch=writer_epoch,
                 )
 
-                # Decide whether to retry
+                # Decide whether to retry within this call's budget (022)
                 if (
-                    attempt_seq < MAX_ATTEMPTS_PER_OPERATION
+                    attempts_executed < MAX_ATTEMPTS_PER_OPERATION
                     and last_failure.error_code in RETRYABLE_FAILURE_CODES
                     and retry_disposition != "retry_after_exceeded"
                 ):
