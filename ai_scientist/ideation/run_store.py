@@ -9,7 +9,6 @@ canonical event hash chain.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 import os
 from pathlib import Path
 import re
@@ -17,6 +16,7 @@ import uuid
 from typing import Any
 
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
+from .contract import _now
 from .errors import fail
 
 RUN_REQUEST_SCHEMA_VERSION = "run-request-v1.0.0"
@@ -31,10 +31,6 @@ EVENTS_DIR = "events"
 RUN_ID_PATTERN = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}" r"-[0-9a-f]{12}\Z"
 )
-
-
-def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def new_run_id() -> str:
@@ -133,13 +129,6 @@ class RunStore:
             fail("RUN_ROOT_EXISTS", f"Run root already exists: {parsed}")
         _fsync_directory(self.runs_root)
         return RunHandle(parsed)
-
-    def _read_request_hash(self, run_id: str) -> str:
-        run_root = self._run_root(run_id)
-        request_path = run_root / REQUEST_NAME
-        if not request_path.is_file():
-            fail("MISSING_REQUEST", "request.json has not been written for this run")
-        return sha256_bytes(request_path.read_bytes())
 
     def write_request(self, run_id: str, document: object) -> str:
         """Write the write-once run request and return its SHA-256."""

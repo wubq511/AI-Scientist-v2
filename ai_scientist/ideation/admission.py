@@ -22,6 +22,7 @@ from .retrieval import bind_corpus
 from .run_store import (
     RUN_ADMISSION_SCHEMA_VERSION,
     RUN_REQUEST_SCHEMA_VERSION,
+    RunHandle,
     RunStore,
 )
 from .schema import case_id as parse_case_id
@@ -140,6 +141,13 @@ def _read_pinned_input(
     return path, data
 
 
+def _mapping_field(value: object, *, label: str) -> dict[str, Any]:
+    """Return a JSON object field or fail closed with a typed error."""
+    if not isinstance(value, dict):
+        fail("INVALID_SCHEMA", f"{label} must be a JSON object")
+    return value
+
+
 def _load_approved_workshop(
     workspace_root: Path, request: NewRunRequest
 ) -> dict[str, Any]:
@@ -156,20 +164,23 @@ def _load_approved_workshop(
     manifest_value = parse_json_bytes(
         manifest_path.read_bytes(), label="workshop manifest"
     )
-    manifest = manifest_value if isinstance(manifest_value, dict) else {}
+    manifest = _mapping_field(manifest_value, label="workshop manifest")
     if manifest.get("approval_status") != "approved":
         fail("WORKSHOP_NOT_APPROVED", "The pinned Workshop is not approved")
     if manifest.get("case_id") != request.case_id:
         fail("IDENTITY_MISMATCH", "The Workshop belongs to another case")
-    workshop_ref = manifest.get("workshop") or {}
+    workshop_ref = _mapping_field(
+        manifest.get("workshop"), label="workshop manifest.workshop"
+    )
     if workshop_ref.get("sha256") != request.workshop_sha256:
         fail("HASH_MISMATCH", "Workshop manifest does not bind the pinned bytes")
+    rules = _mapping_field(manifest.get("rules"), label="workshop manifest.rules")
     return {
         "path": request.workshop,
         "sha256": request.workshop_sha256,
         "manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
         "contract_version": manifest.get("contract_version"),
-        "validator_version": manifest.get("rules", {}).get("validator_version"),
+        "validator_version": rules.get("validator_version"),
         "schema_version": manifest.get("schema_version"),
     }
 
@@ -191,12 +202,14 @@ def _load_approved_corpus(
     manifest_value = parse_json_bytes(
         manifest_path.read_bytes(), label="corpus manifest"
     )
-    manifest = manifest_value if isinstance(manifest_value, dict) else {}
+    manifest = _mapping_field(manifest_value, label="corpus manifest")
     if manifest.get("approval_status") != "approved":
         fail("CORPUS_NOT_APPROVED", "The pinned corpus bundle is not approved")
     if manifest.get("case_id") != request.case_id:
         fail("IDENTITY_MISMATCH", "The corpus bundle belongs to another case")
-    inventory = manifest.get("inventory") or {}
+    inventory = _mapping_field(
+        manifest.get("inventory"), label="corpus manifest.inventory"
+    )
     if inventory.get("corpus.json") != request.corpus_sha256:
         fail("HASH_MISMATCH", "Corpus manifest does not bind the pinned bytes")
     if bundle_root.name != request.case_id:
@@ -211,17 +224,19 @@ def _load_approved_corpus(
     report_value = parse_json_bytes(
         report_path.read_bytes(), label="corpus validation report"
     )
-    report = report_value if isinstance(report_value, dict) else {}
+    report = _mapping_field(report_value, label="corpus validation report")
     if report.get("corpus_sha256") != request.corpus_sha256:
         fail("HASH_MISMATCH", "The validation report does not bind the corpus")
     if report.get("status") != "pass" or report.get("error_count") != 0:
         fail("CORPUS_NOT_APPROVED", "The corpus validation report is not a pass")
     corpus_value = parse_json_bytes(corpus_bytes, label="corpus")
-    corpus = corpus_value if isinstance(corpus_value, dict) else {}
+    corpus = _mapping_field(corpus_value, label="corpus")
     records = corpus.get("records")
     if not isinstance(records, list):
         fail("CORPUS_INVALID", "The pinned corpus has no records")
-    versions = manifest.get("versions") or {}
+    versions = _mapping_field(
+        manifest.get("versions"), label="corpus manifest.versions"
+    )
     if corpus.get("schema_version") != versions.get("schema"):
         fail("VERSION_MISMATCH", "The corpus schema version is inconsistent")
     return {
@@ -321,7 +336,7 @@ def admit_new_run(
 
 def _run_preflight_steps(
     store: RunStore,
-    run: Any,
+    run: RunHandle,
     request: NewRunRequest,
     request_sha: str,
     workspace: Path,
