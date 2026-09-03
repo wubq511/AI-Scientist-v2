@@ -32,12 +32,37 @@ Scoped Literature Retriever（`retrieval.py`）已完整落地并通过验证：
 
 ---
 
+## 对抗性审查与安全加固
+
+在首轮实现与验证后，开展了全面的对抗性审查，识别并加固了 6 处潜在攻击面与边缘故障：
+
+1. **跨论文 Segment ID 碰撞（Critical）**：
+   - *攻击面/缺陷*：`corpus_build.py` 生成的语料中各论文段落默认 ID 常为 `item-01`。若直接以 `segment_id` 作为 `segment_stats` 词典键，后出现的论文会覆盖先出现论文的段落文本，导致语料统计量缩减为 1，且全部论文均与最后一篇论文的文本错误对比打分。
+   - *加固措施*：在 `load_eligible_candidates` 中对段落 ID 实施论文前缀全限定：`segment_id = f"{paper_id}:{content_id}"`，并在 `test_adversarial_duplicate_content_id_across_papers_does_not_collide_in_bm25` 中实证排序隔离。
+2. **语料重复记录与重复段落检测（High）**：
+   - *攻击面/缺陷*：恶意或损坏的语料若含重复 `paper_id` 或篇内重复 `content_id`，会造成标题静默折叠或输出重复论文（违反 Ticket 021 “不得重复 paper” 规则）。
+   - *加固措施*：加入 `seen_paper_ids` 与 `seen_content_ids` 判重集合，遇到重复立即 fail closed（`INVALID_CORPUS`）。
+3. **Audit Release Gate 绕过防护（High）**：
+   - *攻击面/缺陷*：若调用方在未绑定 `run_id` 的情况下调用 `search()`，原逻辑跳过了 release gate 直接返回 payload，形成零审计调用后门。
+   - *加固措施*：`search()` 强制要求存在 `run_id` 与 `store`，否则立即 fail closed 抛出 `AUDIT_RELEASE_GATE_FAILED`，杜绝未留痕结果释放。
+4. **异构字典键参数走样防护（Medium）**：
+   - *攻击面/缺陷*：当模型/调用方传入含有非字符串键的字典（例如 `{1: "bad", "query": "..."}`），Python 3 的 `sorted(extra_keys)` 会抛出原生 `TypeError`，使错误跳出受控词汇体系。
+   - *加固措施*：统一为 `sorted(str(k) for k in extra_keys)`，确保始终抛出受控的 `INVALID_QUERY`。
+5. **统一输入异常证据留痕（Medium）**：
+   - *攻击面/缺陷*：`normalize_query` 前的未知参数（如 `top_k`）此前直接在外部报错，未在私有证据链中记录操作失败。
+   - *加固措施*：Step 1 采用统一 try-except 块，将一切输入异常（参数未知、类型不符、query 缺失、超长等）均作为 `input_error` 落盘 `audit.json` 并追加 `operation.failed` 事件。
+6. **零 Token 候选语料拦截（Medium）**：
+   - *攻击面/缺陷*：文献标题或正文若全由标点符号构成（无有效 token），可能引发除以零或虚假评分。
+   - *加固措施*：对齐原型 `schema.py` 规则，强制要求 eligible 标题与段落正文均具备至少一个有效 token，否则 fail closed（`INVALID_CORPUS`）。
+
+---
+
 ## 自动化测试与复现命令
 
 执行环境：macOS (Apple Silicon), Python 3.14.6 / 3.13.7 clean venv。
 
 ```bash
-# 1. 针对 Ticket 05 的全新单元与契约测试
+# 1. 针对 Ticket 05 的全新单元、契约与对抗性测试
 python -m pytest tests/test_scoped_retrieval.py -v
 
 # 2. 准入与入口回归测试
@@ -55,9 +80,10 @@ python -m black --check ai_scientist/ideation/retrieval.py ai_scientist/ideation
 ```
 
 ### 运行结果
-- `tests/test_scoped_retrieval.py`: 21 passed in 0.07s
+- `tests/test_scoped_retrieval.py`: 30 passed in 0.25s（21 项基线测试 + 9 项对抗性加固测试）
 - `tests/test_run_admission.py` + `tests/test_run_preflight.py`: 28 passed in 27.93s
 - `tests/test_ideation_import_contract.py`: 1 passed in 0.04s
-- 全量测试套件：`354 passed in 48.21s`（开工基线 333 项全部保持）
+- 全量测试套件：`363 passed in 49.77s`（开工基线 333 项全部保持）
 - Compileall: exit code 0
 - Black check: 4 files unchanged, exit code 0
+

@@ -226,13 +226,17 @@ class ScoredResult:
 def load_eligible_candidates(
     corpus_data: dict[str, Any],
 ) -> tuple[tuple[EligiblePaper, ...], list[dict[str, Any]]]:
-    """Extract eligible publisher_abstract segments; exclude unvalidated / other types."""
+    """Extract eligible publisher_abstract segments; exclude unvalidated / other types.
+
+    Enforces duplicate detection, title searchability, and globally qualified segment IDs.
+    """
     records = corpus_data.get("records")
     if not isinstance(records, list):
         fail("INVALID_CORPUS", "Corpus records must be an array")
 
     eligible_papers: list[EligiblePaper] = []
     ineligible_candidates: list[dict[str, Any]] = []
+    seen_paper_ids: set[str] = set()
 
     for record in records:
         if not isinstance(record, dict):
@@ -244,11 +248,17 @@ def load_eligible_candidates(
         if not isinstance(title, str) or not title:
             fail("INVALID_CORPUS", "Paper record missing valid title")
 
+        if paper_id in seen_paper_ids:
+            fail("INVALID_CORPUS", f"Duplicate paper_id: {paper_id}")
+        seen_paper_ids.add(paper_id)
+
         content_items = record.get("content_items", [])
         if not isinstance(content_items, list):
             fail("INVALID_CORPUS", f"Paper {paper_id} content_items must be a list")
 
         eligible_segments: list[EligibleSegment] = []
+        seen_content_ids: set[str] = set()
+
         for order, item in enumerate(content_items):
             if not isinstance(item, dict):
                 continue
@@ -259,6 +269,12 @@ def load_eligible_candidates(
                 text = item.get("text")
                 if not isinstance(text, str) or not text.strip():
                     continue
+                # Segment text must contain at least one searchable token
+                if not tokenize_text(text, label=f"{paper_id}.abstract[{order}]"):
+                    fail(
+                        "INVALID_CORPUS",
+                        f"Content item in paper {paper_id} has no searchable tokens",
+                    )
                 sha = item.get("sha256")
                 if (
                     not isinstance(sha, str)
@@ -269,9 +285,18 @@ def load_eligible_candidates(
                         f"Content item hash mismatch for paper {paper_id}",
                     )
                 content_id = item.get("content_id", f"abstract-{order:02d}")
+                if content_id in seen_content_ids:
+                    fail(
+                        "INVALID_CORPUS",
+                        f"Duplicate content_id '{content_id}' in paper {paper_id}",
+                    )
+                seen_content_ids.add(content_id)
+
+                # Qualify segment_id with paper_id to prevent collision across papers
+                qualified_segment_id = f"{paper_id}:{content_id}"
                 eligible_segments.append(
                     EligibleSegment(
-                        segment_id=content_id,
+                        segment_id=qualified_segment_id,
                         paper_id=paper_id,
                         content_type="publisher_abstract",
                         text=text,
@@ -283,6 +308,12 @@ def load_eligible_candidates(
                 )
 
         if eligible_segments:
+            # Paper title must contain at least one searchable token
+            if not tokenize_text(title, label=f"{paper_id}.title"):
+                fail(
+                    "INVALID_CORPUS",
+                    f"Paper {paper_id} title has no searchable tokens",
+                )
             eligible_papers.append(
                 EligiblePaper(
                     paper_id=paper_id,
@@ -470,29 +501,39 @@ class ScopedLiteratureRetriever:
         """
         started_at = _now()
         t0 = time.perf_counter()
+
+        # Validate sequence coordinates
+        if not isinstance(attempt_seq, int) or attempt_seq < 1:
+            fail("INVALID_COORDINATE", "attempt_seq must be an integer >= 1")
+        if operation_seq is not None and (
+            not isinstance(operation_seq, int) or operation_seq < 1
+        ):
+            fail("INVALID_COORDINATE", "operation_seq must be an integer >= 1")
+
         if operation_seq is None:
             self._operation_counter += 1
             op_seq = self._operation_counter
         else:
             op_seq = operation_seq
 
-        # Step 1: Validate tool input boundary
-        if not isinstance(arguments, dict):
-            fail("INVALID_QUERY", "Retriever arguments must be a JSON object")
-        extra_keys = set(arguments.keys()) - ALLOWED_TOOL_ARGUMENTS
-        if extra_keys:
-            fail("INVALID_QUERY", f"Unknown tool arguments: {sorted(extra_keys)}")
-        if "query" not in arguments:
-            fail("INVALID_QUERY", "query argument is required")
-
-        raw_query = arguments["query"]
+        # Step 1: Validate tool input boundary (unified failure recording)
         try:
+            if not isinstance(arguments, dict):
+                fail("INVALID_QUERY", "Retriever arguments must be a JSON object")
+            extra_keys = set(arguments.keys()) - ALLOWED_TOOL_ARGUMENTS
+            if extra_keys:
+                fail(
+                    "INVALID_QUERY",
+                    f"Unknown tool arguments: {sorted(str(k) for k in extra_keys)}",
+                )
+            if "query" not in arguments:
+                fail("INVALID_QUERY", "query argument is required")
+
+            raw_query = arguments["query"]
             norm_query = normalize_query(raw_query)
         except Exception as exc:
-            # If bound to a run, record the failed operation in audit before re-raising
-            self._record_input_failure(
-                op_seq, attempt_seq, raw_query, str(exc), started_at
-            )
+            raw_q = arguments.get("query") if isinstance(arguments, dict) else arguments
+            self._record_input_failure(op_seq, attempt_seq, raw_q, str(exc), started_at)
             raise
 
         # Step 2: Verify scope binding and corpus on disk
@@ -604,19 +645,24 @@ class ScopedLiteratureRetriever:
             },
         }
 
-        # Step 6: Audit Release Gate
-        if self._bound.run_id is not None and self._bound.store is not None:
-            self._execute_audit_release_gate(
-                run_id=self._bound.run_id,
-                store=self._bound.store,
-                op_seq=op_seq,
-                attempt_seq=attempt_seq,
-                audit_document=audit_document,
-                payload_bytes=scored_result.payload_bytes,
-                payload_sha256=scored_result.payload_sha256,
-                outcome=outcome,
-                paper_count=len(scored_result.payload["papers"]),
+        # Step 6: Audit Release Gate (fail closed if run identity is missing or unverified)
+        if self._bound.run_id is None or self._bound.store is None:
+            fail(
+                "AUDIT_RELEASE_GATE_FAILED",
+                "Retriever cannot release payload without admitted run audit evidence",
             )
+
+        self._execute_audit_release_gate(
+            run_id=self._bound.run_id,
+            store=self._bound.store,
+            op_seq=op_seq,
+            attempt_seq=attempt_seq,
+            audit_document=audit_document,
+            payload_bytes=scored_result.payload_bytes,
+            payload_sha256=scored_result.payload_sha256,
+            outcome=outcome,
+            paper_count=len(scored_result.payload["papers"]),
+        )
 
         # Release the model-visible payload
         return scored_result.payload
