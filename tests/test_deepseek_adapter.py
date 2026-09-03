@@ -957,3 +957,328 @@ def test_credential_never_in_persisted_request_artifact(tmp_path: Path) -> None:
     assert "Authorization" not in doc
     assert "credential" not in doc
     assert doc["model"] == DEEPSEEK_MODEL_ID
+
+
+# ==============================================================================
+# First-Principles Adversarial Hardening Tests
+# ==============================================================================
+
+
+def test_adversarial_audit_release_gate_fails_closed_without_run_or_store(
+    tmp_path: Path,
+) -> None:
+    """Adversarial: execute_round must fail closed if store or run_id is missing."""
+    stub = StubTransport([TransportResponse(200, {}, b"{}", 10.0)])
+    req = _make_sample_request()
+
+    # Case 1: Both None
+    adapter_none = DeepSeekAdapter(stub, store=None, run_id=None)
+    with pytest.raises(IdeationInputError) as exc_info:
+        adapter_none.execute_round(req, op_seq=1)
+    assert exc_info.value.code == "AUDIT_RELEASE_GATE_FAILED"
+
+    # Case 2: store present, run_id None
+    store = RunStore(tmp_path)
+    adapter_no_run = DeepSeekAdapter(stub, store=store, run_id=None)
+    with pytest.raises(IdeationInputError) as exc_info:
+        adapter_no_run.execute_round(req, op_seq=1)
+    assert exc_info.value.code == "AUDIT_RELEASE_GATE_FAILED"
+
+    # Case 3: run_id present, store None
+    adapter_no_store = DeepSeekAdapter(stub, store=None, run_id="run-123")
+    with pytest.raises(IdeationInputError) as exc_info:
+        adapter_no_store.execute_round(req, op_seq=1)
+    assert exc_info.value.code == "AUDIT_RELEASE_GATE_FAILED"
+
+
+@pytest.mark.parametrize(
+    "bad_op_seq",
+    [0, -1, -99, True, False, "1", None],
+)
+def test_adversarial_invalid_op_seq_rejected(tmp_path: Path, bad_op_seq: Any) -> None:
+    """Adversarial: invalid or boolean op_seq fails closed immediately."""
+    store = RunStore(tmp_path)
+    run = store.create_run()
+    stub = StubTransport([TransportResponse(200, {}, b"{}", 10.0)])
+    adapter = DeepSeekAdapter(stub, store=store, run_id=run.run_id)
+    req = _make_sample_request()
+
+    with pytest.raises(IdeationInputError) as exc_info:
+        adapter.execute_round(req, op_seq=bad_op_seq)
+    assert exc_info.value.code == "INVALID_COORDINATE"
+
+
+@pytest.mark.parametrize(
+    "bad_epoch",
+    [0, -1, True, False, "1", None],
+)
+def test_adversarial_invalid_writer_epoch_rejected(
+    tmp_path: Path, bad_epoch: Any
+) -> None:
+    """Adversarial: invalid writer_epoch fails closed immediately."""
+    store = RunStore(tmp_path)
+    run = store.create_run()
+    stub = StubTransport([TransportResponse(200, {}, b"{}", 10.0)])
+    adapter = DeepSeekAdapter(stub, store=store, run_id=run.run_id)
+    req = _make_sample_request()
+
+    with pytest.raises(IdeationInputError) as exc_info:
+        adapter.execute_round(req, op_seq=1, writer_epoch=bad_epoch)
+    assert exc_info.value.code == "INVALID_EPOCH"
+
+
+@pytest.mark.parametrize(
+    "bad_pipe_pos",
+    [
+        "not a dict",
+        {"generation_index": -1},
+        {"generation_index": True},
+        {"reflection_index": -5},
+    ],
+)
+def test_adversarial_invalid_pipeline_position_rejected(
+    tmp_path: Path, bad_pipe_pos: Any
+) -> None:
+    """Adversarial: corrupted pipeline coordinates fail closed."""
+    store = RunStore(tmp_path)
+    run = store.create_run()
+    stub = StubTransport([TransportResponse(200, {}, b"{}", 10.0)])
+    adapter = DeepSeekAdapter(stub, store=store, run_id=run.run_id)
+    req = _make_sample_request()
+
+    with pytest.raises(IdeationInputError) as exc_info:
+        adapter.execute_round(req, op_seq=1, pipeline_position=bad_pipe_pos)
+    assert exc_info.value.code == "INVALID_COORDINATE"
+
+
+@pytest.mark.parametrize(
+    "header_key",
+    ["Retry-After", "RETRY-AFTER", "retry-after", "rEtRy-AfTeR"],
+)
+def test_adversarial_case_insensitive_retry_after_header(
+    tmp_path: Path, header_key: str
+) -> None:
+    """Adversarial: HTTP headers are case-insensitive; Retry-After > 60s detected in any casing."""
+    store = RunStore(tmp_path)
+    run = store.create_run()
+    stub = StubTransport(
+        [
+            TransportResponse(
+                status_code=429,
+                headers={header_key: "120"},
+                body=b'{"error": "Too Many Requests"}',
+                duration_ms=25.0,
+            )
+        ]
+    )
+    adapter = DeepSeekAdapter(stub, store=store, run_id=run.run_id)
+    req = _make_sample_request()
+
+    with pytest.raises(ModelRoundError) as exc_info:
+        adapter.execute_round(req, op_seq=1)
+
+    failure = exc_info.value.failure
+    assert failure.error_code == "rate_limited"
+    assert failure.retry_disposition == "retry_after_exceeded"
+    assert failure.total_attempts == 1
+
+
+def test_adversarial_failed_attempt_records_actual_cost_when_usage_present(
+    tmp_path: Path,
+) -> None:
+    """Adversarial: contract '失败 attempt 也计入' - truncated response with usage incurs cost."""
+    store = RunStore(tmp_path)
+    run = store.create_run()
+    price_table = load_price_table(REPO_ROOT)
+
+    # Provider returned 200 with usage, but finish_reason='length'
+    truncated_body = canonical_json_bytes(
+        _make_golden_response_dict(finish_reason="length")
+    )
+    stub = StubTransport([TransportResponse(200, {}, truncated_body, 150.0)])
+    adapter = DeepSeekAdapter(
+        stub, store=store, run_id=run.run_id, price_table=price_table
+    )
+    req = _make_sample_request()
+
+    with pytest.raises(ModelRoundError) as exc_info:
+        adapter.execute_round(req, op_seq=1)
+
+    failure = exc_info.value.failure
+    assert failure.error_code == "truncated"
+    assert failure.cost is not None
+    assert failure.cost.total_cny > Decimal("0.00")
+
+    # Verify failure.json artifact contains cost
+    fail_path = (
+        tmp_path
+        / f"artifacts/ideation-runs/{run.run_id}/artifacts/operations/000001/attempts/000001/failure.json"
+    )
+    fail_doc = parse_json_bytes(fail_path.read_bytes(), label="fail")
+    assert "cost" in fail_doc
+    assert Decimal(fail_doc["cost"]["total_cny"]) > Decimal("0.00")
+
+    # Verify provider_attempt.finished event payload contains cost_cny
+    events_dir = tmp_path / f"artifacts/ideation-runs/{run.run_id}/events"
+    events = [
+        parse_json_bytes(p.read_bytes(), label="event")
+        for p in sorted(events_dir.glob("*.json"))
+    ]
+    attempt_ev = next(
+        e for e in events if e["event_type"] == "provider_attempt.finished"
+    )
+    assert attempt_ev["payload"]["cost_cny"] is not None
+    assert Decimal(attempt_ev["payload"]["cost_cny"]) > Decimal("0.00")
+
+
+@pytest.mark.parametrize(
+    "bad_content,label",
+    [
+        ("Hello \ud800 world", "lone_surrogate"),
+        ("Hello \x00 world", "null_byte"),
+        ("   ", "whitespace_only"),
+        ("\t\n  \r", "blank_whitespace"),
+    ],
+)
+def test_adversarial_surrogate_and_null_byte_rejection(
+    bad_content: str, label: str
+) -> None:
+    """Adversarial: messages with null bytes, lone surrogates, or whitespace fail closed."""
+    with pytest.raises(ModelRoundError) as exc_info:
+        validate_request(
+            messages=[{"role": "user", "content": bad_content}],
+            max_tokens=1000,
+            user_id="user-valid-1",
+        )
+    assert exc_info.value.code == "configuration"
+
+
+def test_adversarial_system_message_ordering_and_multiplicity() -> None:
+    """Adversarial: system message must only appear at index 0 and at most once."""
+    # System message at index 1
+    with pytest.raises(ModelRoundError) as exc_info1:
+        validate_request(
+            messages=[
+                {"role": "user", "content": "hello"},
+                {"role": "system", "content": "you are an AI"},
+            ],
+            max_tokens=1000,
+            user_id="user-valid-1",
+        )
+    assert exc_info1.value.code == "configuration"
+    assert "messages[0]" in exc_info1.value.failure.message
+
+    # Multiple system messages
+    with pytest.raises(ModelRoundError) as exc_info2:
+        validate_request(
+            messages=[
+                {"role": "system", "content": "system 1"},
+                {"role": "user", "content": "hello"},
+                {"role": "system", "content": "system 2"},
+            ],
+            max_tokens=1000,
+            user_id="user-valid-1",
+        )
+    assert exc_info2.value.code == "configuration"
+
+
+@pytest.mark.parametrize(
+    "bad_user_id",
+    [
+        "user with spaces",
+        "user\nid",
+        "user\x00id",
+        "a" * 129,
+        "",
+        "   ",
+        "user#hash",
+        "user$dollar",
+        "user/slash",
+    ],
+)
+def test_adversarial_invalid_user_id_formats(bad_user_id: str) -> None:
+    """Adversarial: non-ASCII, spaced, or dangerous user_id strings fail closed."""
+    with pytest.raises(ModelRoundError) as exc_info:
+        validate_request(
+            messages=[{"role": "user", "content": "hello"}],
+            max_tokens=1000,
+            user_id=bad_user_id,
+        )
+    assert exc_info.value.code == "configuration"
+
+
+@pytest.mark.parametrize(
+    "bad_choices,label",
+    [
+        ([], "empty_choices"),
+        (
+            [
+                {"index": 0, "message": {"content": "a"}, "finish_reason": "stop"},
+                {"index": 1, "message": {"content": "b"}, "finish_reason": "stop"},
+            ],
+            "multiple_choices",
+        ),
+        (
+            [{"index": 1, "message": {"content": "a"}, "finish_reason": "stop"}],
+            "non_zero_index",
+        ),
+    ],
+)
+def test_adversarial_choices_length_and_index_anomalies(
+    bad_choices: list[Any], label: str
+) -> None:
+    """Adversarial: choices array must contain exactly one choice with index=0."""
+    doc = _make_golden_response_dict()
+    doc["choices"] = bad_choices
+    raw_bytes = canonical_json_bytes(doc)
+
+    with pytest.raises(ModelRoundError) as exc_info:
+        validate_provider_response(
+            200,
+            {"content-type": "application/json"},
+            raw_bytes,
+            output_mode="text",
+        )
+    assert exc_info.value.code == "malformed_response"
+
+
+def test_adversarial_wire_bytes_preservation_in_response_artifact(
+    tmp_path: Path,
+) -> None:
+    """Adversarial: Ticket 023 wire bytes contract - response.json preserves captured bytes bit-for-bit."""
+    store = RunStore(tmp_path)
+    run = store.create_run()
+
+    # Use raw bytes with extra whitespace and custom key order (non-canonical representation)
+    raw_wire_bytes = (
+        b"{\n"
+        b'  "id": "chatcmpl-wire-12345",\n'
+        b'  "model": "deepseek-v4-pro",\n'
+        b'  "choices": [{\n'
+        b'    "index": 0,\n'
+        b'    "finish_reason": "stop",\n'
+        b'    "message": {"role": "assistant", "content": "raw wire response"}\n'
+        b"  }],\n"
+        b'  "usage": {\n'
+        b'    "prompt_tokens": 10,\n'
+        b'    "prompt_cache_hit_tokens": 6,\n'
+        b'    "prompt_cache_miss_tokens": 4,\n'
+        b'    "completion_tokens": 5,\n'
+        b'    "total_tokens": 15\n'
+        b"  }\n"
+        b"}\n"
+    )
+
+    stub = StubTransport([TransportResponse(200, {}, raw_wire_bytes, 88.0)])
+    adapter = DeepSeekAdapter(stub, store=store, run_id=run.run_id)
+    req = _make_sample_request()
+
+    adapter.execute_round(req, op_seq=1)
+
+    resp_path = (
+        tmp_path
+        / f"artifacts/ideation-runs/{run.run_id}/artifacts/operations/000001/attempts/000001/response.json"
+    )
+    # The bytes on disk MUST match raw_wire_bytes bit-for-bit
+    assert resp_path.read_bytes() == raw_wire_bytes
+    assert sha256_bytes(resp_path.read_bytes()) == sha256_bytes(raw_wire_bytes)

@@ -185,6 +185,11 @@ class TransportResponse:
     body: bytes
     duration_ms: float
 
+    def __post_init__(self) -> None:
+        if isinstance(self.headers, dict):
+            normalized = {str(k).lower(): str(v) for k, v in self.headers.items()}
+            object.__setattr__(self, "headers", normalized)
+
 
 class Transport(Protocol):
     def send(self, request_payload: dict[str, Any]) -> TransportResponse:
@@ -336,12 +341,12 @@ def validate_request(
                     raw_error=None,
                 )
             )
-        if not isinstance(content, str) or not content:
+        if not isinstance(content, str) or not content.strip():
             raise ModelRoundError(
                 ModelRoundFailure(
                     error_code="configuration",
                     disposition="terminal",
-                    message=f"message[{idx}] content must be a non-empty string",
+                    message=f"message[{idx}] content must be a non-empty, non-whitespace string",
                     http_status=None,
                     attempt_seq=1,
                     total_attempts=1,
@@ -351,6 +356,42 @@ def validate_request(
                     raw_error=None,
                 )
             )
+
+        # Disallow null bytes and unpaired surrogates in content
+        for ch in content:
+            code_pt = ord(ch)
+            if code_pt == 0 or (0xD800 <= code_pt <= 0xDFFF):
+                raise ModelRoundError(
+                    ModelRoundFailure(
+                        error_code="configuration",
+                        disposition="terminal",
+                        message=f"message[{idx}] content contains invalid characters (null byte or surrogate pair)",
+                        http_status=None,
+                        attempt_seq=1,
+                        total_attempts=1,
+                        retry_disposition="none",
+                        duration_ms=0.0,
+                        cost=None,
+                        raw_error=None,
+                    )
+                )
+
+        if role == "system" and idx != 0:
+            raise ModelRoundError(
+                ModelRoundFailure(
+                    error_code="configuration",
+                    disposition="terminal",
+                    message=f"message[{idx}] system role is only allowed at messages[0]",
+                    http_status=None,
+                    attempt_seq=1,
+                    total_attempts=1,
+                    retry_disposition="none",
+                    duration_ms=0.0,
+                    cost=None,
+                    raw_error=None,
+                )
+            )
+
         validated_messages.append(DeepSeekMessage(role=role, content=content))
 
     if reasoning_effort not in ALLOWED_REASONING_EFFORTS:
@@ -405,12 +446,14 @@ def validate_request(
             )
         )
 
-    if not isinstance(user_id, str) or not user_id.strip():
+    if not isinstance(user_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9_\-\.]{1,128}\Z", user_id.strip()
+    ):
         raise ModelRoundError(
             ModelRoundFailure(
                 error_code="configuration",
                 disposition="terminal",
-                message="user_id must be a non-empty string",
+                message="user_id must be a non-empty opaque ASCII identifier (1-128 chars: letters, digits, _, -, .)",
                 http_status=None,
                 attempt_seq=1,
                 total_attempts=1,
@@ -547,41 +590,65 @@ def validate_provider_response(
 
     # 5. Choices validation
     choices = data["choices"]
-    if not isinstance(choices, list) or not choices:
-        _fail("malformed_response", "Response 'choices' must be a non-empty array")
+    if not isinstance(choices, list) or len(choices) != 1:
+        _fail(
+            "malformed_response",
+            f"Response 'choices' must contain exactly 1 element, got {len(choices) if isinstance(choices, list) else type(choices)}",
+            raw_err=data,
+        )
 
     choice0 = choices[0]
     if not isinstance(choice0, dict):
-        _fail("malformed_response", "Response choice[0] must be an object")
+        _fail(
+            "malformed_response", "Response choice[0] must be an object", raw_err=data
+        )
+
+    if choice0.get("index") != 0:
+        _fail(
+            "malformed_response",
+            f"choice[0].index must be 0, got {choice0.get('index')}",
+            raw_err=data,
+        )
 
     finish_reason = choice0.get("finish_reason")
     if not isinstance(finish_reason, str):
-        _fail("malformed_response", "finish_reason must be a string")
+        _fail("malformed_response", "finish_reason must be a string", raw_err=data)
 
     # 6. Finish reason checks
     if finish_reason == "length":
         _fail(
             "truncated",
             "Provider response truncated due to length (max_tokens reached)",
+            raw_err=data,
         )
     elif finish_reason == "content_filter":
-        _fail("content_filtered", "Provider response omitted due to content filter")
+        _fail(
+            "content_filtered",
+            "Provider response omitted due to content filter",
+            raw_err=data,
+        )
     elif finish_reason == "insufficient_system_resource":
         _fail(
             "resource_exhausted",
             "Provider returned finish_reason=insufficient_system_resource",
+            raw_err=data,
         )
     elif finish_reason == "tool_calls":
         _fail(
             "unexpected_tool_call",
             "Unexpected finish_reason=tool_calls; native tools are disabled in v1",
+            raw_err=data,
         )
     elif finish_reason != "stop":
-        _fail("malformed_response", f"Unexpected finish_reason: '{finish_reason}'")
+        _fail(
+            "malformed_response",
+            f"Unexpected finish_reason: '{finish_reason}'",
+            raw_err=data,
+        )
 
     message = choice0.get("message")
     if not isinstance(message, dict):
-        _fail("malformed_response", "choice[0].message must be an object")
+        _fail("malformed_response", "choice[0].message must be an object", raw_err=data)
 
     # 7. Content and tool_calls
     content = message.get("content")
@@ -589,16 +656,22 @@ def validate_provider_response(
         _fail(
             "empty_content",
             "Provider response choice[0].message.content is empty or whitespace",
+            raw_err=data,
         )
 
     tool_calls = message.get("tool_calls")
     if tool_calls is not None:
         if not isinstance(tool_calls, list):
-            _fail("malformed_response", "tool_calls must be a list if present")
+            _fail(
+                "malformed_response",
+                "tool_calls must be a list if present",
+                raw_err=data,
+            )
         if tool_calls:
             _fail(
                 "unexpected_tool_call",
                 "Provider returned unexpected tool_calls in message",
+                raw_err=data,
             )
 
     reasoning_content = message.get("reasoning_content")
@@ -792,6 +865,41 @@ class DeepSeekAdapter:
         writer_epoch: int = 1,
     ) -> ModelRoundResult:
         """Execute a model round with bounded retry, Provider Attempts, and evidence chain persistence."""
+        # Audit Release Gate: Ensure execution has admitted run audit context
+        if self.store is None or self.run_id is None:
+            fail(
+                "AUDIT_RELEASE_GATE_FAILED",
+                "Cannot execute model round without admitted RunStore and run_id audit context",
+            )
+
+        if not isinstance(op_seq, int) or isinstance(op_seq, bool) or op_seq < 1:
+            fail(
+                "INVALID_COORDINATE",
+                f"op_seq must be a positive integer, got {op_seq}",
+            )
+
+        if (
+            not isinstance(writer_epoch, int)
+            or isinstance(writer_epoch, bool)
+            or writer_epoch < 1
+        ):
+            fail(
+                "INVALID_EPOCH",
+                f"writer_epoch must be a positive integer, got {writer_epoch}",
+            )
+
+        if pipeline_position is not None:
+            if not isinstance(pipeline_position, dict):
+                fail("INVALID_COORDINATE", "pipeline_position must be a dict")
+            for k in ("generation_index", "reflection_index"):
+                if k in pipeline_position:
+                    val = pipeline_position[k]
+                    if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+                        fail(
+                            "INVALID_COORDINATE",
+                            f"pipeline_position.{k} must be a non-negative integer",
+                        )
+
         # 1. Validate request
         if isinstance(request, DeepSeekRequest):
             validated_req = request
@@ -946,10 +1054,35 @@ class DeepSeekAdapter:
                 last_failure = mre.failure
                 # Calculate cost if usage was parsed
                 cost = None
-                if self.price_table is not None and "usage" in (
-                    last_failure.raw_error or {}
+                if (
+                    self.price_table is not None
+                    and isinstance(last_failure.raw_error, dict)
+                    and "usage" in last_failure.raw_error
                 ):
-                    pass
+                    raw_u = last_failure.raw_error["usage"]
+                    if (
+                        isinstance(raw_u, dict)
+                        and "prompt_tokens" in raw_u
+                        and "completion_tokens" in raw_u
+                    ):
+                        try:
+                            parsed_u = TokenUsage(
+                                completion_tokens=int(
+                                    raw_u.get("completion_tokens", 0)
+                                ),
+                                prompt_cache_hit_tokens=int(
+                                    raw_u.get("prompt_cache_hit_tokens", 0)
+                                ),
+                                prompt_cache_miss_tokens=int(
+                                    raw_u.get("prompt_cache_miss_tokens", 0)
+                                ),
+                                prompt_tokens=int(raw_u.get("prompt_tokens", 0)),
+                                reasoning_tokens=int(raw_u.get("reasoning_tokens", 0)),
+                                total_tokens=int(raw_u.get("total_tokens", 0)),
+                            )
+                            cost = self._compute_cost(attempt_started_at, parsed_u)
+                        except Exception:
+                            cost = None
 
                 # Check Retry-After header for 429
                 retry_disposition = last_failure.retry_disposition
@@ -1033,7 +1166,7 @@ class DeepSeekAdapter:
                 op_seq=op_seq,
                 attempt_seq=attempt_seq,
                 pipeline_position=pipe_pos,
-                raw_body_bytes=canonical_json_bytes(parsed_body),
+                raw_body_bytes=transport_resp.body,
                 req_ref=req_ref,
                 result=result,
                 writer_epoch=writer_epoch,
@@ -1072,16 +1205,22 @@ class DeepSeekAdapter:
     ) -> None:
         if self.store is None or self.run_id is None:
             return
-        fail_bytes = canonical_json_bytes(
-            {
-                "disposition": failure.disposition,
-                "duration_ms": f"{failure.duration_ms:.3f}",
-                "error_code": failure.error_code,
-                "http_status": failure.http_status,
-                "message": failure.message,
-                "retry_disposition": failure.retry_disposition,
+        fail_dict: dict[str, Any] = {
+            "disposition": failure.disposition,
+            "duration_ms": f"{failure.duration_ms:.3f}",
+            "error_code": failure.error_code,
+            "http_status": failure.http_status,
+            "message": failure.message,
+            "retry_disposition": failure.retry_disposition,
+        }
+        if failure.cost is not None:
+            fail_dict["cost"] = {
+                "cache_hit_cost_cny": str(failure.cost.cache_hit_cost_cny),
+                "cache_miss_cost_cny": str(failure.cost.cache_miss_cost_cny),
+                "output_cost_cny": str(failure.cost.output_cost_cny),
+                "total_cny": str(failure.cost.total_cny),
             }
-        )
+        fail_bytes = canonical_json_bytes(fail_dict)
         f_rel, f_len, f_sha = self.store.write_operation_artifact(
             self.run_id,
             op_seq,
@@ -1102,6 +1241,15 @@ class DeepSeekAdapter:
                 "sha256": f_sha,
             }
         )
+        attempt_payload: dict[str, Any] = {
+            "disposition": failure.disposition,
+            "duration_ms": f"{failure.duration_ms:.3f}",
+            "error_code": failure.error_code,
+            "outcome": "failed",
+            "retry_disposition": failure.retry_disposition,
+        }
+        if failure.cost is not None:
+            attempt_payload["cost_cny"] = str(failure.cost.total_cny)
         self.store.append_event(
             self.run_id,
             {
@@ -1112,13 +1260,7 @@ class DeepSeekAdapter:
                     "operation_kind": "model_inference",
                     "operation_seq": op_seq,
                 },
-                "payload": {
-                    "disposition": failure.disposition,
-                    "duration_ms": f"{failure.duration_ms:.3f}",
-                    "error_code": failure.error_code,
-                    "outcome": "failed",
-                    "retry_disposition": failure.retry_disposition,
-                },
+                "payload": attempt_payload,
                 "pipeline_position": pipeline_position,
                 "writer_epoch": writer_epoch,
             },
