@@ -553,6 +553,67 @@ def test_vm_integration_03_hygiene_hit_seals_failed_run(
     _assert_failed_seal_inventory(workspace, result)
 
 
+def test_hygiene_scan_hits_before_arguments_json_parse(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Malformed JSON submissions are hygiene-scanned on the raw bytes (038)."""
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+    _approve_cost(monkeypatch)
+
+    # Raw ARGUMENTS block that is NOT valid JSON (unclosed quote) yet leaks
+    # the case_id. Parse alone would feed a PARSE_ERROR back to the model,
+    # which must never happen when the raw bytes carry private identifiers.
+    malformed_leak = (
+        "ACTION: FinalizeIdea\n"
+        'ARGUMENTS: {"idea": {"Name": "leaky", "Title": "Probe '
+        + CASE_ID
+        + '"'  # noqa: E501
+    )
+
+    stub_responses = [
+        _stub(
+            'ACTION: SearchLiterature\nARGUMENTS: {"query": "clinical forecasting"}',
+            "r0",
+        ),
+        _stub(malformed_leak, "r1"),
+    ]
+    transport = StubTransport(stub_responses)
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=transport
+    )
+
+    request = NewRunRequest(
+        case_id=CASE_ID,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=3,
+    )
+
+    result = run_new_run(workspace, request, adapter=adapter, execute=True)
+    assert result["status"] == "sealed"
+    assert result["terminal_outcome"] == "failed"
+    assert result["reason_code"] == "PAYLOAD_HYGIENE_VIOLATION"
+
+    run_root = workspace / "artifacts/ideation-runs" / result["run_id"]
+    events = _read_events(run_root)
+    action_outcomes = [e for e in events if e["event_type"] == "action_outcome"]
+    # The hygiene terminal result replaces the would-be PARSE_ERROR feedback.
+    assert [e["payload"]["outcome"] for e in action_outcomes] == [
+        "tool_result",
+        "hygiene_hit",
+    ]
+    assert not any(
+        e["payload"].get("error_code") == "PARSE_ERROR" for e in action_outcomes
+    )
+    _assert_failed_seal_inventory(workspace, result)
+
+
 def test_vm_contract_025_02_hygiene_hit_not_masked_by_fixable_errors(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -983,6 +1044,67 @@ def test_retriever_boundary_failure_seals_failed_run(
     # No retry with different inputs and no model-fixable masking.
     assert len(transport.sent_requests) == 1
     _assert_failed_seal_inventory(workspace, result)
+
+
+def test_storage_failure_propagates_without_seal(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Storage/IO errors are suspend-class (025): they must not seal `failed`."""
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+    _approve_cost(monkeypatch)
+
+    class FullDiskStore:
+        """Store seam simulating a disk-full write failure."""
+
+        def __init__(self, inner: RunStore) -> None:
+            self._inner = inner
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+        def append_event(self, run_id: str, event: dict[str, Any], **kwargs: Any):
+            if event.get("event_type") == "generation.started":
+                raise IdeationInputError(
+                    "STORAGE_WRITE_FAILED", "No space left on device"
+                )
+            return self._inner.append_event(run_id, event)
+
+    stub_responses = [
+        _stub(
+            'ACTION: SearchLiterature\nARGUMENTS: {"query": "clinical forecasting"}',
+            "r0",
+        ),
+    ]
+    transport = StubTransport(stub_responses)
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=transport
+    )
+
+    request = NewRunRequest(
+        case_id=CASE_ID,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=2,
+    )
+
+    with pytest.raises(IdeationInputError, match="STORAGE_WRITE_FAILED"):
+        run_new_run(
+            workspace,
+            request,
+            adapter=adapter,
+            store=FullDiskStore(RunStore(workspace)),
+            execute=True,
+        )
+
+    run_dirs = list((workspace / "artifacts/ideation-runs").iterdir())
+    assert len(run_dirs) == 1
+    assert not (run_dirs[0] / "seal.json").exists()
 
 
 def test_payload_corrupt_idea_seals_failed_run(

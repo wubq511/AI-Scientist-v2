@@ -22,7 +22,7 @@ blocked_by:
 - [x] Run-level no-nonempty-retrieval backstop、确定性 adapter/retriever/evidence failures 与合法 `budget_exhausted` generations 汇总成批准的 Terminal Outcome 和 seal inventory。
 - [x] Scripted malformed/unknown action、grounding lie、hygiene hit、duplicate 与 retrieval backstop scenarios 都从真实 CLI/controller seam 抵达预期终点。
 - [x] 交付 `VM-CONTRACT-025-02`、`VM-CONTRACT-026-02`、`VM-INTEGRATION-03`、`VM-LEAKAGE-02` 与 `VM-FAULT-04`，并保持全部已有测试通过。
-- [x] 同步受影响的仓库运行说明，记录脱敏 failure evidence（参见 [non-success-outcomes-evidence.md](../../../research/non-success-outcomes-evidence.md)），且 Robert 完成本票验收。
+- [ ] 同步受影响的仓库运行说明，记录脱敏 failure evidence（参见 [non-success-outcomes-evidence.md](../../../research/non-success-outcomes-evidence.md)），且 Robert 完成本票验收。
 
 ## Resolution
 

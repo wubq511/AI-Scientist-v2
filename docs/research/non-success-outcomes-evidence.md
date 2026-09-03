@@ -4,11 +4,12 @@
 
 本证据文档对应 implementation ticket [09: Seal explicit non-success outcomes](../wayfinder/ideation-implementation/tickets/09-seal-explicit-non-success-outcomes.md)，证明完整 control loop 对以下确定性失败产生可解释的 terminal `failed` seal，且 terminal 条件不被较低优先级的模型可修复错误掩盖：
 
-1. **Payload hygiene 命中**（Idea Leakage 防御纵深）：FinalizeIdea 提交内容命中私有标识符模式 → 立即 terminal `failed`，不回灌、不可修复；
+1. **Payload hygiene 命中**（Idea Leakage 防御纵深）：FinalizeIdea 提交内容命中私有标识符模式 → 立即 terminal `failed`，不回灌、不可修复；**ARGUMENTS JSON parse 失败的 raw bytes 同样照扫**（038），畸形提交不会以 PARSE_ERROR 反馈把私有标识符回灌给模型；
 2. **Run 级 no-nonempty-retrieval backstop**：全程无非空 Retrieval Result → terminal `failed`；
-3. **确定性 adapter 失败**：closed taxonomy 中 disposition=terminal 的 provider 失败 → terminal `failed`；suspend 类失败保持上抛、不 seal（Run Suspension 归 ticket 10）；
+3. **确定性 adapter 失败**：closed taxonomy 中 disposition=terminal 的 provider 失败 → terminal `failed`；
 4. **Retriever/evidence boundary 失败**：corpus hash 不符等 → terminal `failed`，无 fallback；
-5. **脚本化对抗模型行为**（malformed/unknown action、grounding 说谎、近重复）：在完整 control loop 中抵达批准的终点（model-fixable 回灌 / `budget_exhausted` disposition）。
+5. **suspend 类失败不上 seal**：adapter suspend 类失败与 storage/IO 失败（025 分级表 suspend 行）原样上抛，run 保持 unsealed（Run Suspension 归 ticket 10）；
+6. **脚本化对抗模型行为**（malformed/unknown action、grounding 说谎、近重复）：在完整 control loop 中抵达批准的终点（model-fixable 回灌 / `budget_exhausted` disposition）。
 
 验证全程确定性：`StubTransport` 与注入组件，**零网络调用、零真实模型费用**，未进入 downstream 阶段。
 
@@ -32,7 +33,7 @@
 
 `FinalizeIdea` 分支按以下固定顺序执行，每轮只报最高优先级的一个结果：
 
-1. **Payload hygiene scan**（terminal）：对 raw submission bytes（`ARGUMENTS` 块原文，parse 失败也照扫）执行 `scan_payload_hygiene`；命中 → 记录 `hygiene-violation.json`（仅 pattern_id + span，无密文）+ `action_outcome`（`outcome: "hygiene_hit"`）事件 → 立即 `_seal_failed_run("PAYLOAD_HYGIENE_VIOLATION", ...)`。**不产生任何 feedback 文本，模型不再见到该轮**；
+1. **Payload hygiene scan**（terminal）：当该轮动作指向 FinalizeIdea 时，在 ACTION/ARGUMENTS 解析**之前**对 raw submission bytes（`ARGUMENTS` 块原文）执行 `scan_payload_hygiene`——ARGUMENTS JSON parse 失败的提交同样照扫（038「JSON parse 失败也照扫」）；命中 → 记录 `hygiene-violation.json`（仅 pattern_id + span，无密文）+ `action_outcome`（`outcome: "hygiene_hit"`）事件 → 立即 `_seal_failed_run("PAYLOAD_HYGIENE_VIOLATION", ...)`。**不产生任何 feedback 文本，模型不再见到该轮**，畸形提交也不会以 PARSE_ERROR 文本把私有标识符回灌给模型；
 2. 024 结构校验（封闭两键 + 七字段，Model-Fixable）；
 3. Declared Grounding 校验（三码，Model-Fixable）；
 4. Run 内去重（`DUPLICATE_IDEA_NAME` / `DUPLICATE_IDEA`，Model-Fixable）。
@@ -58,7 +59,9 @@
 - `reason_kind="provider"`：022 closed taxonomy 的 9 个 terminal 失败码（`configuration`、`model_mismatch`、`truncated`、`content_filtered`、`empty_content`、`invalid_json`、`unexpected_tool_call`、`malformed_response`、`unknown_provider_failure`）；
 - `reason_kind="retriever_evidence"`：020 boundary/audit 失败码（`AUDIT_RELEASE_GATE_FAILED`、`HASH_MISMATCH`、`IDENTITY_MISMATCH`、`INVALID_CORPUS`、`INVALID_SCORE`、`MISSING_CORPUS`、`NO_ELIGIBLE_CANDIDATES`、`PATH_ESCAPE`、`SYMLINK_FORBIDDEN`）。
 
-未知 reason fail closed（`INVALID_FAILURE_CODE`）。sealed failed 流程：可选 violation detail artifact（如 `artifacts/failures/backstop-violation.json`）→ `terminal` 事件（payload 带 outcome/reason_code/reason_kind/disposition 计数/idea_count + artifact refs）→ `verify_chain` → 完整 `artifact_inventory` → `seal.json`（`terminal_outcome: "failed"`）→ 再次 `verify_chain`。suspend 类 adapter 失败（`authentication` 等 7 码）原样上抛、不产生 seal，Run Suspension 由 ticket 10 接管。
+未知 reason fail closed（`INVALID_FAILURE_CODE`）。sealed failed 流程：可选 violation detail artifact（如 `artifacts/failures/backstop-violation.json`）→ `terminal` 事件（payload 带 outcome/reason_code/reason_kind/disposition 计数/idea_count + artifact refs）→ `verify_chain` → 完整 `artifact_inventory` → `seal.json`（`terminal_outcome: "failed"`）→ 再次 `verify_chain`。
+
+**边界（025 失败分级封闭表）**：suspend 类 adapter 失败（`authentication` 等 7 码）与 storage/IO 失败（磁盘满、权限、fsync）不在 terminal 词汇内，原样上抛、不产生 seal，Run Suspension 由 ticket 10 接管。`run()` 的异常兜底只对 `TERMINAL_REASON_KINDS` 中的码 seal failed，其余错误一律上抛。
 
 合法 `budget_exhausted` generations 在 failed seal 的 `terminal_summary.disposition_counts` 中如实保留——失败原因与已有产出互不掩盖。
 
@@ -71,21 +74,23 @@
 
 ## 验证测试套件
 
-`tests/test_sealed_non_success_outcomes.py`（13 项，全零网络零费用）：
+`tests/test_sealed_non_success_outcomes.py`（15 项，全零网络零费用）：
 
 1. `test_payload_hygiene_scan_detects_private_identifier_patterns`：六组模式逐组命中 + 干净科学文本零误报；
 2. `test_payload_hygiene_scan_treats_retrieved_paper_ids_as_model_visible`：`paper_id` 与大写 hex 不命中；
 3. `test_vm_integration_03_hygiene_hit_seals_failed_run`：case_id 泄漏 → 2 轮模型调用即封印 failed；`hygiene_hit` 事件 + violation report artifact + 空 ideas 目录 + 完整 inventory；
-4. `test_vm_contract_025_02_hygiene_hit_not_masked_by_fixable_errors`：同轮 hygiene+structure+grounding 三重违规只报 `hygiene_hit`，无 `model_fixable_error`；
-5. `test_vm_contract_025_02_gate_priority_structure_grounding_duplicate`：七轮剧本证明 structure > grounding > duplicate 固定优先级，每轮恰好一个结果；
-6. `test_vm_integration_03_retrieval_backstop_seals_failed_run`：全程无非空检索 → failed seal，`budget_exhausted: 1` 合法保留；
-7. `test_cli_seam_backstop_failure_seals_failed`：真实 `_run_new_run` CLI seam 输出结构化 JSON（`reason_code: RETRIEVAL_BACKSTOP_FAILED`，exit 0）；
-8. `test_terminal_adapter_failure_seals_failed_run`：HTTP 400 → `configuration` terminal → failed seal，`operation.failed` 事件带 `disposition: terminal`；
-9. `test_suspend_adapter_failure_does_not_seal`：HTTP 401 → suspend 类失败上抛，run 保持 unsealed 无 seal.json（ticket 10 边界）；
-10. `test_retriever_boundary_failure_seals_failed_run`：注入 corpus hash 失败 retriever → `HASH_MISMATCH` failed seal，零重试；
-11. `test_payload_corrupt_idea_seals_failed_run`：null byte 提交 → `PAYLOAD_CORRUPT` failed seal；
-12. `test_vm_fault_04_fixable_adversarial_scripts_reach_budget_exhausted`：malformed action + 说谎回灌 → `budget_exhausted`，run `success` 封印；
-13. `test_vm_fault_04_budget_exhausted_then_run_succeeds_after_prior_retrieval`：6 个 generation 全部说谎耗尽预算，backstop 已被 gen 0 满足 → run `success` 封印（`budget_exhausted: 6`）。
+4. `test_hygiene_scan_hits_before_arguments_json_parse`：畸形 JSON + case_id 泄漏的 raw bytes 照扫，`hygiene_hit` 替代 PARSE_ERROR 回灌（038「JSON parse 失败也照扫」）；
+5. `test_vm_contract_025_02_hygiene_hit_not_masked_by_fixable_errors`：同轮 hygiene+structure+grounding 三重违规只报 `hygiene_hit`，无 `model_fixable_error`；
+6. `test_vm_contract_025_02_gate_priority_structure_grounding_duplicate`：七轮剧本证明 structure > grounding > duplicate 固定优先级，每轮恰好一个结果；
+7. `test_vm_integration_03_retrieval_backstop_seals_failed_run`：全程无非空检索 → failed seal，`budget_exhausted: 1` 合法保留；
+8. `test_cli_seam_backstop_failure_seals_failed`：真实 `_run_new_run` CLI seam 输出结构化 JSON（`reason_code: RETRIEVAL_BACKSTOP_FAILED`，exit 0）；
+9. `test_terminal_adapter_failure_seals_failed_run`：HTTP 400 → `configuration` terminal → failed seal，`operation.failed` 事件带 `disposition: terminal`；
+10. `test_suspend_adapter_failure_does_not_seal`：HTTP 401 → suspend 类失败上抛，run 保持 unsealed 无 seal.json（ticket 10 边界）；
+11. `test_storage_failure_propagates_without_seal`：注入磁盘满写失败 → `IdeationInputError` 上抛、无 seal（025 suspend 行，ticket 10 边界）；
+12. `test_retriever_boundary_failure_seals_failed_run`：注入 corpus hash 失败 retriever → `HASH_MISMATCH` failed seal，零重试；
+13. `test_payload_corrupt_idea_seals_failed_run`：null byte 提交 → `PAYLOAD_CORRUPT` failed seal；
+14. `test_vm_fault_04_fixable_adversarial_scripts_reach_budget_exhausted`：malformed action + 说谎回灌 → `budget_exhausted`，run `success` 封印；
+15. `test_vm_fault_04_budget_exhausted_then_run_succeeds_after_prior_retrieval`：6 个 generation 全部说谎耗尽预算，backstop 已被 gen 0 满足 → run `success` 封印（`budget_exhausted: 6`）。
 
 ---
 
@@ -93,13 +98,13 @@
 
 ```bash
 $ python -m pytest tests/test_sealed_non_success_outcomes.py -q
-13 passed, 6 warnings in 4.70s
+15 passed, 6 warnings in 5.55s
 
 $ python -m pytest tests/test_sealed_ideation_run.py tests/test_model_fixable_actions.py -q
 21 passed (backstop 测试按 ticket 09 合同更新为断言 failed seal)
 
 $ python -m pytest -q
-508 passed, 6 warnings in 56.57s
+510 passed, 6 warnings in <60s
 
 $ python -m compileall ai_scientist/ideation tests/test_sealed_non_success_outcomes.py
 （exit 0）

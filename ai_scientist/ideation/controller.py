@@ -92,10 +92,13 @@ RETRIEVER_EVIDENCE_TERMINAL_CODES: frozenset[str] = frozenset(
     }
 )
 
-TERMINAL_OUTCOME_CODES: frozenset[str] = (
-    CONTROLLER_TERMINAL_CODES
-    | ADAPTER_TERMINAL_CODES
-    | RETRIEVER_EVIDENCE_TERMINAL_CODES
+# Single source of truth for the sealed failure vocabulary: reason code ->
+# reason kind. Unknown codes fail closed in _seal_failed_run (Ticket 025).
+TERMINAL_REASON_KINDS: dict[str, str] = {
+    code: "controller" for code in CONTROLLER_TERMINAL_CODES
+} | {code: "provider" for code in ADAPTER_TERMINAL_CODES}
+TERMINAL_REASON_KINDS.update(
+    {code: "retriever_evidence" for code in RETRIEVER_EVIDENCE_TERMINAL_CODES}
 )
 
 # Versioned payload hygiene pattern list (Ticket 026 / VM-LEAKAGE-02).
@@ -258,8 +261,7 @@ Note: You should perform at least one literature search before finalizing your i
 
 def _failure_message(exc: ModelRoundError) -> str:
     """Extract the provider failure message from a ModelRoundError."""
-    failure = getattr(exc, "failure", None)
-    message = getattr(failure, "message", None)
+    message = exc.failure.message
     if isinstance(message, str) and message:
         return message
     return str(exc)
@@ -324,11 +326,6 @@ def scan_payload_hygiene(text: str) -> list[dict[str, Any]]:
                 }
             )
     return hits
-
-
-def _scan_submission_hygiene(arguments_text: str) -> list[dict[str, Any]]:
-    """Hygiene-scan the raw ARGUMENTS submission block, parse errors included."""
-    return scan_payload_hygiene(arguments_text)
 
 
 def validate_idea_structure(idea: Any) -> dict[str, Any]:
@@ -553,10 +550,15 @@ class IdeationController:
             try:
                 sealed = self._execute_generation(gen_idx, system_prompt)
             except IdeationInputError as exc:
-                # Deterministic retriever/evidence boundary failures terminate
-                # the run through an explicit failed seal; no retry, no
-                # fallback, and no model-fixable masking (Ticket 020/025).
-                return self._seal_failed_run(exc.code, exc.message or str(exc))
+                # Retriever/evidence boundary failures in the approved terminal
+                # vocabulary terminate the run through an explicit failed seal;
+                # no retry, no fallback, and no model-fixable masking
+                # (Ticket 020/025). Any other error — including storage/IO
+                # failures, which are suspend-class per the 025 disposition
+                # table — propagates unsealed for Run Suspension (ticket 10).
+                if exc.code in TERMINAL_REASON_KINDS:
+                    return self._seal_failed_run(exc.code, exc.message or str(exc))
+                raise
             except ModelRoundError as exc:
                 # Adapter failures follow the closed disposition table
                 # (Ticket 025): terminal provider failures seal `failed`;
@@ -613,17 +615,12 @@ class IdeationController:
         closed with a canonical seal.json. No model round follows a terminal
         failure and no lower-priority model-fixable feedback can mask it.
         """
-        if reason_code in ADAPTER_TERMINAL_CODES:
-            reason_kind = "provider"
-        elif reason_code in RETRIEVER_EVIDENCE_TERMINAL_CODES:
-            reason_kind = "retriever_evidence"
-        elif reason_code in CONTROLLER_TERMINAL_CODES:
-            reason_kind = "controller"
-        else:
+        if reason_code not in TERMINAL_REASON_KINDS:
             fail(
                 "INVALID_FAILURE_CODE",
                 f"Reason code is not an approved terminal outcome code: {reason_code}",
             )
+        reason_kind = TERMINAL_REASON_KINDS[reason_code]
 
         terminal_summary: dict[str, Any] = {
             "disposition_counts": dict(self.disposition_counts),
@@ -905,6 +902,25 @@ class IdeationController:
             msg_history.append({"role": "user", "content": prompt_text})
             msg_history.append({"role": "assistant", "content": response_text})
 
+            # Finalization gate priority 0 (raw-submission hygiene, Ticket 038):
+            # When this round attempts FinalizeIdea, the raw submission bytes
+            # are hygiene-scanned BEFORE ACTION/ARGUMENTS parsing so malformed
+            # JSON submissions are scanned too ("JSON parse 失败也照扫"). A
+            # pattern hit is a terminal condition; it must never be masked by,
+            # or converted into, lower-priority model-fixable feedback
+            # (Ticket 026).
+            arguments_match = HYGIENE_SCAN_ARGUMENTS_PATTERN.search(response_text)
+            if arguments_match and ACTION_PATTERN.search(response_text):
+                attempted_action = ACTION_PATTERN.search(response_text).group(1).strip()
+                if attempted_action.lower() == "finalizeidea":
+                    hygiene_hits = scan_payload_hygiene(arguments_match.group(1))
+                    if hygiene_hits:
+                        return self._record_hygiene_hit(
+                            hits=hygiene_hits,
+                            operation_seq=model_op_seq,
+                            pipeline_pos=pipeline_pos,
+                        )
+
             # Parse ACTION and ARGUMENTS
             try:
                 action, arguments = parse_action_and_arguments(response_text)
@@ -976,22 +992,6 @@ class IdeationController:
                 )
 
             elif action == "FinalizeIdea":
-                # Finalization gate priority 1: payload hygiene scan on the raw
-                # submission bytes (Ticket 038 gate order). A pattern hit is a
-                # terminal condition; it must never be masked by, or converted
-                # into, lower-priority model-fixable feedback (Ticket 026).
-                arguments_match = HYGIENE_SCAN_ARGUMENTS_PATTERN.search(response_text)
-                if arguments_match:
-                    hygiene_hits = _scan_submission_hygiene(
-                        arguments_match.group(1).strip()
-                    )
-                    if hygiene_hits:
-                        return self._record_hygiene_hit(
-                            hits=hygiene_hits,
-                            operation_seq=model_op_seq,
-                            pipeline_pos=pipeline_pos,
-                        )
-
                 # Check closed two-key arguments structure (Ticket 038)
                 if not isinstance(arguments, dict):
                     last_tool_results = self._record_model_fixable_error(
