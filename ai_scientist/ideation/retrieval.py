@@ -1,8 +1,8 @@
 """Scoped Literature Retriever binding for an admitted run (ticket 04).
 
 Ticket 04 only constructs the retriever bound to one Approved Target
-Reference Corpus and verifies the corpus boundary during preflight; the
-BM25 scoring and audit-release machinery belongs to ticket 05.
+Reference Corpus during preflight; the BM25 scoring, per-invocation corpus
+re-verification, and audit-release machinery belong to ticket 05.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .canonical import sha256_bytes
 from .errors import fail
 
 RETRIEVAL_POLICY_VERSION = "scoped-retrieval-policy-v1"
@@ -26,20 +25,6 @@ class BoundCorpus:
     corpus_sha256: str
     case_id: str
     record_count: int
-
-    def verify_bytes(self) -> bytes:
-        """Re-read and re-verify the exact pinned corpus bytes."""
-        path = self.workspace_root / self.corpus_relpath
-        if not path.is_file():
-            fail("MISSING_CORPUS", "The pinned corpus is missing")
-        data = path.read_bytes()
-        if sha256_bytes(data) != self.corpus_sha256:
-            fail(
-                "HASH_MISMATCH",
-                "The pinned corpus bytes no longer match admission",
-                expected=self.corpus_sha256,
-            )
-        return data
 
 
 def bind_corpus(

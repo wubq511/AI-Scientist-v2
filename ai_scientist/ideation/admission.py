@@ -10,21 +10,23 @@ marks the run preflight-rejected with retained request and event evidence.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 import subprocess
 from typing import Any, TextIO
 
 from . import pricing
-from .canonical import parse_json_bytes, sha256_bytes
+from .canonical import parse_json_bytes, sha256_bytes, workspace_relative_path
+from .contract import _now
 from .errors import IdeationInputError, fail
 from .retrieval import bind_corpus
 from .run_store import (
+    RUN_ADMISSION_SCHEMA_VERSION,
     RUN_REQUEST_SCHEMA_VERSION,
     RunStore,
 )
+from .schema import case_id as parse_case_id
+from .schema import positive_integer, sha256 as parse_sha256
 
-RUN_ADMISSION_SCHEMA = "run-admission-v1.0.0"
 DEEPSEEK_MODEL_ID = "deepseek-v4-pro"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # Canary-open parameters (tickets 035/036) exposed as pinned defaults; the
@@ -32,10 +34,14 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_MAX_TOKENS = 32768
 MAX_ATTEMPTS_PER_OPERATION = 2
+# Declared worst-case input tokens per model round. The workshop file,
+# prompts, and history sizes are bounded artifacts; this constant is the
+# pinned policy value recorded in the admission document.
+WORST_CASE_INPUT_TOKENS_PER_ROUND = 32_768
 
-
-def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+WORKSHOP_MANIFEST_NAME = "workshop-manifest.json"
+CORPUS_MANIFEST_NAME = "bundle-manifest.json"
+CORPUS_VALIDATION_REPORT_NAME = "validation-report.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,12 +54,21 @@ class NewRunRequest:
     max_num_generations: int
     num_reflections: int
 
-    def document(self, run_id: str) -> dict[str, Any]:
+    def validate(self) -> None:
+        """Step 1: closed request schema (a failure is a run-external error)."""
+        parse_case_id(self.case_id)
+        parse_sha256(self.workshop_sha256, label="workshop_sha256")
+        parse_sha256(self.corpus_sha256, label="corpus_sha256")
+        positive_integer(self.max_num_generations, label="max_num_generations")
+        positive_integer(self.num_reflections, label="num_reflections")
+
+    def document(self, run_id: str, command: list[str]) -> dict[str, Any]:
         return {
             "schema_version": RUN_REQUEST_SCHEMA_VERSION,
             "run_id": run_id,
             "requested_at": _now(),
             "case_id": self.case_id,
+            "command": list(command),
             "workshop": {"path": self.workshop, "sha256": self.workshop_sha256},
             "corpus": {"path": self.corpus, "sha256": self.corpus_sha256},
             "max_num_generations": self.max_num_generations,
@@ -108,26 +123,39 @@ def _require_clean_worktree(workspace_root: Path) -> str:
     return commit.stdout.strip()
 
 
+def _read_pinned_input(
+    workspace_root: Path, relpath: str, expected_sha256: str, *, label: str
+) -> tuple[Path, bytes]:
+    """Resolve a pinned input through the guarded path boundary and hash it."""
+    path = workspace_relative_path(workspace_root, relpath, label=f"{label}_path")
+    if not path.is_file():
+        fail(f"MISSING_{label.upper()}", f"The pinned {label} is missing")
+    data = path.read_bytes()
+    if sha256_bytes(data) != expected_sha256:
+        fail(
+            "HASH_MISMATCH",
+            f"{label.capitalize()} bytes do not match the requested SHA-256",
+            expected=expected_sha256,
+        )
+    return path, data
+
+
 def _load_approved_workshop(
     workspace_root: Path, request: NewRunRequest
 ) -> dict[str, Any]:
     """Verify the pinned Workshop: exact hash, approval status, case binding."""
-    workshop_path = workspace_root / request.workshop
-    if not workshop_path.is_file():
-        fail("MISSING_WORKSHOP", "The pinned Workshop File is missing")
-    workshop_bytes = workshop_path.read_bytes()
-    if sha256_bytes(workshop_bytes) != request.workshop_sha256:
-        fail(
-            "HASH_MISMATCH",
-            "Workshop bytes do not match the requested SHA-256",
-            expected=request.workshop_sha256,
-        )
-    resolution_root = workshop_path.parent
-    manifest_path = resolution_root / "workshop-manifest.json"
+    workshop_path, workshop_bytes = _read_pinned_input(
+        workspace_root,
+        request.workshop,
+        request.workshop_sha256,
+        label="workshop",
+    )
+    manifest_path = workshop_path.parent / WORKSHOP_MANIFEST_NAME
     if not manifest_path.is_file():
         fail("WORKSHOP_NOT_APPROVED", "The pinned Workshop has no approval manifest")
-    manifest_bytes = manifest_path.read_bytes()
-    manifest_value = parse_json_bytes(manifest_bytes, label="workshop manifest")
+    manifest_value = parse_json_bytes(
+        manifest_path.read_bytes(), label="workshop manifest"
+    )
     manifest = manifest_value if isinstance(manifest_value, dict) else {}
     if manifest.get("approval_status") != "approved":
         fail("WORKSHOP_NOT_APPROVED", "The pinned Workshop is not approved")
@@ -136,12 +164,10 @@ def _load_approved_workshop(
     workshop_ref = manifest.get("workshop") or {}
     if workshop_ref.get("sha256") != request.workshop_sha256:
         fail("HASH_MISMATCH", "Workshop manifest does not bind the pinned bytes")
-    if manifest_path.parent != workshop_path.parent:
-        fail("WORKSHOP_NOT_APPROVED", "Workshop manifest is not adjacent")
     return {
         "path": request.workshop,
         "sha256": request.workshop_sha256,
-        "manifest_sha256": sha256_bytes(manifest_bytes),
+        "manifest_sha256": sha256_bytes(manifest_path.read_bytes()),
         "contract_version": manifest.get("contract_version"),
         "validator_version": manifest.get("rules", {}).get("validator_version"),
         "schema_version": manifest.get("schema_version"),
@@ -152,18 +178,14 @@ def _load_approved_corpus(
     workspace_root: Path, request: NewRunRequest
 ) -> dict[str, Any]:
     """Verify the pinned corpus bundle per the frozen-corpus contract."""
-    corpus_path = workspace_root / request.corpus
-    if not corpus_path.is_file():
-        fail("MISSING_CORPUS", "The pinned corpus file is missing")
-    corpus_bytes = corpus_path.read_bytes()
-    if sha256_bytes(corpus_bytes) != request.corpus_sha256:
-        fail(
-            "HASH_MISMATCH",
-            "Corpus bytes do not match the requested SHA-256",
-            expected=request.corpus_sha256,
-        )
+    corpus_path, corpus_bytes = _read_pinned_input(
+        workspace_root,
+        request.corpus,
+        request.corpus_sha256,
+        label="corpus",
+    )
     bundle_root = corpus_path.parent
-    manifest_path = bundle_root / "bundle-manifest.json"
+    manifest_path = bundle_root / CORPUS_MANIFEST_NAME
     if not manifest_path.is_file():
         fail("CORPUS_NOT_APPROVED", "The pinned corpus bundle has no manifest")
     manifest_value = parse_json_bytes(
@@ -177,18 +199,39 @@ def _load_approved_corpus(
     inventory = manifest.get("inventory") or {}
     if inventory.get("corpus.json") != request.corpus_sha256:
         fail("HASH_MISMATCH", "Corpus manifest does not bind the pinned bytes")
+    if bundle_root.name != request.case_id:
+        fail("IDENTITY_MISMATCH", "The corpus bundle is not case-named")
+    # The validation report must exist and match the same bundle inventory.
+    report_path = bundle_root / CORPUS_VALIDATION_REPORT_NAME
+    if not report_path.is_file():
+        fail("CORPUS_NOT_APPROVED", "The corpus bundle lacks its validation report")
+    report_sha = sha256_bytes(report_path.read_bytes())
+    if inventory.get(CORPUS_VALIDATION_REPORT_NAME) != report_sha:
+        fail("HASH_MISMATCH", "The validation report does not match the bundle")
+    report_value = parse_json_bytes(
+        report_path.read_bytes(), label="corpus validation report"
+    )
+    report = report_value if isinstance(report_value, dict) else {}
+    if report.get("corpus_sha256") != request.corpus_sha256:
+        fail("HASH_MISMATCH", "The validation report does not bind the corpus")
+    if report.get("status") != "pass" or report.get("error_count") != 0:
+        fail("CORPUS_NOT_APPROVED", "The corpus validation report is not a pass")
     corpus_value = parse_json_bytes(corpus_bytes, label="corpus")
     corpus = corpus_value if isinstance(corpus_value, dict) else {}
     records = corpus.get("records")
     if not isinstance(records, list):
         fail("CORPUS_INVALID", "The pinned corpus has no records")
+    versions = manifest.get("versions") or {}
+    if corpus.get("schema_version") != versions.get("schema"):
+        fail("VERSION_MISMATCH", "The corpus schema version is inconsistent")
     return {
         "path": request.corpus,
         "sha256": request.corpus_sha256,
         "case_id": manifest.get("case_id"),
         "record_count": len(records),
-        "versions": manifest.get("versions"),
+        "versions": versions,
         "bundle_content_sha256": manifest.get("bundle_content_sha256"),
+        "validation_report_sha256": report_sha,
     }
 
 
@@ -200,7 +243,7 @@ def _check_credential_presence() -> None:
 
 
 def _request_cost_approval(
-    stream: TextIO, estimate: pricing.CostBreakdown, *, interactive: bool
+    stream: TextIO, estimate: pricing.CostBreakdown
 ) -> dict[str, Any]:
     """Show the worst-case CNY bound and require an exact `yes` confirmation."""
     print(
@@ -219,7 +262,9 @@ def _request_cost_approval(
     print(f"  output             : {estimate.output_cost_cny} CNY", file=stream)
     print(f"  total upper bound  : {estimate.total_cny} CNY", file=stream)
     print("Approve this run's paid work? Type `yes` to confirm:", file=stream)
-    if not interactive:
+    import sys
+
+    if not sys.stdin.isatty():
         fail("APPROVAL_UNAVAILABLE", "Cost approval requires an interactive session")
     try:
         answer = input()
@@ -239,7 +284,7 @@ def admit_new_run(
     request: NewRunRequest,
     *,
     stream: TextIO | None = None,
-    interactive: bool = True,
+    command: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the nine-step preflight; return the admission result.
 
@@ -249,11 +294,14 @@ def admit_new_run(
     import sys
 
     stream = stream if stream is not None else sys.stdout
+    # Step 1: closed request schema; a failure stays a run-external error.
+    request.validate()
     workspace = workspace_root.resolve(strict=True)
     store = RunStore(workspace)
 
+    # Step 2: mint the run and write the canonical request.
     run = store.create_run()
-    request_document = request.document(run.run_id)
+    request_document = request.document(run.run_id, command or [])
     request_sha = store.write_request(run.run_id, request_document)
     store.append_event(
         run.run_id,
@@ -265,9 +313,7 @@ def admit_new_run(
     )
 
     try:
-        return _run_preflight_steps(
-            store, run, request, request_sha, workspace, stream, interactive
-        )
+        return _run_preflight_steps(store, run, request, request_sha, workspace, stream)
     except IdeationInputError as exc:
         preflight_rejected(store, run.run_id, exc.code, exc.message)
         raise
@@ -280,7 +326,6 @@ def _run_preflight_steps(
     request_sha: str,
     workspace: Path,
     stream: TextIO,
-    interactive: bool,
 ) -> dict[str, Any]:
     # Step 3: clean worktree and exact commit.
     commit_sha = _require_clean_worktree(workspace)
@@ -316,17 +361,16 @@ def _run_preflight_steps(
 
     # Step 8: conservative cost bound and explicit approval.
     price_table = pricing.load_price_table(workspace)
+    model_rounds = request.max_num_generations * request.num_reflections
+    worst_case_input_tokens = model_rounds * WORST_CASE_INPUT_TOKENS_PER_ROUND
+    worst_case_output_tokens = model_rounds * DEFAULT_MAX_TOKENS
     estimate = pricing.worst_case_bound(
         price_table,
-        input_tokens=request.max_num_generations
-        * request.num_reflections
-        * _WORST_CASE_INPUT_TOKENS_PER_ROUND,
-        output_tokens=request.max_num_generations
-        * request.num_reflections
-        * DEFAULT_MAX_TOKENS,
+        input_tokens=worst_case_input_tokens,
+        output_tokens=worst_case_output_tokens,
         attempts=MAX_ATTEMPTS_PER_OPERATION,
     )
-    approval = _request_cost_approval(stream, estimate, interactive=interactive)
+    approval = _request_cost_approval(stream, estimate)
     _append_step(
         store,
         run.run_id,
@@ -340,7 +384,7 @@ def _run_preflight_steps(
 
     # Step 9: write the Run Admission; paid work may only follow this.
     admission_document = {
-        "schema_version": RUN_ADMISSION_SCHEMA,
+        "schema_version": RUN_ADMISSION_SCHEMA_VERSION,
         "run_id": run.run_id,
         "admitted_at": _now(),
         "case_id": request.case_id,
@@ -364,12 +408,8 @@ def _run_preflight_steps(
         "cost": {
             "currency": "CNY",
             "worst_case": {
-                "input_tokens": request.max_num_generations
-                * request.num_reflections
-                * _WORST_CASE_INPUT_TOKENS_PER_ROUND,
-                "output_tokens": request.max_num_generations
-                * request.num_reflections
-                * DEFAULT_MAX_TOKENS,
+                "input_tokens": worst_case_input_tokens,
+                "output_tokens": worst_case_output_tokens,
                 "attempts": MAX_ATTEMPTS_PER_OPERATION,
                 "total_cny": str(estimate.total_cny),
             },
@@ -395,12 +435,6 @@ def _run_preflight_steps(
         "admission_sha256": admission_sha,
         "worst_case_cny": str(estimate.total_cny),
     }
-
-
-# Declared worst-case input per model round. The workshop file, prompts and
-# history sizes are bounded artifacts; this constant is the pinned policy
-# value recorded in the admission document.
-_WORST_CASE_INPUT_TOKENS_PER_ROUND = 32_768
 
 
 def preflight_rejected(

@@ -159,6 +159,7 @@ def _run_new_run(
     env_extra: dict[str, str] | None = None,
     **overrides: str,
 ) -> subprocess.CompletedProcess[str]:
+    """Run the new-run CLI with the approval prompt driven over a real pty."""
     # Preflight verifies a clean worktree; the fixture approvals must be
     # committed before the run request is evaluated.
     _commit_all(workspace)
@@ -186,14 +187,29 @@ def _run_new_run(
     ):
         if key in overrides:
             arguments.extend([flag, overrides[key]])
-    return subprocess.run(
+    master, slave = os.openpty()
+    process = subprocess.Popen(
         arguments,
         cwd=workspace,
-        input=stdin,
+        stdin=slave,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        capture_output=True,
-        check=False,
         env=environment,
+    )
+    os.close(slave)
+    # Always write at least one newline so a blocking input() in the child
+    # can never deadlock the suite; an empty line is simply not `yes`. The
+    # master stays open until the child exits: closing it early would
+    # discard the unread pty buffer and turn answers into EOF.
+    os.write(master, ((stdin or "") + "\n").encode("utf-8"))
+    stdout_text, stderr_text = process.communicate()
+    os.close(master)
+    return subprocess.CompletedProcess(
+        args=arguments,
+        returncode=process.returncode,
+        stdout=stdout_text,
+        stderr=stderr_text,
     )
 
 
@@ -355,8 +371,52 @@ def test_new_run_rejects_bad_case_id_before_any_run_is_created(
     tmp_path: Path,
 ) -> None:
     workspace = _workspace(tmp_path)
-    result = _run_new_run(workspace, case_id="not-a-case-id")
+    workshop_rel, workshop_sha = _approved_workshop_paths(workspace)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+
+    # A full valid argument set with only the case_id malformed: the closed
+    # request schema (step 1) must reject before any run root exists.
+    result = _run_new_run(
+        workspace,
+        case_id="not-a-case-id",
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+    )
     assert result.returncode != 0
+    assert "INVALID_SCHEMA" in result.stderr
+    assert not (workspace / "artifacts/ideation-runs").exists()
+
+
+def test_new_run_rejects_malformed_sha_and_nonpositive_budgets_before_any_run(
+    tmp_path: Path,
+) -> None:
+    workspace = _workspace(tmp_path)
+    workshop_rel, workshop_sha = _approved_workshop_paths(workspace)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+
+    result = _run_new_run(
+        workspace,
+        workshop=workshop_rel,
+        workshop_sha256="nothex",
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+    )
+    assert result.returncode != 0
+    assert "INVALID_SCHEMA" in result.stderr
+    assert not (workspace / "artifacts/ideation-runs").exists()
+
+    result = _run_new_run(
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations="0",
+        workspace=workspace,
+    )
+    assert result.returncode != 0
+    assert "INVALID_SCHEMA" in result.stderr
     assert not (workspace / "artifacts/ideation-runs").exists()
 
 
@@ -712,3 +772,35 @@ def test_new_run_rejects_unknown_flags(tmp_path: Path) -> None:
         check=False,
     )
     assert result.returncode != 0
+
+
+def test_new_run_rejects_path_escape_inputs_before_any_run(tmp_path: Path) -> None:
+    """CLI input paths must cross the guarded workspace path boundary."""
+    workspace = _workspace(tmp_path)
+    workshop_rel, workshop_sha = _approved_workshop_paths(workspace)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+
+    for bad_path, flag, sha_flag, sha in (
+        ("../outside.md", "--workshop", "--workshop-sha256", workshop_sha),
+        ("/etc/hosts", "--corpus", "--corpus-sha256", corpus_sha),
+    ):
+        arguments = {
+            "workshop": workshop_rel,
+            "workshop_sha256": workshop_sha,
+            "corpus": corpus_rel,
+            "corpus_sha256": corpus_sha,
+        }
+        key = flag.removeprefix("--").replace("-", "_")
+        arguments[key] = bad_path
+        arguments[sha_flag.removeprefix("--").replace("-", "_")] = sha
+        result = _run_new_run(workspace, **arguments)
+        assert result.returncode != 0, f"{bad_path} must be rejected"
+        assert "PATH_ESCAPE" in result.stderr or "INVALID_PATH" in result.stderr
+
+    run_dirs = [
+        child
+        for child in (workspace / "artifacts/ideation-runs").glob("*")
+        if child.is_dir()
+    ]
+    for run_root in run_dirs:
+        assert not (run_root / "admission.json").exists()

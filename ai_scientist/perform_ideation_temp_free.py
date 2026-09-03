@@ -293,11 +293,6 @@ def _build_parser() -> argparse.ArgumentParser:
     new_run.add_argument("--corpus-sha256", required=True)
     new_run.add_argument("--max-num-generations", type=int, required=True)
     new_run.add_argument("--num-reflections", type=int, required=True)
-    new_run.add_argument(
-        "--non-interactive",
-        action="store_true",
-        help="Refuse the interactive cost approval (fails closed).",
-    )
 
     # Retained legacy baseline entry (expand-contract; removed by ticket 13).
     legacy = subparsers.add_parser(
@@ -349,7 +344,25 @@ def _run_new_run(args: argparse.Namespace) -> int:
         result = admit_new_run(
             Path.cwd(),
             request,
-            interactive=not args.non_interactive,
+            command=[
+                "python",
+                "ai_scientist/perform_ideation_temp_free.py",
+                "new-run",
+                "--case-id",
+                args.case_id,
+                "--workshop",
+                args.workshop,
+                "--workshop-sha256",
+                args.workshop_sha256,
+                "--corpus",
+                args.corpus,
+                "--corpus-sha256",
+                args.corpus_sha256,
+                "--max-num-generations",
+                str(args.max_num_generations),
+                "--num-reflections",
+                str(args.num_reflections),
+            ],
         )
     except IdeationInputError as exc:
         error = {
