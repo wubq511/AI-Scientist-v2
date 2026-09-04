@@ -597,6 +597,98 @@ def test_cli_seam_executes_and_seals_run(tmp_path: Path, monkeypatch: Any) -> No
     assert seal["terminal_summary"]["idea_count"] == 1
 
 
+def test_cli_seam_progress_stream_emits_expected_markers(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Verify progress_stream receives real-time progress markers with emojis without corrupting stdout."""
+    import argparse
+    import io
+    from ai_scientist.perform_ideation_temp_free import _run_new_run
+
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    approval_input = io.StringIO("yes\n")
+    monkeypatch.setattr("sys.stdin", approval_input)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    corpus_data = json.loads((workspace / corpus_rel).read_text(encoding="utf-8"))
+    paper_id = corpus_data["records"][0]["paper_id"]
+
+    idea_payload = {
+        "Name": "cli_cueing_idea",
+        "Title": "CLI Driven Proposal for Temporal Forecasting",
+        "Short Hypothesis": "Automated verification through the CLI seam functions identically to the programmatic controller.",
+        "Related Work": "Prior tests validated preflight in isolation; this proves integrated CLI execution.",
+        "Abstract": "We evaluate the unified CLI seam driving the ideation loop.",
+        "Experiments": [
+            "Execute new-run CLI with injected adapter and verify seal emission."
+        ],
+        "Risk Factors and Limitations": [
+            "Requires interactive approval in production."
+        ],
+    }
+    stub_responses = [
+        TransportResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=_make_response_bytes(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "clinical forecasting"}',
+                "chatcmpl-cli-0",
+            ),
+            duration_ms=40.0,
+        ),
+        TransportResponse(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=_make_response_bytes(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(idea_payload)}, "grounding": ["{paper_id}"]}}',
+                "chatcmpl-cli-1",
+            ),
+            duration_ms=50.0,
+        ),
+    ]
+
+    transport = StubTransport(stub_responses)
+    price_table = load_price_table(workspace)
+    adapter = DeepSeekAdapter(price_table=price_table, transport=transport)
+
+    args = argparse.Namespace(
+        case_id=CASE_ID,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        entry="new-run",
+        max_num_generations=1,
+        num_reflections=2,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+    )
+
+    progress_buf = io.StringIO()
+    setattr(progress_buf, "isatty", lambda: True)
+
+    exit_code = _run_new_run(
+        args,
+        workspace_root=workspace,
+        adapter=adapter,
+        stream=progress_buf,
+        execute=True,
+    )
+    assert exit_code == 0
+
+    progress_output = progress_buf.getvalue()
+    assert "✓ 费用已批准" in progress_output
+    assert "🚀 [Generation 1/1]" in progress_output
+    assert "🧠 [Model]" in progress_output
+    assert "✨ [Model] 推理完成" in progress_output
+    assert "🔍 [Tool] 执行文献检索" in progress_output
+    assert "💡 [Idea] 创意定稿接受成功" in progress_output
+    assert "🔒 [Seal] Run 证据链封印完成" in progress_output
+
+
 def test_multi_generation_happy_path_seals_multiple_ideas(
     tmp_path: Path, monkeypatch: Any
 ) -> None:

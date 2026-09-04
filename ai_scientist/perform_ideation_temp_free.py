@@ -103,12 +103,17 @@ def run_new_run(
 
     from ai_scientist.ideation.controller import IdeationController
 
+    progress_stream = stream
+    if progress_stream is None and sys.stderr.isatty():
+        progress_stream = sys.stderr
+
     controller = IdeationController(
         workspace_root,
         admission_result["run_id"],
         store=store,
         adapter=adapter,
         retriever=retriever,
+        progress_stream=progress_stream,
     )
     return controller.run()
 
@@ -213,12 +218,17 @@ def _run_new_run(
     try:
         from ai_scientist.ideation.controller import IdeationController
 
+        progress_stream = stream
+        if progress_stream is None and sys.stderr.isatty():
+            progress_stream = sys.stderr
+
         controller = IdeationController(
             root,
             run_id,
             store=store,
             adapter=adapter,
             retriever=retriever,
+            progress_stream=progress_stream,
         )
         result = controller.run()
     except IdeationInputError as exc:

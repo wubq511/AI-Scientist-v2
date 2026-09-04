@@ -580,12 +580,14 @@ class IdeationController:
         retriever: ScopedLiteratureRetriever | None = None,
         writer_epoch: int = 1,
         resume_plan: ResumePlan | None = None,
+        progress_stream: Any = None,
     ) -> None:
         self.workspace_root = workspace_root.resolve(strict=True)
         self.run_id = run_id
         self.store = store or RunStore(self.workspace_root)
         self.writer_epoch = writer_epoch
         self.resume_plan = resume_plan
+        self.progress_stream = progress_stream
 
         # Load and verify write-once admission
         admission_bytes = self.store.read_artifact(self.run_id, "admission.json")
@@ -672,6 +674,11 @@ class IdeationController:
         self.run_has_non_empty_retrieval = False
         self.disposition_counts = {"finalized": 0, "budget_exhausted": 0}
 
+    def _report(self, message: str) -> None:
+        if self.progress_stream is not None:
+            self.progress_stream.write(f"{message}\n")
+            self.progress_stream.flush()
+
     def _next_op_seq(self) -> int:
         self.op_seq += 1
         return self.op_seq
@@ -728,6 +735,9 @@ class IdeationController:
     ) -> dict[str, Any] | None:
         """Run generations from `start_generation`; return a mid-loop seal or None."""
         for gen_idx in range(start_generation, self.max_num_generations):
+            self._report(
+                f"\n🚀 [Generation {gen_idx + 1}/{self.max_num_generations}] 开始探索科研构想..."
+            )
             try:
                 sealed = self._execute_generation(
                     gen_idx,
@@ -971,6 +981,9 @@ class IdeationController:
 
         seal_sha = self.store.write_seal(self.run_id, seal_document)
         self.store.verify_chain(self.run_id)
+        self._report(
+            f"\n🔒 [Seal] Run 证据链封印完成 (Terminal Outcome: {outcome}, Run ID: {self.run_id})\n"
+        )
 
         result = {
             "idea_count": len(self.accepted_ideas),
@@ -1191,6 +1204,15 @@ class IdeationController:
                     user_id=f"run-{self.run_id[:8]}",
                 )
 
+                if ref_round == 0:
+                    self._report(
+                        "  🧠 [Model] 正在调用 DeepSeek 生成初始构想 (深度思考中)..."
+                    )
+                else:
+                    self._report(
+                        f"  🧠 [Model] 正在调用 DeepSeek 进行第 {ref_round} 轮反思批判 (深度推理中)..."
+                    )
+
                 if isinstance(pending, PendingReexecute):
                     # Re-execute the interrupted call under the same
                     # operation_seq with the next attempt_seq (ticket 10).
@@ -1211,6 +1233,29 @@ class IdeationController:
                         pipeline_position=pipeline_pos,
                         writer_epoch=self.writer_epoch,
                     )
+
+                dur_sec = getattr(round_result, "duration_ms", 0.0) / 1000.0
+                cost_str = (
+                    getattr(round_result.cost, "total_cny", "0.00")
+                    if getattr(round_result, "cost", None) is not None
+                    else "0.00"
+                )
+                tokens = (
+                    getattr(round_result.usage, "total_tokens", 0)
+                    if getattr(round_result, "usage", None) is not None
+                    else 0
+                )
+                reasoning_tokens = (
+                    getattr(round_result.usage, "reasoning_tokens", 0)
+                    if getattr(round_result, "usage", None) is not None
+                    else 0
+                )
+                reasoning_hint = (
+                    f" (含思考 {reasoning_tokens} tokens)" if reasoning_tokens else ""
+                )
+                self._report(
+                    f"  ✨ [Model] 推理完成 (耗时 {dur_sec:.1f}s | 消耗 {tokens} tokens{reasoning_hint} | 费用 {cost_str} CNY)"
+                )
 
                 response_text = round_result.visible_content
                 msg_history.append({"role": "user", "content": prompt_text})
@@ -1295,6 +1340,9 @@ class IdeationController:
                         generation_retrieved_paper_ids.add(p["paper_id"])
 
                 last_tool_results = format_retrieval_for_reflection(retrieval_payload)
+                self._report(
+                    f"  🔍 [Tool] 执行文献检索 SearchLiterature -> 命中 {len(papers)} 篇相关文献"
+                )
 
                 self.store.append_event(
                     self.run_id,
@@ -1560,6 +1608,10 @@ class IdeationController:
                 self.idea_str_archive.append(json.dumps(validated_idea))
                 self.disposition_counts["finalized"] += 1
                 generation_finalized = True
+                self._report(
+                    f"  💡 [Idea] 创意定稿接受成功: \"{validated_idea.get('Title', '')}\" "
+                    f"(声明引用 {len(validated_grounding)} 篇文献)"
+                )
                 break
 
         if not generation_finalized:

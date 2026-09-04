@@ -474,6 +474,11 @@ def _run_preflight_steps(
             "admission_sha256": admission_sha,
         },
     )
+    if stream is not None and getattr(stream, "isatty", lambda: False)():
+        stream.write(
+            f"\n  ✓ 费用已批准，Run 准入成功 (Run ID: {run.run_id})，正在启动推理与检索控制循环...\n\n"
+        )
+        stream.flush()
     return {
         "status": "admitted",
         "run_id": run.run_id,

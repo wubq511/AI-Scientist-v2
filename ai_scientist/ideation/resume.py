@@ -417,6 +417,10 @@ def resume_run(
         },
     )
 
+    progress_stream = stream
+    if progress_stream is None and sys.stderr.isatty():
+        progress_stream = sys.stderr
+
     controller = IdeationController(
         workspace,
         run_id,
@@ -425,5 +429,6 @@ def resume_run(
         retriever=retriever,
         writer_epoch=new_epoch,
         resume_plan=plan,
+        progress_stream=progress_stream,
     )
     return controller.run()
