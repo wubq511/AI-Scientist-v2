@@ -12,10 +12,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+import os
 from pathlib import Path
 import re
 import time
 from typing import Any, Callable, Protocol, Sequence
+
+import httpx
 
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
 from .contract import (
@@ -113,6 +116,9 @@ SECRET_PATTERNS = [
 def redact_secrets(text: str) -> str:
     """Scrub credentials and tokens from any text or error message."""
     redacted = text
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if api_key and api_key.strip():
+        redacted = redacted.replace(api_key.strip(), "[REDACTED_SECRET]")
     for pattern in SECRET_PATTERNS:
         redacted = pattern.sub("[REDACTED_SECRET]", redacted)
     return redacted
@@ -858,6 +864,81 @@ class RecordedTransport:
         )
 
 
+class HttpTransport:
+    """Production HTTP transport for DeepSeek direct Chat Completions API (ticket 01)."""
+
+    def __init__(
+        self,
+        *,
+        _http_transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self.endpoint = f"{DEEPSEEK_BASE_URL}/chat/completions"
+        self._http_transport = _http_transport
+
+    def send(self, request_payload: dict[str, Any]) -> TransportResponse:
+        api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+        if not api_key:
+            raise ConnectionError("DEEPSEEK_API_KEY is not set in environment")
+
+        content = canonical_json_bytes(request_payload)
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        t0 = time.monotonic()
+        try:
+            with httpx.Client(
+                verify=True,
+                follow_redirects=False,
+                trust_env=False,
+                timeout=httpx.Timeout(
+                    timeout=WALL_CLOCK_DEADLINE_SECONDS,
+                    connect=CONNECT_TIMEOUT_SECONDS,
+                ),
+                transport=self._http_transport,
+            ) as client:
+                req = client.build_request(
+                    "POST",
+                    self.endpoint,
+                    headers=headers,
+                    content=content,
+                )
+                resp = client.send(req, stream=True)
+                try:
+                    body_chunks: list[bytes] = []
+                    for chunk in resp.iter_bytes():
+                        if time.monotonic() - t0 > WALL_CLOCK_DEADLINE_SECONDS:
+                            raise TimeoutError(
+                                f"Physical attempt exceeded wall-clock deadline of {WALL_CLOCK_DEADLINE_SECONDS}s"
+                            )
+                        body_chunks.append(chunk)
+                    body_bytes = b"".join(body_chunks)
+                finally:
+                    resp.close()
+
+            duration_ms = round((time.monotonic() - t0) * 1000, 3)
+            return TransportResponse(
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+                body=body_bytes,
+                duration_ms=duration_ms,
+            )
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(
+                redact_secrets(f"Transport call timed out: {exc}")
+            ) from None
+        except (httpx.NetworkError, httpx.TransportError) as exc:
+            raise ConnectionError(
+                redact_secrets(f"Transport connection failed: {exc}")
+            ) from None
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                raise
+            raise ConnectionError(redact_secrets(f"Transport error: {exc}")) from None
+
+
 def create_deepseek_client_options(api_key: str | None = None) -> dict[str, Any]:
     """Return explicit client configuration options ensuring SDK implicit retries are off."""
     return {
@@ -873,13 +954,13 @@ class DeepSeekAdapter:
 
     def __init__(
         self,
-        transport: Transport,
+        transport: Transport | None = None,
         *,
         store: RunStore | None = None,
         run_id: str | None = None,
         price_table: PriceTable | None = None,
     ) -> None:
-        self.transport = transport
+        self.transport = transport if transport is not None else HttpTransport()
         self.store = store
         self.run_id = run_id
         self.price_table = price_table
@@ -1008,7 +1089,7 @@ class DeepSeekAdapter:
             transport_failure: ModelRoundFailure | None = None
             try:
                 transport_resp = self.transport.send(canonical_req_dict)
-            except TimeoutError as exc:
+            except (TimeoutError, httpx.TimeoutException) as exc:
                 elapsed_ms = round((time.perf_counter() - t0) * 1000, 3)
                 transport_failure = ModelRoundFailure(
                     attempt_seq=attempt_seq,
@@ -1017,12 +1098,17 @@ class DeepSeekAdapter:
                     duration_ms=elapsed_ms,
                     error_code="timeout_ambiguous",
                     http_status=None,
-                    message=f"Transport call timed out: {exc}",
-                    raw_error=str(exc),
+                    message=redact_secrets(f"Transport call timed out: {exc}"),
+                    raw_error=redact_secrets(str(exc)),
                     retry_disposition="none",  # timeout_ambiguous must not be retried!
                     total_attempts=attempt_seq,
                 )
-            except (ConnectionError, OSError) as exc:
+            except (
+                ConnectionError,
+                OSError,
+                httpx.NetworkError,
+                httpx.TransportError,
+            ) as exc:
                 elapsed_ms = round((time.perf_counter() - t0) * 1000, 3)
                 transport_failure = ModelRoundFailure(
                     attempt_seq=attempt_seq,
@@ -1031,8 +1117,8 @@ class DeepSeekAdapter:
                     duration_ms=elapsed_ms,
                     error_code="transport_ambiguous",
                     http_status=None,
-                    message=f"Transport connection failed: {exc}",
-                    raw_error=str(exc),
+                    message=redact_secrets(f"Transport connection failed: {exc}"),
+                    raw_error=redact_secrets(str(exc)),
                     retry_disposition="none",  # transport_ambiguous must not be retried!
                     total_attempts=attempt_seq,
                 )
@@ -1045,8 +1131,8 @@ class DeepSeekAdapter:
                     duration_ms=elapsed_ms,
                     error_code="unknown_provider_failure",
                     http_status=None,
-                    message=f"Unexpected transport exception: {exc}",
-                    raw_error=str(exc),
+                    message=redact_secrets(f"Unexpected transport exception: {exc}"),
+                    raw_error=redact_secrets(str(exc)),
                     retry_disposition="none",
                     total_attempts=attempt_seq,
                 )

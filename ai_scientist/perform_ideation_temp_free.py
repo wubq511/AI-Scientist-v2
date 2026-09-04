@@ -150,11 +150,10 @@ def _run_new_run(
         max_num_generations=args.max_num_generations,
         num_reflections=args.num_reflections,
     )
-    # The bare CLI admits without executing (024: no paid-work control surface);
-    # execution happens only through an injected adapter -- the tested seam.
-    # Wiring a real provider transport is a Canary-stage decision.
+    # Production CLI executes by default after admission (ticket 01);
+    # tests and library callers may still pass execute=False.
     if execute is None:
-        execute = adapter is not None
+        execute = True
 
     command = [
         "python",

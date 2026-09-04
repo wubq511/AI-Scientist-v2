@@ -1,4 +1,4 @@
 # Canonical ideation-only runtime dependencies.
-# The ideation-only runtime import closure is pure standard library (ticket 13);
-# this contract intentionally pins no packages. Retained legacy/downstream
-# dependencies live in requirements-upstream.txt.
+# httpx is the sole production HTTP transport dependency for DeepSeek execution (ticket 01).
+# Retained legacy/downstream dependencies live in requirements-upstream.txt.
+httpx==0.28.1
