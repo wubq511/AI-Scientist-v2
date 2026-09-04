@@ -39,9 +39,9 @@ created: 2026-09-04
   - Canary 阶段总硬上限：30.00 CNY；
   - 历史已发生实际支出：0.14 CNY（单 case smoke 产生）；
   - 当前 Canary 阶段剩余预算：29.86 CNY；
-  - 拟议本提案 Plan Gate 实际支出子上限：`plan_gate_subcap_cny = 5.00 CNY`；
-  - 子上限约束的是矩阵级实际支出（stage 总账含 0.14 CNY 历史 smoke 支出的 opening balance），严格不等式防溢出；每个 run 的 7.08 CNY 最坏 bound 仅属于 live admission 交互批准 seam，不进入子上限算术。
-  - 每个 run 仍受 7.08 CNY 单次准入最坏上限校验，且需 Robert 交互式逐 run 批准。
+  - 拟议本提案 Plan Gate 累计实际支出重审批阈值：`plan_gate_reapproval_threshold_cny = 5.00 CNY`；它不是硬上限。某个已逐 run 批准的请求可能在结算后跨过阈值，账本必须如实记录并在下一 slot 前要求重新审批；
+  - Canary 唯一硬上限为 `30.00 CNY`。每个 run 前由 guarded slot runner 按当前 stage 实际支出加 `7.08 CNY` 高峰最坏上界做 reservation，只有 projected ceiling `<= 30.00 CNY` 才会立即 exec 生产 `new-run`；
+  - 每个 run 仍需 Robert 在生产 admission 中交互式逐 run 批准 `7.08 CNY` 最坏上界。Plan Gate、aggregate reservation 与逐 run `yes` 三者互不替代。
 
 ## Pre-registered 判据
 
@@ -52,7 +52,7 @@ created: 2026-09-04
 4. **既有质量底线**：challenger 不得引入 `problem_space_match=mismatched`、`feasibility_soundness=unsound`、`grounding_synthesis=name_dropped`、contamination signal 或 leakage；任一出现自动拒绝。
 5. **Deterministic Regression Budget**：零容忍。profile schema/hash、Run Request/Admission、resume、replay、Evidence Chain、export、leakage、isolation、import/dependency 与 CLI 任一 baseline-pass/challenger-fail 均自动拒绝。
 6. **截断与异常**：challenger 不得新增 `finish_reason=length`、completion truncation、terminal failure、unresumable suspension、physical attempt 或仅 challenger 出现的异常模式。
-7. **成本与延迟**：challenger 实际总成本不得超过 baseline 的 2.0 倍；challenger 端到端中位延迟不得超过 baseline 的 2.0 倍；总实际支出不得突破 Plan Gate 子上限或 30 CNY Canary 总上限。
+7. **成本与延迟**：challenger 实际总成本不得超过 baseline 的 2.0 倍；challenger 端到端中位延迟不得超过 baseline 的 2.0 倍；每个 live slot 必须通过 `current stage actual + 7.08 CNY <= 30.00 CNY` 的请求前硬上限 reservation。累计实际支出达到 `5.00 CNY` 时，下一 slot 必须重新取得 Plan Gate 批准；已逐 run 批准请求产生的阈值跨越被记录，不伪装成可事后撤销的硬限额。
 8. **Fail-closed 结果**：任何判据未通过均保持现有代码默认，但 035 和 Scale Gate 继续暂停；“challenger 未通过”不等于“已知目标错配 baseline 合格”。
 
 ## 预期失败模式
@@ -64,7 +64,7 @@ created: 2026-09-04
 5. 两臂除 prompt 外出现 Run Specification drift，使 pair 失去可比性；
 6. 盲包泄露 profile、执行顺序、成本、延迟或模型元数据；
 7. 任一 run 失败、挂起、截断或因预算停止，矩阵变为 inconclusive；
-8. 实际成本显著高于 smoke 外推，触发 Plan Gate 子上限或 Canary 硬上限。
+8. 实际成本显著高于 smoke 外推，触发 `5.00 CNY` 重审批阈值，或使下一 run 的 `7.08 CNY` reservation 无法装入 `30.00 CNY` Canary 硬上限。
 
 ## 实验证据
 
@@ -78,13 +78,14 @@ created: 2026-09-04
 - **选集批准记录 (`selection-approval.json`)**：`9944dc5e4d00fc6aaec1f541ccc6bb7481bca8a36e3634a3a6e63bcf49e893ba`
 - **8-Run 运行矩阵 (`run-matrix.json`)**：`c8a9217ffcf60718cc132ef04688bdf0bd3bd23758f0e54373993e1237d78ef4`（自验签 `matrix_sha256`: `c60d72748d8ab6aa06e712332e4bee2b4b7cf275b7f34ba58c210c09f5d963c3`）
 - **双盲平衡映射 (`blind-mapping.json`)**：`a605f3755b7bfeeb6497f6e27a9bc1e3f6f36822155497f1c9f19d85388f0a9e`
-- **初始花费账本 (`spend-ledger.json`)**：`bec52349eb53b0328cafd67f152d25ce43e2b7e90ad0d1fbbf3f69fd01f03f29`（账本 schema 已升级为 `comparison-spend-ledger-v1.1.0`，包含 0.14 CNY 历史 smoke 支出 opening balance）
-- **CLI 运行命令 (`commands.txt`)**：`be30d7d81a4aaf6e2b388c122a1d167a6258a50a289119e4cd7b73564ad2ce2a`
+- **初始花费账本 (`spend-ledger.json`)**：`56562175984e4a99a4eb734cb1fc6c88527afb1059bc31fc62da1b3093f35d3f`（`comparison-spend-ledger-v1.2.0`；含 0.14 CNY 历史 opening balance、5.00 CNY 重审批阈值与 30.00 CNY 硬上限）
+- **CLI 运行命令 (`commands.txt`)**：`3851ca37ed6fdc9fe2c634238d865693db4f3663859f9d1c6bcedc2b62664af6`（8 条命令均经项目 credential wrapper 进入 `scripts/run-prompt-comparison-slot`，并携带 frozen matrix file SHA-256 与 `5.00 CNY` threshold 外部 pin，不再绕过 aggregate preflight）
 
 ### 代码与运行基准
 
-- **当前准备完成 Commit SHA**：`3428909f939a510534b481327c7c674f541e9956`（对抗性审查修复后的当前 HEAD，覆盖 Ticket 03 最终提交）
+- **当前准备完成 Commit SHA**：`696176c9a9395601e2fcba23b02f3555aa46c179`（付费前 budget/slot guard 修复 commit；覆盖外部 matrix/threshold pin、immutable opening balance 与 write-once reservation）
 - **依赖栈基准**：Python 3.13.2 reference stack, pinned dependencies.
+- **零网络验证**：`tests/test_prompt_comparison.py` 65 passed；Prompt Profile 相关聚焦集 97 passed；全量 suite 759 passed；真实私有 package 的越序 slot 在 reservation/provider 前以 `PREVIOUS_SLOT_NOT_INGESTED` 拒绝。新增 provider 调用 0 次，新增实际支出 0.00 CNY。
 
 ## Plan Gate 记录
 
@@ -93,9 +94,10 @@ created: 2026-09-04
 - **拟议审批内容**：
   - 4-case selection manifest 与 8-run frozen matrix 散列；
   - 2/2 执行顺序平衡与 2/2 A/B 双盲映射；
-  - 拟议实际支出子上限 `5.00 CNY`：Plan Gate 为矩阵级严格不等式 consult 守卫（总 stage 支出须严格低于子上限与 30.00 CNY 硬上限，enforcement 于 result ingestion fail-closed `SUBCAP_EXCEEDED`）；本提案 runs 剩余可支配 tracked 预算 = 5.00 − 0.14 = 4.86 CNY（Canary 阶段剩余 29.86 CNY/30.00 CNY 硬上限）；
+  - 拟议累计实际支出重审批阈值 `5.00 CNY`：stage 总账当前为 `0.14 CNY`，距离下一次重审批触发点为 `4.86 CNY`；阈值不是硬上限，任何跨越都必须如实入账，并在下一 slot 前暂停；
+  - Canary `30.00 CNY` 硬上限：当前剩余 `29.86 CNY`，每个 slot 前用当时实际总账加 `7.08 CNY` 峰值最坏上界做 reservation；exact `30.00` 可进入，`30.01` fail closed；同一 slot 在 exec 前写入 write-once `0600` reservation，重复/并发启动拒绝；
   - 3 胜 0 负盲审胜负、domain-method fit 改善、ML intrusion 不增与 2.0× Regression Budget 门槛；
-  - 声明：Plan Gate 审批仅批准矩阵级架构与子上限，不替代每个 run 准入前的独立交互式费用确认。
+  - 声明：Plan Gate 审批仅批准矩阵级架构与重审批阈值，不替代每个 run 准入前的独立交互式费用确认，也不替代请求前的 30 CNY aggregate reservation。
 
 ## Promotion Gate 记录
 
