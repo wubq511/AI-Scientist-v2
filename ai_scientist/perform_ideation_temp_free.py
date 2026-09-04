@@ -294,6 +294,13 @@ def _build_parser() -> argparse.ArgumentParser:
     new_run.add_argument("--max-num-generations", type=int, required=True)
     new_run.add_argument("--num-reflections", type=int, required=True)
 
+    # Resume entry: continue one suspended Ideation Run; exact run_id only
+    # (ticket 10). No other control surface is accepted.
+    resume = subparsers.add_parser(
+        "resume", help="Resume one suspended Ideation Run by its exact run_id."
+    )
+    resume.add_argument("--run-id", required=True)
+
     # Retained legacy baseline entry (expand-contract; removed by ticket 13).
     legacy = subparsers.add_parser(
         "legacy", help="Retained pre-fork baseline path (ticket 13 removes it)."
@@ -361,6 +368,18 @@ def run_new_run(
     return controller.run()
 
 
+def _suspended_payload(run_id: str | None, code: str, message: str) -> dict[str, Any]:
+    """Uniform suspend report: the run stays unsealed and resumable."""
+    payload: dict[str, Any] = {
+        "code": code,
+        "message": message,
+        "status": "suspended",
+    }
+    if run_id is not None:
+        payload["run_id"] = run_id
+    return payload
+
+
 def _run_new_run(
     args: argparse.Namespace,
     *,
@@ -372,9 +391,10 @@ def _run_new_run(
     execute: bool | None = None,
 ) -> int:
     import os
-    from ai_scientist.ideation.admission import NewRunRequest
+    from ai_scientist.ideation.admission import NewRunRequest, admit_new_run
     from ai_scientist.ideation.canonical import canonical_json_bytes
-    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.deepseek import ModelRoundError
+    from ai_scientist.ideation.errors import IdeationInputError, RunInterrupted
 
     root = workspace_root or Path.cwd()
     request = NewRunRequest(
@@ -389,34 +409,33 @@ def _run_new_run(
     if execute is None:
         execute = adapter is not None or os.environ.get("IDEATION_EXECUTE") == "1"
 
+    command = [
+        "python",
+        "ai_scientist/perform_ideation_temp_free.py",
+        "new-run",
+        "--case-id",
+        args.case_id,
+        "--workshop",
+        args.workshop,
+        "--workshop-sha256",
+        args.workshop_sha256,
+        "--corpus",
+        args.corpus,
+        "--corpus-sha256",
+        args.corpus_sha256,
+        "--max-num-generations",
+        str(args.max_num_generations),
+        "--num-reflections",
+        str(args.num_reflections),
+    ]
+
+    # Admission phase: failures are preflight rejections (exit 2).
     try:
-        result = run_new_run(
+        admission_result = admit_new_run(
             root,
             request,
             stream=stream,
-            command=[
-                "python",
-                "ai_scientist/perform_ideation_temp_free.py",
-                "new-run",
-                "--case-id",
-                args.case_id,
-                "--workshop",
-                args.workshop,
-                "--workshop-sha256",
-                args.workshop_sha256,
-                "--corpus",
-                args.corpus,
-                "--corpus-sha256",
-                args.corpus_sha256,
-                "--max-num-generations",
-                str(args.max_num_generations),
-                "--num-reflections",
-                str(args.num_reflections),
-            ],
-            adapter=adapter,
-            retriever=retriever,
-            store=store,
-            execute=execute,
+            command=command,
         )
     except IdeationInputError as exc:
         error = {
@@ -426,6 +445,131 @@ def _run_new_run(
         }
         sys.stderr.buffer.write(canonical_json_bytes(error))
         return 2
+    except KeyboardInterrupt as exc:
+        sys.stdout.buffer.write(
+            canonical_json_bytes(
+                _suspended_payload(
+                    getattr(exc, "run_id", None),
+                    "KEYBOARD_INTERRUPT",
+                    "Interrupted during admission",
+                )
+            )
+        )
+        return 3
+
+    if not execute:
+        sys.stdout.buffer.write(canonical_json_bytes(admission_result))
+        return 0
+
+    # Execution phase: suspend-class failures leave the run unsealed and
+    # resumable (exit 3); terminal outcomes seal and return normally.
+    run_id = admission_result["run_id"]
+    try:
+        from ai_scientist.ideation.controller import IdeationController
+
+        controller = IdeationController(
+            root,
+            run_id,
+            store=store,
+            adapter=adapter,
+            retriever=retriever,
+        )
+        result = controller.run()
+    except IdeationInputError as exc:
+        if exc.code != "STORAGE_WRITE_FAILED":
+            raise
+        sys.stdout.buffer.write(
+            canonical_json_bytes(_suspended_payload(run_id, exc.code, exc.message))
+        )
+        return 3
+    except ModelRoundError as exc:
+        sys.stdout.buffer.write(
+            canonical_json_bytes(_suspended_payload(run_id, exc.code, str(exc)))
+        )
+        return 3
+    except RunInterrupted as exc:
+        sys.stdout.buffer.write(
+            canonical_json_bytes(
+                _suspended_payload(run_id, "RUN_INTERRUPTED", str(exc))
+            )
+        )
+        return 3
+    except KeyboardInterrupt:
+        sys.stdout.buffer.write(
+            canonical_json_bytes(
+                _suspended_payload(
+                    run_id, "KEYBOARD_INTERRUPT", "Interrupted during execution"
+                )
+            )
+        )
+        return 3
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_resume(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+    stream: Any = None,
+    adapter: Any = None,
+    retriever: Any = None,
+    store: Any = None,
+) -> int:
+    """Resume a suspended run: exit 0 sealed, 2 resume_rejected, 3 suspended."""
+    from pathlib import Path as _Path
+
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.deepseek import ModelRoundError
+    from ai_scientist.ideation.errors import IdeationInputError, RunInterrupted
+    from ai_scientist.ideation.resume import resume_run
+
+    root = workspace_root or _Path.cwd()
+    try:
+        result = resume_run(
+            root,
+            args.run_id,
+            stream=stream,
+            adapter=adapter,
+            retriever=retriever,
+            store=store,
+        )
+    except IdeationInputError as exc:
+        if exc.code == "STORAGE_WRITE_FAILED":
+            sys.stdout.buffer.write(
+                canonical_json_bytes(
+                    _suspended_payload(args.run_id, exc.code, exc.message)
+                )
+            )
+            return 3
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "resume_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 2
+    except ModelRoundError as exc:
+        sys.stdout.buffer.write(
+            canonical_json_bytes(_suspended_payload(args.run_id, exc.code, str(exc)))
+        )
+        return 3
+    except RunInterrupted as exc:
+        sys.stdout.buffer.write(
+            canonical_json_bytes(
+                _suspended_payload(args.run_id, "RUN_INTERRUPTED", str(exc))
+            )
+        )
+        return 3
+    except KeyboardInterrupt:
+        sys.stdout.buffer.write(
+            canonical_json_bytes(
+                _suspended_payload(
+                    args.run_id, "KEYBOARD_INTERRUPT", "Interrupted during resume"
+                )
+            )
+        )
+        return 3
     sys.stdout.buffer.write(canonical_json_bytes(result))
     return 0
 
@@ -461,6 +605,8 @@ if __name__ == "__main__":
     _args = _parser.parse_args()
     if _args.entry == "new-run":
         raise SystemExit(_run_new_run(_args))
+    if _args.entry == "resume":
+        raise SystemExit(_run_resume(_args))
     if _args.entry == "legacy":
         raise SystemExit(_run_legacy(_args))
     # No subcommand: print the same help text and exit like --help.

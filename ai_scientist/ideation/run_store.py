@@ -246,9 +246,7 @@ class RunStore:
             / f"{attempt_seq:06d}"
         )
         rel_path = (rel_parent / filename).as_posix()
-        sha = self._commit_file(
-            run_root, Path(rel_path), data, label=label or filename
-        )
+        sha = self._commit_file(run_root, Path(rel_path), data, label=label or filename)
         return rel_path, len(data), sha
 
     def write_idea_artifact(
@@ -282,9 +280,7 @@ class RunStore:
         run_root = self._run_root(run_id)
         rel_parent = Path("artifacts/ideas") / f"{idea_index:06d}"
         rel_path = (rel_parent / filename).as_posix()
-        sha = self._commit_file(
-            run_root, Path(rel_path), data, label=label or filename
-        )
+        sha = self._commit_file(run_root, Path(rel_path), data, label=label or filename)
         return rel_path, len(data), sha
 
     def write_artifact(

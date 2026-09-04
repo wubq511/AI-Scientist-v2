@@ -795,7 +795,7 @@ def parse_stored_response_content(body_bytes: bytes) -> str:
     committed, so re-validation either passes deterministically or fails
     closed as evidence corruption.
     """
-    (visible_content, *_rest) = validate_provider_response(
+    visible_content, *_rest = validate_provider_response(
         200,
         {"content-type": "application/json"},
         body_bytes,
@@ -808,6 +808,7 @@ def parse_stored_response_content(body_bytes: bytes) -> str:
 
 class StubTransport:
     """Deterministic, scriptable transport for offline testing and fault injection."""
+
     def __init__(
         self,
         responses: Sequence[

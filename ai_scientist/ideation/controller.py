@@ -36,6 +36,7 @@ from .deepseek import (
     ModelRoundError,
     ModelRoundResult,
     TERMINAL_FAILURES,
+    parse_stored_response_content,
 )
 from .errors import IdeationInputError, RunInterrupted, fail
 from .retrieval import ScopedLiteratureRetriever, bind_corpus
@@ -287,9 +288,7 @@ def _signal_interrupt_guard() -> Iterator[None]:
     def _handler(signum: int, frame: Any) -> None:
         raise RunInterrupted(signal.Signals(signum).name)
 
-    previous = {
-        sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)
-    }
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
     for sig, handler in ((signal.SIGINT, _handler), (signal.SIGTERM, _handler)):
         signal.signal(sig, handler)
     try:
@@ -825,37 +824,18 @@ class IdeationController:
     def _write_missing_seal(self, completion: SealTerminalCompletion) -> dict[str, Any]:
         """Write seal.json for a run whose terminal event is already committed
         (the interruption landed between terminal event and seal write)."""
-        self.store.verify_chain(self.run_id)
-
-        inventory = self.store.build_artifact_inventory(self.run_id)
-        seal_document = {
-            "admission_sha256": self.admission_sha,
-            "artifact_inventory": inventory,
-            "final_event": {
-                "event_hash": completion.event_hash,
-                "event_seq": completion.event_seq,
-            },
-            "request_sha256": self.request_sha,
-            "run_id": self.run_id,
-            "schema_version": RUN_SEAL_SCHEMA_VERSION,
-            "sealed_at": _now(),
-            "terminal_outcome": completion.outcome,
-            "terminal_summary": completion.summary,
-        }
-
-        seal_sha = self.store.write_seal(self.run_id, seal_document)
-        self.store.verify_chain(self.run_id)
-
-        result = {
-            "idea_count": len(self.accepted_ideas),
-            "run_id": self.run_id,
-            "seal_sha256": seal_sha,
-            "status": "sealed",
-            "terminal_outcome": completion.outcome,
-        }
-        if completion.outcome == "failed":
-            result["reason_code"] = completion.summary["reason_code"]
-        return result
+        result_payload = (
+            {"reason_code": completion.summary["reason_code"]}
+            if completion.outcome == "failed"
+            else {}
+        )
+        return self._write_seal_document(
+            outcome=completion.outcome,
+            summary=completion.summary,
+            event_seq=completion.event_seq,
+            event_hash=completion.event_hash,
+            result_payload=result_payload,
+        )
 
     def _seal_success_run(self) -> dict[str, Any]:
         """Commit the terminal event and canonical seal for a successful run."""
@@ -951,8 +931,24 @@ class IdeationController:
                 "writer_epoch": self.writer_epoch,
             },
         )
+        return self._write_seal_document(
+            outcome=outcome,
+            summary=summary,
+            event_seq=terminal_record.event_seq,
+            event_hash=terminal_record.event_hash,
+            result_payload=result_payload,
+        )
 
-        # Verify complete chain integrity up to terminal event
+    def _write_seal_document(
+        self,
+        *,
+        outcome: str,
+        summary: dict[str, Any],
+        event_seq: int,
+        event_hash: str,
+        result_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Verify the chain, write the canonical seal.json, and build the result."""
         self.store.verify_chain(self.run_id)
 
         inventory = self.store.build_artifact_inventory(self.run_id)
@@ -960,8 +956,8 @@ class IdeationController:
             "admission_sha256": self.admission_sha,
             "artifact_inventory": inventory,
             "final_event": {
-                "event_hash": terminal_record.event_hash,
-                "event_seq": terminal_record.event_seq,
+                "event_hash": event_hash,
+                "event_seq": event_seq,
             },
             "request_sha256": self.request_sha,
             "run_id": self.run_id,
@@ -1584,3 +1580,897 @@ class IdeationController:
                     "writer_epoch": self.writer_epoch,
                 },
             )
+
+
+# ---------------------------------------------------------------------------
+# Resume rebuild (ticket 10)
+# ---------------------------------------------------------------------------
+
+
+def rebuild_resume_plan(
+    store: RunStore,
+    run_id: str,
+    admission: dict[str, Any],
+    *,
+    writer_epoch: int,
+    workshop_description: str,
+    orphan_operation_artifacts: list[tuple[int, int, str]],
+) -> ResumePlan:
+    """Rebuild the control state of an interrupted run from its evidence chain.
+
+    The resume gates have already verified the chain, re-checked the
+    admission pins, and quarantined orphan artifacts; this function derives
+    the generation/round/history state, the in-flight operation disposition,
+    and the bookkeeping completions that finish commit sequences the
+    interruption cut. Anything outside the approved interruption windows
+    fails closed with RUN_CORRUPT; nothing is "repaired".
+    """
+    events = store.read_events(run_id)
+    budgets = admission["budgets"]
+    max_generations = budgets["max_num_generations"]
+    num_reflections = budgets["num_reflections"]
+
+    # -- Group events --------------------------------------------------------
+    known_event_types = {
+        "preflight_started",
+        "preflight_step",
+        "admitted",
+        "generation.started",
+        "generation.finished",
+        "provider_attempt.finished",
+        "operation.finished",
+        "operation.failed",
+        "action_outcome",
+        "terminal",
+        "interrupted",
+        "resumed",
+        "orphans_quarantined",
+    }
+    ops_with_events: set[int] = set()
+    model_ops: dict[int, list[dict[str, Any]]] = {}
+    retrieval_events: list[dict[str, Any]] = []
+    finalize_ops: dict[int, dict[str, Any]] = {}
+    outcomes_by_round: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    gen_started: list[dict[str, Any]] = []
+    gen_finished: list[dict[str, Any]] = []
+    terminal_events: list[dict[str, Any]] = []
+    max_event_op_seq = 0
+
+    for event in events:
+        event_type = event.get("event_type")
+        if event_type not in known_event_types:
+            fail("RUN_CORRUPT", f"Unknown event type in chain: {event_type}")
+        operation = event.get("operation")
+        if operation is not None:
+            op_seq = operation.get("operation_seq")
+            op_kind = operation.get("operation_kind")
+            if not isinstance(op_seq, int) or op_seq < 1:
+                fail("RUN_CORRUPT", "Operation event carries an invalid operation_seq")
+            ops_with_events.add(op_seq)
+            max_event_op_seq = max(max_event_op_seq, op_seq)
+            if event_type == "provider_attempt.finished":
+                if op_kind != "model_inference":
+                    fail(
+                        "RUN_CORRUPT",
+                        "provider_attempt event for a non-model operation",
+                    )
+                model_ops.setdefault(op_seq, []).append(event)
+            elif event_type == "operation.finished":
+                if op_kind == "model_inference":
+                    model_ops.setdefault(op_seq, []).append(event)
+                elif op_kind == "literature_retrieval":
+                    retrieval_events.append(event)
+                elif op_kind == "idea_finalization":
+                    if op_seq in finalize_ops:
+                        fail("RUN_CORRUPT", "Duplicate idea_finalization operation")
+                    finalize_ops[op_seq] = event
+                else:
+                    fail("RUN_CORRUPT", f"Unknown operation_kind: {op_kind}")
+            elif event_type == "operation.failed":
+                if op_kind == "model_inference":
+                    model_ops.setdefault(op_seq, []).append(event)
+                elif op_kind == "literature_retrieval":
+                    retrieval_events.append(event)
+                else:
+                    fail("RUN_CORRUPT", f"Unknown operation_kind: {op_kind}")
+            continue
+        if event_type == "action_outcome":
+            pos = event.get("pipeline_position")
+            if not isinstance(pos, dict):
+                fail("RUN_CORRUPT", "action_outcome lacks pipeline_position")
+            key = (pos.get("generation_index"), pos.get("reflection_index"))
+            if not all(isinstance(index, int) and index >= 0 for index in key):
+                fail(
+                    "RUN_CORRUPT", "action_outcome carries an invalid pipeline_position"
+                )
+            outcomes_by_round.setdefault(key, []).append(event)
+        elif event_type == "generation.started":
+            gen_started.append(event)
+        elif event_type == "generation.finished":
+            gen_finished.append(event)
+        elif event_type == "terminal":
+            terminal_events.append(event)
+
+    # Per-operation ordering invariants.
+    op_final: dict[int, dict[str, Any]] = {}
+    for op_seq, op_events in model_ops.items():
+        last_attempt_seq = 0
+        final: dict[str, Any] | None = None
+        for event in op_events:
+            if event["event_type"] == "provider_attempt.finished":
+                if final is not None:
+                    fail("RUN_CORRUPT", "Attempt event after the operation final state")
+                attempt_seq = event["operation"].get("attempt_seq")
+                if not isinstance(attempt_seq, int) or attempt_seq <= last_attempt_seq:
+                    fail("RUN_CORRUPT", "Attempt sequence is not strictly increasing")
+                last_attempt_seq = attempt_seq
+                continue
+            if final is not None:
+                fail("RUN_CORRUPT", "Operation carries more than one final state")
+            if event["event_type"] == "operation.failed":
+                if event["payload"].get("disposition") not in ("suspend", "terminal"):
+                    fail(
+                        "RUN_CORRUPT", "operation.failed carries an invalid disposition"
+                    )
+                # A suspend disposition does not close the operation: a later
+                # writer epoch may re-execute it. Only terminal closes by failure.
+                if event["payload"]["disposition"] == "terminal":
+                    final = event
+            else:
+                final = event
+        # A suspend-only tail leaves the operation open; the last suspend
+        # failure still anchors the next attempt coordinate.
+        if final is None:
+            suspends = [
+                e
+                for e in op_events
+                if e["event_type"] == "operation.failed"
+                and e["payload"].get("disposition") == "suspend"
+            ]
+            if suspends:
+                final = suspends[-1]
+        if final is not None:
+            op_final[op_seq] = final
+
+    # -- Accepted ideas (needed even for seal-only completions) -------------
+    accepted_ideas: list[dict[str, Any]] = []
+    idea_str_archive: list[str] = []
+    finalize_by_seq = sorted(
+        finalize_ops.items(), key=lambda item: item[1]["event_seq"]
+    )
+    for expected_index, (finalize_op_seq, event) in enumerate(finalize_by_seq):
+        idea_index = event.get("payload", {}).get("idea_index")
+        if idea_index != expected_index:
+            fail("RUN_CORRUPT", "Finalized ideas are not contiguous from index 0")
+        idea_ref = next(
+            (
+                ref
+                for ref in event.get("artifact_refs", [])
+                if ref.get("role") == "finalized_idea"
+            ),
+            None,
+        )
+        if idea_ref is None:
+            fail("RUN_CORRUPT", "Finalization event lacks its finalized_idea reference")
+        idea_doc = parse_json_bytes(
+            store.read_artifact(run_id, idea_ref["relative_path"], idea_ref["sha256"]),
+            label="finalized idea",
+        )
+        if not isinstance(idea_doc, dict) or set(idea_doc) != set(REQUIRED_IDEA_FIELDS):
+            fail("RUN_CORRUPT", "Finalized idea artifact lost its seven-field shape")
+        # Key order follows REQUIRED_IDEA_FIELDS: the live archive string is
+        # json.dumps(validated_idea) with exactly this order.
+        validated = {
+            field_name: idea_doc[field_name] for field_name in REQUIRED_IDEA_FIELDS
+        }
+        accepted_ideas.append(validated)
+        idea_str_archive.append(json.dumps(validated))
+
+    # -- Generation structure ------------------------------------------------
+    for expected, event in enumerate(gen_started):
+        if event.get("payload", {}).get("generation_index") != expected:
+            fail("RUN_CORRUPT", "generation.started events are not contiguous from 0")
+    disposition_counts = {"finalized": 0, "budget_exhausted": 0}
+    finished_seq_by_gen: dict[int, int] = {}
+    for expected, event in enumerate(gen_finished):
+        payload = event.get("payload", {})
+        if payload.get("generation_index") != expected:
+            fail("RUN_CORRUPT", "generation.finished events are not contiguous from 0")
+        disposition = payload.get("disposition")
+        if disposition not in disposition_counts:
+            fail("RUN_CORRUPT", f"Unknown generation disposition: {disposition}")
+        disposition_counts[disposition] += 1
+        finished_seq_by_gen[expected] = event["event_seq"]
+    if len(gen_started) not in (len(gen_finished), len(gen_finished) + 1):
+        fail("RUN_CORRUPT", "Generation started/finished counts are inconsistent")
+    if len(gen_started) > max_generations:
+        fail("RUN_CORRUPT", "More generations started than the admission budget")
+    for event in events:
+        pos = event.get("pipeline_position")
+        if not isinstance(pos, dict) or event["event_type"] == "generation.finished":
+            continue
+        gen_idx = pos.get("generation_index")
+        if (
+            gen_idx in finished_seq_by_gen
+            and event["event_seq"] > finished_seq_by_gen[gen_idx]
+        ):
+            fail("RUN_CORRUPT", "Events follow a generation.finished event")
+
+    run_has_non_empty = any(
+        outcome["payload"].get("outcome") == "tool_result"
+        and outcome["payload"].get("paper_count", 0) > 0
+        for round_outcomes in outcomes_by_round.values()
+        for outcome in round_outcomes
+    )
+
+    # Orphan coordinates grouped by operation.
+    orphan_by_op: dict[int, list[tuple[int, str]]] = {}
+    for op_seq, attempt_seq, filename in orphan_operation_artifacts:
+        orphan_by_op.setdefault(op_seq, []).append((attempt_seq, filename))
+    op_seq_floor = max([max_event_op_seq, *orphan_by_op.keys()], default=0)
+
+    def _plan(
+        *,
+        start_generation: int,
+        round_resume: RoundResume | None,
+        terminal: SealFailedCompletion | SealTerminalCompletion | None,
+        bookkeeping: list[dict[str, Any]],
+        remaining: int,
+    ) -> ResumePlan:
+        return ResumePlan(
+            writer_epoch=writer_epoch,
+            op_seq=op_seq_floor,
+            accepted_ideas=tuple(accepted_ideas),
+            idea_str_archive=tuple(idea_str_archive),
+            disposition_counts=dict(disposition_counts),
+            run_has_non_empty_retrieval=run_has_non_empty,
+            remaining_model_rounds=remaining,
+            bookkeeping=tuple(bookkeeping),
+            start_generation=start_generation,
+            round_resume=round_resume,
+            terminal=terminal,
+        )
+
+    # -- Terminal / hygiene completions --------------------------------------
+    # Lifecycle records (the crashing writer's `interrupted`, and this
+    # resume's own `orphans_quarantined`/`resumed`) legitimately follow a
+    # committed terminal/hygiene tail; "last" is judged on execution events.
+    lifecycle_types = {"interrupted", "resumed", "orphans_quarantined"}
+    execution_events = [
+        event for event in events if event["event_type"] not in lifecycle_types
+    ]
+    if terminal_events:
+        terminal_event = terminal_events[0]
+        if len(terminal_events) > 1 or terminal_event is not execution_events[-1]:
+            fail("RUN_CORRUPT", "Events follow the terminal event")
+        summary = {
+            key: value
+            for key, value in terminal_event.get("payload", {}).items()
+            if key != "artifact_refs"
+        }
+        return _plan(
+            start_generation=len(gen_started),
+            round_resume=None,
+            terminal=SealTerminalCompletion(
+                outcome=summary["outcome"],
+                summary=summary,
+                event_seq=terminal_event["event_seq"],
+                event_hash=terminal_event["event_hash"],
+            ),
+            bookkeeping=[],
+            remaining=0,
+        )
+
+    hygiene_hits = [
+        outcome
+        for round_outcomes in outcomes_by_round.values()
+        for outcome in round_outcomes
+        if outcome["payload"].get("outcome") == "hygiene_hit"
+    ]
+    if hygiene_hits:
+        if len(hygiene_hits) > 1 or hygiene_hits[0] is not execution_events[-1]:
+            fail("RUN_CORRUPT", "Events follow a hygiene-hit action outcome")
+        return _plan(
+            start_generation=len(gen_started),
+            round_resume=None,
+            terminal=SealFailedCompletion(
+                reason_code="PAYLOAD_HYGIENE_VIOLATION",
+                reason_message=HYGIENE_FAILURE_MESSAGE,
+            ),
+            bookkeeping=[],
+            remaining=0,
+        )
+
+    # -- Whole-generation boundary -------------------------------------------
+    if len(gen_started) == len(gen_finished):
+        # Crash between generations (or right after admission): the next
+        # generation starts fresh; a fully consumed budget falls through to
+        # the backstop + terminal seal tail.
+        return _plan(
+            start_generation=len(gen_started),
+            round_resume=None,
+            terminal=None,
+            bookkeeping=[],
+            remaining=(max_generations - len(gen_started)) * num_reflections,
+        )
+
+    # -- Current generation round replay -------------------------------------
+    gen_idx = len(gen_finished)
+    state = _GenerationState()
+    archive_string = "\n\n".join(idea_str_archive)
+    bookkeeping: list[dict[str, Any]] = []
+
+    outcomes_g: dict[int, dict[str, Any]] = {}
+    for (outcome_gen, outcome_round), round_outcomes in outcomes_by_round.items():
+        if outcome_gen != gen_idx:
+            continue
+        if len(round_outcomes) > 1:
+            fail("RUN_CORRUPT", "Multiple action_outcome events in one round")
+        outcomes_g[outcome_round] = round_outcomes[0]
+
+    model_op_round: dict[int, int] = {}
+    for op_seq in model_ops:
+        pos = model_ops[op_seq][0].get("pipeline_position") or {}
+        if pos.get("generation_index") != gen_idx:
+            continue
+        round_idx = pos.get("reflection_index")
+        if not isinstance(round_idx, int) or round_idx < 0:
+            fail("RUN_CORRUPT", "Model operation carries an invalid pipeline_position")
+        if round_idx in model_op_round:
+            fail("RUN_CORRUPT", "Two model operations in one round")
+        model_op_round[round_idx] = op_seq
+
+    finalize_round: dict[int, dict[str, Any]] = {}
+    for op_seq, event in finalize_ops.items():
+        pos = event.get("pipeline_position") or {}
+        if pos.get("generation_index") != gen_idx:
+            continue
+        round_idx = pos.get("reflection_index")
+        if not isinstance(round_idx, int) or round_idx < 0:
+            fail(
+                "RUN_CORRUPT",
+                "Finalization operation carries an invalid pipeline_position",
+            )
+        finalize_round[round_idx] = event
+
+    # Retrieval events carry no pipeline_position: attribute each to the open
+    # round (model op.finished committed, no action_outcome yet) whose event
+    # interval contains it.
+    retrieval_by_round: dict[int, dict[str, Any]] = {}
+    for event in retrieval_events:
+        event_seq = event["event_seq"]
+        assigned_round: int | None = None
+        for round_idx, op_seq in model_op_round.items():
+            final = op_final.get(op_seq)
+            if final is None or final["event_type"] != "operation.finished":
+                continue
+            if event_seq <= final["event_seq"]:
+                continue
+            outcome_event = outcomes_g.get(round_idx)
+            if outcome_event is not None and event_seq >= outcome_event["event_seq"]:
+                continue
+            if assigned_round is not None:
+                fail("RUN_CORRUPT", "Retrieval event matches multiple rounds")
+            assigned_round = round_idx
+        if assigned_round is None:
+            fail("RUN_CORRUPT", "Retrieval event has no open round to attach to")
+        if assigned_round in retrieval_by_round:
+            fail("RUN_CORRUPT", "Two retrieval operations in one round")
+        retrieval_by_round[assigned_round] = event
+
+    def _round_prompt(ref_round: int) -> str:
+        if ref_round == 0:
+            return IDEA_GENERATION_PROMPT.format(
+                workshop_description=workshop_description,
+                prev_ideas_string=archive_string,
+            )
+        return IDEA_REFLECTION_PROMPT.format(
+            current_round=ref_round + 1,
+            last_tool_results=state.last_tool_results or "No new results.",
+            num_reflections=num_reflections,
+        )
+
+    def _committed_response(finished_event: dict[str, Any]) -> str:
+        resp_ref = next(
+            (
+                ref
+                for ref in finished_event.get("artifact_refs", [])
+                if ref.get("role") == "provider_response"
+            ),
+            None,
+        )
+        if resp_ref is None:
+            fail(
+                "RUN_CORRUPT",
+                "operation.finished lacks its provider_response reference",
+            )
+        return parse_stored_response_content(
+            store.read_artifact(run_id, resp_ref["relative_path"], resp_ref["sha256"])
+        )
+
+    def _retrieval_payload(finished_event: dict[str, Any]) -> dict[str, Any]:
+        payload_ref = next(
+            (
+                ref
+                for ref in finished_event.get("artifact_refs", [])
+                if ref.get("role") == "model_payload"
+            ),
+            None,
+        )
+        if payload_ref is None:
+            fail("RUN_CORRUPT", "Retrieval operation lacks its model_payload reference")
+        payload = parse_json_bytes(
+            store.read_artifact(
+                run_id, payload_ref["relative_path"], payload_ref["sha256"]
+            ),
+            label="retrieval payload",
+        )
+        if not isinstance(payload, dict):
+            fail("RUN_CORRUPT", "Retrieval payload is not a JSON object")
+        return payload
+
+    def _failure_message_from_chain(failed_event: dict[str, Any]) -> str:
+        """Read the provider failure message for a terminal operation failure."""
+        op_seq = failed_event["operation"]["operation_seq"]
+        failure_ref: dict[str, Any] | None = None
+        for event in reversed(model_ops.get(op_seq, [])):
+            if event["event_type"] != "provider_attempt.finished":
+                continue
+            failure_ref = next(
+                (
+                    ref
+                    for ref in event.get("artifact_refs", [])
+                    if ref.get("role") == "provider_failure"
+                ),
+                None,
+            )
+            if failure_ref is not None:
+                break
+        if failure_ref is None:
+            fail(
+                "RUN_CORRUPT",
+                "Terminal operation failure lacks provider_failure evidence",
+            )
+        failure_doc = parse_json_bytes(
+            store.read_artifact(
+                run_id, failure_ref["relative_path"], failure_ref["sha256"]
+            ),
+            label="provider failure",
+        )
+        message = failure_doc.get("message")
+        if not isinstance(message, str) or not message:
+            fail("RUN_CORRUPT", "Provider failure artifact lacks its message")
+        return message
+
+    def _close_generation(
+        idea_pos: dict[str, Any] | None,
+        idea_index: int | None,
+    ) -> ResumePlan:
+        """Bookkeep the generation.finished commit cut by the interruption."""
+        if idea_pos is None:
+            disposition_counts["budget_exhausted"] += 1
+            bookkeeping.append(
+                {
+                    "kind": "append_event",
+                    "event": {
+                        "event_type": "generation.finished",
+                        "payload": {
+                            "disposition": "budget_exhausted",
+                            "generation_index": gen_idx,
+                            "idea_index": None,
+                        },
+                        "pipeline_position": {
+                            "generation_index": gen_idx,
+                            "idea_index": None,
+                            "reflection_index": num_reflections - 1,
+                        },
+                        "writer_epoch": writer_epoch,
+                    },
+                }
+            )
+        else:
+            disposition_counts["finalized"] += 1
+            bookkeeping.append(
+                {
+                    "kind": "append_event",
+                    "event": {
+                        "event_type": "generation.finished",
+                        "payload": {
+                            "disposition": "finalized",
+                            "generation_index": gen_idx,
+                            "idea_index": idea_index,
+                        },
+                        "pipeline_position": idea_pos,
+                        "writer_epoch": writer_epoch,
+                    },
+                }
+            )
+        return _plan(
+            start_generation=gen_idx + 1,
+            round_resume=None,
+            terminal=None,
+            bookkeeping=bookkeeping,
+            remaining=(max_generations - gen_idx - 1) * num_reflections,
+        )
+
+    def _no_later_round_events(ref_round: int) -> None:
+        later = (
+            [r for r in outcomes_g if r > ref_round]
+            + [r for r in model_op_round if r > ref_round]
+            + [r for r in retrieval_by_round if r > ref_round]
+            + [r for r in finalize_round if r > ref_round]
+        )
+        if later:
+            fail("RUN_CORRUPT", "Events exist past the interrupted round")
+
+    start_round: int | None = None
+    pending: PendingResponse | PendingReexecute | None = None
+
+    for ref_round in range(num_reflections):
+        outcome_event = outcomes_g.get(ref_round)
+        op_seq = model_op_round.get(ref_round)
+        retrieval_event = retrieval_by_round.get(ref_round)
+        finalize_event = finalize_round.get(ref_round)
+
+        if outcome_event is not None:
+            # Fully committed round: replay into the rebuilt state.
+            outcome = outcome_event["payload"].get("outcome")
+            if op_seq is None:
+                fail("RUN_CORRUPT", "Action outcome without its model operation")
+            final = op_final.get(op_seq)
+            if final is None or final["event_type"] != "operation.finished":
+                fail("RUN_CORRUPT", "Action outcome without a committed response")
+            response_text = _committed_response(final)
+            state.msg_history.append(
+                {"role": "user", "content": _round_prompt(ref_round)}
+            )
+            state.msg_history.append({"role": "assistant", "content": response_text})
+            if outcome == "tool_result":
+                if (
+                    retrieval_event is None
+                    or retrieval_event["event_type"] != "operation.finished"
+                ):
+                    fail(
+                        "RUN_CORRUPT",
+                        "tool_result outcome without its retrieval operation",
+                    )
+                payload = _retrieval_payload(retrieval_event)
+                papers = payload.get("papers", [])
+                paper_ids = sorted(p["paper_id"] for p in papers)
+                expected_ids = sorted(outcome_event["payload"].get("paper_ids", []))
+                if paper_ids != expected_ids or len(papers) != outcome_event[
+                    "payload"
+                ].get("paper_count"):
+                    fail(
+                        "RUN_CORRUPT",
+                        "Retrieval payload does not match its action_outcome",
+                    )
+                state.retrieval_op_seqs.append(
+                    retrieval_event["operation"]["operation_seq"]
+                )
+                if papers:
+                    run_has_non_empty = True
+                    for paper in papers:
+                        state.retrieved_paper_ids.add(paper["paper_id"])
+                state.last_tool_results = format_retrieval_for_reflection(payload)
+            elif outcome == "model_fixable_error":
+                state.last_tool_results = outcome_event["payload"]["feedback"]
+            elif outcome == "finalize_accepted":
+                # The generation closed live with generation.finished; gen_idx
+                # is unfinished, so this outcome is only legal as the very last
+                # committed event (the cut hit before generation.finished).
+                if outcome_event is not execution_events[-1]:
+                    fail("RUN_CORRUPT", "Events follow a finalize_accepted outcome")
+                if finalize_event is None:
+                    fail(
+                        "RUN_CORRUPT",
+                        "finalize_accepted without its finalization operation",
+                    )
+                idea_pos = finalize_event["pipeline_position"]
+                return _close_generation(
+                    idea_pos, finalize_event["payload"]["idea_index"]
+                )
+            else:
+                fail("RUN_CORRUPT", f"Unknown action outcome: {outcome}")
+            continue
+
+        # No action_outcome: this is the interrupted round. Nothing may exist
+        # for later rounds of this generation.
+        _no_later_round_events(ref_round)
+        start_round = ref_round
+
+        if op_seq is None:
+            # No model operation events: either a fresh round or a model call
+            # interrupted after its request commit (orphan request.json).
+            if finalize_event is not None:
+                fail(
+                    "RUN_CORRUPT", "Finalization operation without its model operation"
+                )
+            orphan_model_ops = [
+                orphan_op
+                for orphan_op, triples in orphan_by_op.items()
+                if orphan_op not in ops_with_events
+                and any(filename == "request.json" for _, filename in triples)
+            ]
+            if len(orphan_model_ops) > 1:
+                fail("RUN_CORRUPT", "Multiple orphaned model requests")
+            if orphan_model_ops:
+                orphan_op = orphan_model_ops[0]
+                next_attempt = max(a for a, _ in orphan_by_op[orphan_op]) + 1
+                pending = PendingReexecute(
+                    op_seq=orphan_op, next_attempt_seq=next_attempt
+                )
+            break
+
+        final = op_final.get(op_seq)
+        attempts = [
+            e
+            for e in model_ops[op_seq]
+            if e["event_type"] == "provider_attempt.finished"
+        ]
+        orphan_attempts = [a for a, _ in orphan_by_op.get(op_seq, [])]
+        if final is not None and orphan_attempts:
+            fail("RUN_CORRUPT", "Orphan attempts beyond a finalized operation")
+
+        if final is not None and final["event_type"] == "operation.failed":
+            if final["payload"]["disposition"] == "terminal":
+                return _plan(
+                    start_generation=gen_idx,
+                    round_resume=None,
+                    terminal=SealFailedCompletion(
+                        reason_code=final["payload"]["error_code"],
+                        reason_message=_failure_message_from_chain(final),
+                    ),
+                    bookkeeping=bookkeeping,
+                    remaining=0,
+                )
+            # Suspend-class failure committed: re-execute at the next attempt.
+            attempt_seqs = [
+                e["operation"]["attempt_seq"] for e in attempts
+            ] + orphan_attempts
+            pending = PendingReexecute(
+                op_seq=op_seq, next_attempt_seq=max(attempt_seqs) + 1
+            )
+            break
+
+        if final is None:
+            # Only attempt events: the cut hit inside the success/failure
+            # recording sequence of the last attempt.
+            if not attempts:
+                fail("RUN_CORRUPT", "Model operation without attempt events")
+            last_attempt = attempts[-1]
+            last_outcome = last_attempt["payload"].get("outcome")
+            if last_outcome == "success":
+                # Recover the operation.finished commit, then continue exactly
+                # like the committed-finished path below.
+                resp_ref = next(
+                    (
+                        ref
+                        for ref in last_attempt.get("artifact_refs", [])
+                        if ref.get("role") == "provider_response"
+                    ),
+                    None,
+                )
+                if resp_ref is None:
+                    fail(
+                        "RUN_CORRUPT",
+                        "Successful attempt lacks its provider_response reference",
+                    )
+                last_suspend_seq = max(
+                    (
+                        e["event_seq"]
+                        for e in model_ops[op_seq]
+                        if e["event_type"] == "operation.failed"
+                    ),
+                    default=0,
+                )
+                segment_attempts = [
+                    e for e in attempts if e["event_seq"] > last_suspend_seq
+                ]
+                recovered = {
+                    "artifact_refs": [resp_ref],
+                    "event_type": "operation.finished",
+                    "operation": {
+                        "attempt_seq": last_attempt["operation"]["attempt_seq"],
+                        "operation_kind": "model_inference",
+                        "operation_seq": op_seq,
+                    },
+                    "payload": {
+                        "cost_cny": last_attempt["payload"].get("cost_cny"),
+                        "model": last_attempt["payload"].get("model"),
+                        "response_id": last_attempt["payload"].get("response_id"),
+                        "status": "success",
+                        "total_attempts": len(segment_attempts),
+                    },
+                    "pipeline_position": last_attempt.get("pipeline_position"),
+                    "writer_epoch": writer_epoch,
+                }
+                bookkeeping.append({"kind": "append_event", "event": recovered})
+                final = recovered
+            elif last_attempt["payload"].get("disposition") == "terminal":
+                error_code = last_attempt["payload"]["error_code"]
+                bookkeeping.append(
+                    {
+                        "kind": "append_event",
+                        "event": {
+                            "event_type": "operation.failed",
+                            "operation": {
+                                "attempt_seq": last_attempt["operation"]["attempt_seq"],
+                                "operation_kind": "model_inference",
+                                "operation_seq": op_seq,
+                            },
+                            "payload": {
+                                "disposition": "terminal",
+                                "error_code": error_code,
+                                "status": "failed",
+                                "total_attempts": last_attempt["operation"][
+                                    "attempt_seq"
+                                ],
+                            },
+                            "pipeline_position": last_attempt.get("pipeline_position"),
+                            "writer_epoch": writer_epoch,
+                        },
+                    }
+                )
+                return _plan(
+                    start_generation=gen_idx,
+                    round_resume=None,
+                    terminal=SealFailedCompletion(
+                        reason_code=error_code,
+                        reason_message=_failure_message_from_chain(last_attempt),
+                    ),
+                    bookkeeping=bookkeeping,
+                    remaining=0,
+                )
+            else:
+                # Suspend-class attempt failure without a committed operation
+                # final state (cut mid-call): re-execute at the next attempt.
+                attempt_seqs = [
+                    e["operation"]["attempt_seq"] for e in attempts
+                ] + orphan_attempts
+                pending = PendingReexecute(
+                    op_seq=op_seq, next_attempt_seq=max(attempt_seqs) + 1
+                )
+                break
+
+        # final is a committed (or recovered) operation.finished.
+        response_text = _committed_response(final)
+        round_pos = final.get("pipeline_position")
+
+        if retrieval_event is not None:
+            retr_op_seq = retrieval_event["operation"]["operation_seq"]
+            if retrieval_event["event_type"] == "operation.finished":
+                # Retrieval committed; the action_outcome commit was cut.
+                payload = _retrieval_payload(retrieval_event)
+                papers = payload.get("papers", [])
+                bookkeeping.append(
+                    {
+                        "kind": "append_event",
+                        "event": {
+                            "event_type": "action_outcome",
+                            "payload": {
+                                "action": "SearchLiterature",
+                                "outcome": "tool_result",
+                                "paper_count": len(papers),
+                                "paper_ids": sorted(p["paper_id"] for p in papers),
+                                "schema_version": ACTION_OUTCOME_SCHEMA_VERSION,
+                            },
+                            "pipeline_position": round_pos,
+                            "writer_epoch": writer_epoch,
+                        },
+                    }
+                )
+                state.retrieval_op_seqs.append(retr_op_seq)
+                if papers:
+                    run_has_non_empty = True
+                    for paper in papers:
+                        state.retrieved_paper_ids.add(paper["paper_id"])
+                state.msg_history.append(
+                    {"role": "user", "content": _round_prompt(ref_round)}
+                )
+                state.msg_history.append(
+                    {"role": "assistant", "content": response_text}
+                )
+                state.last_tool_results = format_retrieval_for_reflection(payload)
+                continue
+            # Retrieval input error committed; the feedback commit was cut.
+            error_text = retrieval_event["payload"].get("error", "")
+            error_code, _, error_message = error_text.partition(": ")
+            if error_code not in MODEL_FIXABLE_ERROR_CODES:
+                fail("RUN_CORRUPT", "Retrieval input failure is not model-fixable")
+            bookkeeping.append(
+                {
+                    "kind": "model_fixable_feedback",
+                    "action": "SearchLiterature",
+                    "error_code": error_code,
+                    "error_message": error_message,
+                    "operation_seq": retr_op_seq,
+                    "pipeline_pos": round_pos,
+                }
+            )
+            state.msg_history.append(
+                {"role": "user", "content": _round_prompt(ref_round)}
+            )
+            state.msg_history.append({"role": "assistant", "content": response_text})
+            state.last_tool_results = f"Error [{error_code}]: {error_message}"
+            continue
+
+        if finalize_event is not None:
+            # Finalization artifacts committed; the action_outcome and
+            # generation.finished commits were cut.
+            idea_pos = finalize_event["pipeline_position"]
+            idea_index = finalize_event["payload"]["idea_index"]
+            bookkeeping.append(
+                {
+                    "kind": "append_event",
+                    "event": {
+                        "event_type": "action_outcome",
+                        "payload": {
+                            "action": "FinalizeIdea",
+                            "idea_index": idea_index,
+                            "outcome": "finalize_accepted",
+                            "schema_version": ACTION_OUTCOME_SCHEMA_VERSION,
+                        },
+                        "pipeline_position": idea_pos,
+                        "writer_epoch": writer_epoch,
+                    },
+                }
+            )
+            return _close_generation(idea_pos, idea_index)
+
+        # Response committed with no follow-up operation events: replay the
+        # response. An orphaned retrieval request (payload/audit commit cut)
+        # re-executes under its own operation coordinates.
+        orphan_retrieval_ops = [
+            orphan_op
+            for orphan_op, triples in orphan_by_op.items()
+            if orphan_op not in ops_with_events
+            and any(
+                filename in ("payload.json", "audit.json") for _, filename in triples
+            )
+        ]
+        if len(orphan_retrieval_ops) > 1:
+            fail("RUN_CORRUPT", "Multiple orphaned retrieval operations")
+        if orphan_retrieval_ops:
+            orphan_op = orphan_retrieval_ops[0]
+            pending = PendingResponse(
+                response_text=response_text,
+                model_op_seq=op_seq,
+                retrieval_op_seq=orphan_op,
+                retrieval_attempt_seq=max(a for a, _ in orphan_by_op[orphan_op]) + 1,
+            )
+        else:
+            pending = PendingResponse(
+                response_text=response_text,
+                model_op_seq=op_seq,
+                retrieval_op_seq=None,
+                retrieval_attempt_seq=1,
+            )
+        state.msg_history.append({"role": "user", "content": _round_prompt(ref_round)})
+        state.msg_history.append({"role": "assistant", "content": response_text})
+        break
+
+    if start_round is None:
+        # Every reflection round completed but the generation.finished commit
+        # was cut (budget-exhausted close-out).
+        return _close_generation(None, None)
+
+    remaining = (num_reflections - start_round) + (
+        max_generations - gen_idx - 1
+    ) * num_reflections
+    if isinstance(pending, PendingResponse):
+        # The interrupted round's model call is already committed; its replay
+        # (retrieval/action processing) is unpaid local work, so the remaining
+        # model-round estimate must not count it again.
+        remaining -= 1
+    return _plan(
+        start_generation=gen_idx,
+        round_resume=RoundResume(
+            start_round=start_round,
+            state=state,
+            pending=pending,
+        ),
+        terminal=None,
+        bookkeeping=bookkeeping,
+        remaining=remaining,
+    )

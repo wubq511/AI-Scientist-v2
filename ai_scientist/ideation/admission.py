@@ -332,6 +332,11 @@ def admit_new_run(
     except IdeationInputError as exc:
         preflight_rejected(store, run.run_id, exc.code, exc.message)
         raise
+    except KeyboardInterrupt as exc:
+        # The minted run stays unsealed and resumable (ticket 10): carry its
+        # run_id on the interruption so the CLI suspension report can name it.
+        exc.run_id = run.run_id  # type: ignore[attr-defined]
+        raise
 
 
 def _run_preflight_steps(
