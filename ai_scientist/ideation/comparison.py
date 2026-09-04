@@ -25,13 +25,14 @@ from pathlib import Path
 import re
 import shlex
 import statistics
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from . import pricing
 from .admission import (
     DEFAULT_MAX_TOKENS,
     MAX_ATTEMPTS_PER_OPERATION,
     WORST_CASE_INPUT_TOKENS_PER_ROUND,
+    _require_clean_worktree,
 )
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
 from .contract import DEEPSEEK_MODEL_ID, _now
@@ -120,6 +121,7 @@ DOMAIN_METHOD_MIN_IMPROVED = 2
 PAIR_PACKET_SCHEMA_VERSION = "comparison-pair-packet-v1.0.0"
 BLIND_MAPPING_SCHEMA_VERSION = "comparison-blind-mapping-v1.0.0"
 COMPARISON_MATRIX_SCHEMA_VERSION = "comparison-run-matrix-v1.0.0"
+EXECUTION_CODE_PIN_SCHEMA_VERSION = "comparison-execution-code-pin-v1.0.0"
 SELECTION_MANIFEST_SCHEMA_VERSION = "comparison-selection-manifest-v1.0.0"
 SELECTION_APPROVAL_SCHEMA_VERSION = "comparison-selection-approval-v1.0.0"
 SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.2.0"
@@ -135,6 +137,7 @@ DEFAULT_COMPARISON_PACKAGE_DIR = (
     / "002-cross-domain-ideation-prompt"
 )
 SLOT_RUNNER = "scripts/run-prompt-comparison-slot"
+EXECUTION_CODE_PIN_NAME = "execution-code-pin.json"
 
 VERDICT_ENUM: frozenset[str] = frozenset(
     {"a_better", "b_better", "tie", "incomparable"}
@@ -218,6 +221,7 @@ SEALED_IDEA_REQUIRED_FIELDS: frozenset[str] = frozenset(
 
 _IDEA_INVENTORY_PATTERN = re.compile(r"artifacts/ideas/(\d{6})/idea\.json\Z")
 _MONEY_PATTERN = re.compile(r"\d+\.\d{2}\Z")
+_GIT_COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 
 
 def _money(value: object, *, label: str) -> Decimal:
@@ -1903,6 +1907,72 @@ def authorize_next_comparison_run(
     }
 
 
+def _is_full_git_sha(value: object) -> bool:
+    return isinstance(value, str) and _GIT_COMMIT_PATTERN.fullmatch(value) is not None
+
+
+def execution_code_pin_path(package_dir: Path) -> Path:
+    return Path(package_dir) / EXECUTION_CODE_PIN_NAME
+
+
+def create_execution_code_pin(package_dir: Path, *, commit: str) -> dict[str, Any]:
+    """Exclusive-create the write-once execution-code pin (first slot only).
+
+    The pin records the clean Git HEAD the whole 8-run matrix must execute
+    under, keeping Prompt Profile the only differing execution control. It is
+    never deleted silently: a stale pin is evidence and must be reconciled
+    against the Evidence Chain before any new-epoch decision.
+    """
+    if not _is_full_git_sha(commit):
+        fail("INVALID_SCHEMA", "The execution code commit must be a full Git SHA")
+    document = {
+        "commit": commit,
+        "pinned_at": _now(),
+        "schema_version": EXECUTION_CODE_PIN_SCHEMA_VERSION,
+    }
+    path = execution_code_pin_path(package_dir)
+    digest = _write_bytes_once(
+        path,
+        canonical_json_bytes(document),
+        label="execution code pin",
+        exists_code="EXECUTION_CODE_PIN_EXISTS",
+    )
+    return {
+        "document": document,
+        "path": str(path),
+        "sha256": digest,
+    }
+
+
+def load_execution_code_pin(package_dir: Path) -> dict[str, Any]:
+    """Read and validate the execution-code pin; absence fails closed."""
+    path = execution_code_pin_path(package_dir)
+    if path.is_symlink():
+        fail("SYMLINK_FORBIDDEN", "The execution code pin is a symlink")
+    if not path.is_file():
+        fail(
+            "EXECUTION_CODE_PIN_MISSING",
+            "The comparison package lacks its execution code pin",
+        )
+    document = parse_json_bytes(path.read_bytes(), label="execution code pin")
+    if not isinstance(document, dict):
+        fail("INVALID_SCHEMA", "The execution code pin is not a JSON object")
+    pin = closed_object(
+        document,
+        label="execution code pin",
+        keys={"commit", "pinned_at", "schema_version"},
+    )
+    if pin["schema_version"] != EXECUTION_CODE_PIN_SCHEMA_VERSION:
+        fail("EXECUTION_CODE_PIN_DRIFT", "The execution code pin schema drifted")
+    nonempty_string(pin["pinned_at"], label="execution code pin pinned_at")
+    if not _is_full_git_sha(pin["commit"]):
+        fail(
+            "EXECUTION_CODE_PIN_DRIFT",
+            "The execution code pin commit is not a full Git SHA",
+        )
+    return pin
+
+
 def prepare_comparison_slot_launch(
     workspace_root: Path,
     *,
@@ -2021,40 +2091,81 @@ def prepare_comparison_slot_launch(
         "matrix_file_sha256": observed_matrix_digest,
         "package_dir": str(resolved_package),
         "price_table_sha256": price_table.sha256,
+        "workspace_root": str(root),
     }
 
 
-def reserve_comparison_slot(launch: dict[str, Any]) -> dict[str, Any]:
+def reserve_comparison_slot(
+    launch: dict[str, Any],
+    *,
+    execution_head_resolver: Callable[[Path], str] | None = None,
+) -> dict[str, Any]:
     """Write one exclusive pre-exec reservation for a frozen matrix slot.
 
     The reservation closes duplicate/concurrent launch races that an
     append-after-run ledger cannot prevent. It is deliberately not released
     automatically: a process failure leaves a visible fail-closed artifact
     that must be reconciled against the Evidence Chain before any retry.
+
+    The first slot's reservation also creates the write-once execution-code
+    pin; every later slot must run at the pinned clean HEAD. The HEAD is
+    resolved here, at the last comparison-level checkpoint before exec, via
+    the admission boundary's clean-worktree check (a dirty tree fails as
+    DIRTY_WORKTREE). Tests inject `execution_head_resolver`; the production
+    runner never does. A commit drift fails closed before any reservation is
+    written, and the stale pin is preserved as evidence.
     """
     authorization = launch.get("authorization")
     command_argv = launch.get("command_argv")
     package_dir = launch.get("package_dir")
+    workspace_root = launch.get("workspace_root")
     if (
         not isinstance(authorization, dict)
         or not isinstance(command_argv, tuple)
         or not command_argv
         or not isinstance(package_dir, str)
+        or not isinstance(workspace_root, str)
     ):
         fail("INVALID_SCHEMA", "The comparison launch plan is incomplete")
     run_index = authorization.get("run_index")
     if not isinstance(run_index, int) or isinstance(run_index, bool):
         fail("INVALID_SCHEMA", "The comparison authorization lacks a run index")
-    reservations_dir = Path(package_dir) / "vault" / "run-reservations"
+    resolve_head = (
+        execution_head_resolver
+        if execution_head_resolver is not None
+        else _require_clean_worktree
+    )
+    execution_commit = resolve_head(Path(workspace_root))
+    if not _is_full_git_sha(execution_commit):
+        fail("GIT_UNAVAILABLE", "Cannot resolve the execution HEAD commit")
+    package = Path(package_dir)
+    if execution_code_pin_path(package).is_file():
+        pin = load_execution_code_pin(package)
+        if pin["commit"] != execution_commit:
+            fail(
+                "EXECUTION_CODE_PIN_MISMATCH",
+                "The execution HEAD differs from the comparison code pin",
+                expected=pin["commit"],
+                actual=execution_commit,
+            )
+    elif run_index != 1:
+        fail(
+            "EXECUTION_CODE_PIN_MISSING",
+            "Only the first comparison slot may create the execution code pin",
+        )
+    else:
+        create_execution_code_pin(package, commit=execution_commit)
+    reservations_dir = package / "vault" / "run-reservations"
     reservations_dir.mkdir(parents=True, exist_ok=True)
     reservation_path = reservations_dir / f"run-{run_index:03d}.json"
     document = {
         "authorization": dict(authorization),
         "command_argv_sha256": sha256_bytes(canonical_json_bytes(list(command_argv))),
+        "execution_code_commit": execution_commit,
         "price_table_sha256": launch.get("price_table_sha256"),
         "reserved_at": _now(),
         "run_index": run_index,
-        "schema_version": "comparison-run-reservation-v1.0.0",
+        "schema_version": "comparison-run-reservation-v1.1.0",
     }
     data = canonical_json_bytes(document)
     digest = _write_bytes_once(
@@ -2289,13 +2400,15 @@ def ingest_comparison_result(
     expected_case_id: str,
     expected_profile_id: str,
     matrix_document: dict[str, Any],
+    package_dir: Path,
 ) -> RunMetrics:
     """Ingest one sealed comparison run, fail closed on any drift.
 
-    Validates Run Specification/profile identity, case/input hashes, Run
-    Seal, Evidence Chain, sanitized export, Evaluation Artifact coverage,
-    finish reasons, attempt topology, latency, and actual cost before the
-    result may feed a pair packet or the reducer.
+    Validates Run Specification/profile identity, case/input hashes, the
+    execution-code pin against `admission.code.commit`, Run Seal, Evidence
+    Chain, sanitized export, Evaluation Artifact coverage, finish reasons,
+    attempt topology, latency, and actual cost before the result may feed a
+    pair packet or the reducer.
     """
     from .evidence import validate_evidence_chain
 
@@ -2316,6 +2429,18 @@ def ingest_comparison_result(
 
     # 2. Run Specification and profile identity against the matrix pin.
     request, admission = _read_run_documents(store, run_id)
+    pin = load_execution_code_pin(Path(package_dir))
+    admission_code = admission.get("code", {})
+    admission_commit = (
+        admission_code.get("commit") if isinstance(admission_code, dict) else None
+    )
+    if admission_commit != pin["commit"]:
+        fail(
+            "EXECUTION_CODE_PIN_MISMATCH",
+            "The sealed run's admission commit differs from the code pin",
+            expected=pin["commit"],
+            actual=admission_commit,
+        )
     profile_field = validate_profile_field(
         admission.get("prompt_profile"), label="admission.prompt_profile"
     )

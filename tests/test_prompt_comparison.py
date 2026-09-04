@@ -1575,6 +1575,20 @@ def ingested_env(
         plan_gate_reapproval_threshold_cny=CANARY_HARD_CAP_CNY,
         historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
+    # Every synthetic run was admitted at the same fixture-workspace HEAD
+    # (run artifacts are gitignored), so one execution-code pin covers all.
+    admission_commits = set()
+    for run_id in run_ids.values():
+        admission = json.loads(
+            (
+                workspace / "artifacts" / "ideation-runs" / run_id / "admission.json"
+            ).read_text(encoding="utf-8")
+        )
+        admission_commits.add(admission["code"]["commit"])
+    assert len(admission_commits) == 1
+    package_dir = tmp_path_factory.mktemp("comparison-pkg") / "pkg"
+    package_dir.mkdir()
+    cmp_mod.create_execution_code_pin(package_dir, commit=admission_commits.pop())
     metrics_by_run: dict[str, cmp_mod.RunMetrics] = {}
     for run in runs:
         key = (run.case_id, run.profile_id)
@@ -1588,6 +1602,7 @@ def ingested_env(
             expected_case_id=run.case_id,
             expected_profile_id=run.profile_id,
             matrix_document=document,
+            package_dir=package_dir,
         )
         metrics_by_run[run_id] = metrics
         ledger = cmp_mod.ingest_run_actual_cost(
@@ -2022,6 +2037,13 @@ def test_reapproval_threshold_records_crossing_and_blocks_the_next_slot() -> Non
     assert exc_info.value.code == "PLAN_GATE_REAPPROVAL_REQUIRED"
 
 
+# Fixture execution-code identities: the comparison matrix must run under one
+# pinned commit; tests inject these instead of touching the real repository's
+# git state (the production default resolver requires a clean worktree).
+EXECUTION_COMMIT_A = "a1" * 20
+EXECUTION_COMMIT_B = "b2" * 20
+
+
 def _slot_prepare_kwargs(pkg_dir: Path, run_index: int) -> dict[str, object]:
     return {
         "package_dir": pkg_dir,
@@ -2031,6 +2053,15 @@ def _slot_prepare_kwargs(pkg_dir: Path, run_index: int) -> dict[str, object]:
         "expected_reapproval_threshold_cny": Decimal("5.00"),
         "run_index": run_index,
     }
+
+
+def _reserve(
+    launch: dict[str, Any], commit: str = EXECUTION_COMMIT_A
+) -> dict[str, Any]:
+    return cmp_mod.reserve_comparison_slot(
+        launch,
+        execution_head_resolver=lambda _root: commit,
+    )
 
 
 def _slot_runner_argv(pkg_dir: Path, run_index: int) -> list[str]:
@@ -2198,26 +2229,280 @@ def test_slot_reservation_is_write_once_and_blocks_duplicate_launches(
         REPO_ROOT,
         **_slot_prepare_kwargs(pkg_dir, 1),
     )
-    reservation = cmp_mod.reserve_comparison_slot(launch)
+    reservation = _reserve(launch)
     reservation_path = Path(reservation["path"])
     assert reservation_path.is_file()
     assert reservation_path.stat().st_mode & 0o777 == 0o600
     document = json.loads(reservation_path.read_text())
     assert document["authorization"]["run_index"] == 1
     assert document["authorization"]["next_run_worst_case_bound_cny"] == "7.08"
+    assert document["execution_code_commit"] == EXECUTION_COMMIT_A
     assert document["command_argv_sha256"] == sha256_bytes(
         canonical_json_bytes(list(launch["command_argv"]))
     )
     with pytest.raises(IdeationInputError) as exc_info:
-        cmp_mod.reserve_comparison_slot(launch)
+        _reserve(launch)
     assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
 
+    # CLI leg: a fresh package whose pin matches the real repository HEAD, so
+    # the real runner reaches the duplicate-reservation guard when the
+    # worktree is clean; when it is dirty (the usual pre-commit validation
+    # state) the clean-HEAD guard fires first. Both fail closed before exec.
+    cli_pkg = tmp_path / "comparison-pkg-cli"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=cli_pkg,
+    )
+    real_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    _reserve(
+        cmp_mod.prepare_comparison_slot_launch(
+            REPO_ROOT,
+            **_slot_prepare_kwargs(cli_pkg, 1),
+        ),
+        commit=real_head,
+    )
     completed = subprocess.run(
-        _slot_runner_argv(pkg_dir, 1),
+        _slot_runner_argv(cli_pkg, 1),
         cwd=REPO_ROOT,
         capture_output=True,
         check=False,
     )
     assert completed.returncode == 2
-    assert json.loads(completed.stderr)["code"] == "COMPARISON_SLOT_ALREADY_RESERVED"
+    assert json.loads(completed.stderr)["code"] in {
+        "COMPARISON_SLOT_ALREADY_RESERVED",
+        "DIRTY_WORKTREE",
+    }
     assert completed.stdout == b""
+
+
+def _advance_ledger_through(pkg_dir: Path, last_ingested_slot: int) -> None:
+    """Record actual costs for slots 1..last_ingested_slot in the package ledger."""
+    ledger_path = pkg_dir / "spend-ledger.json"
+    matrix = parse_json_bytes(
+        (pkg_dir / "run-matrix.json").read_bytes(), label="run matrix"
+    )
+    ledger = parse_json_bytes(ledger_path.read_bytes(), label="spend ledger")
+    for slot in range(1, last_ingested_slot + 1):
+        slot_run = next(run for run in matrix["runs"] if run["run_index"] == slot)
+        ledger = cmp_mod.ingest_run_actual_cost(
+            ledger,
+            entry=cmp_mod.LedgerEntry(
+                run_index=slot,
+                pair_index=slot_run["pair_index"],
+                case_id=slot_run["case_id"],
+                profile_id=slot_run["prompt_profile_id"],
+                run_id=f"00000000-0000-4000-8000-{slot:012d}",
+                status="success",
+                actual_cost_cny=Decimal("0.10"),
+                worst_case_bound_cny=Decimal("0.50"),
+                physical_attempt_count=1,
+            ),
+        )
+    ledger_path.write_bytes(canonical_json_bytes(ledger))
+
+
+def test_first_slot_creates_execution_code_pin_and_same_commit_retry_is_safe(
+    tmp_path: Path,
+) -> None:
+    """Slot 1 reservation pins the clean HEAD write-once at mode 0600."""
+    pkg_dir = tmp_path / "comparison-pkg"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        REPO_ROOT,
+        **_slot_prepare_kwargs(pkg_dir, 1),
+    )
+    reservation = _reserve(launch)
+    pin_path = pkg_dir / "execution-code-pin.json"
+    assert pin_path.is_file()
+    assert pin_path.stat().st_mode & 0o777 == 0o600
+    pin = json.loads(pin_path.read_text())
+    assert pin["commit"] == EXECUTION_COMMIT_A
+    assert pin["schema_version"] == "comparison-execution-code-pin-v1.0.0"
+    assert reservation["document"]["execution_code_commit"] == EXECUTION_COMMIT_A
+
+    # A same-commit retry stays fail-closed on the reservation and never
+    # touches the existing pin.
+    with pytest.raises(IdeationInputError) as exc_info:
+        _reserve(launch)
+    assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
+    assert json.loads(pin_path.read_text())["commit"] == EXECUTION_COMMIT_A
+
+
+def test_execution_code_pin_missing_after_first_slot_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """A later slot without the pin means slot 1's evidence was tampered with."""
+    pkg_dir = tmp_path / "comparison-pkg"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    _advance_ledger_through(pkg_dir, 1)
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        REPO_ROOT,
+        **_slot_prepare_kwargs(pkg_dir, 2),
+    )
+    with pytest.raises(IdeationInputError) as exc_info:
+        _reserve(launch)
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISSING"
+
+
+def test_execution_code_pin_rejects_commit_drift_and_preserves_stale_pin(
+    tmp_path: Path,
+) -> None:
+    """A later slot at a different HEAD fails closed; the stale pin is evidence."""
+    pkg_dir = tmp_path / "comparison-pkg"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    _reserve(
+        cmp_mod.prepare_comparison_slot_launch(
+            REPO_ROOT,
+            **_slot_prepare_kwargs(pkg_dir, 1),
+        )
+    )
+    _advance_ledger_through(pkg_dir, 1)
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        REPO_ROOT,
+        **_slot_prepare_kwargs(pkg_dir, 2),
+    )
+    pin_bytes = (pkg_dir / "execution-code-pin.json").read_bytes()
+    with pytest.raises(IdeationInputError) as exc_info:
+        _reserve(launch, commit=EXECUTION_COMMIT_B)
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISMATCH"
+    assert (pkg_dir / "execution-code-pin.json").read_bytes() == pin_bytes
+    assert not (pkg_dir / "vault" / "run-reservations" / "run-002.json").exists()
+
+
+def test_execution_code_pin_creation_is_exclusive(tmp_path: Path) -> None:
+    """Concurrent/double pin creation loses the exclusive-create race closed."""
+    pkg_dir = tmp_path / "comparison-pkg"
+    pkg_dir.mkdir()
+    created = cmp_mod.create_execution_code_pin(pkg_dir, commit=EXECUTION_COMMIT_A)
+    assert Path(created["path"]).stat().st_mode & 0o777 == 0o600
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.create_execution_code_pin(pkg_dir, commit=EXECUTION_COMMIT_A)
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_EXISTS"
+
+
+def test_execution_code_pin_requires_a_clean_worktree_at_launch(
+    tmp_path: Path,
+) -> None:
+    """The production default resolver fails closed on a dirty worktree."""
+    pkg_dir = tmp_path / "comparison-pkg"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    repo = tmp_path / "exec-repo"
+    policies = repo / "ai_scientist" / "ideation" / "policies"
+    policies.mkdir(parents=True)
+    (policies / "deepseek-cny-price-table-v1.json").write_bytes(
+        (
+            REPO_ROOT
+            / "ai_scientist"
+            / "ideation"
+            / "policies"
+            / "deepseek-cny-price-table-v1.json"
+        ).read_bytes()
+    )
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "config", "user.name", "Comparison Tester"], cwd=repo, check=True
+    )
+    subprocess.run(
+        ["git", "config", "user.email", "tester@example.com"], cwd=repo, check=True
+    )
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "fixture exec repo"], cwd=repo, check=True
+    )
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        repo,
+        **_slot_prepare_kwargs(pkg_dir, 1),
+    )
+    # The clean fixture repository reserves slot 1 under its real HEAD.
+    reservation = cmp_mod.reserve_comparison_slot(launch)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    pin = json.loads((pkg_dir / "execution-code-pin.json").read_text())
+    assert pin["commit"] == head
+    assert reservation["document"]["execution_code_commit"] == head
+
+    # A dirty worktree is rejected at the reserve seam before any further write.
+    (repo / "dirty.txt").write_text("uncommitted")
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.reserve_comparison_slot(launch)
+    assert exc_info.value.code == "DIRTY_WORKTREE"
+
+
+def test_ingest_rejects_run_admitted_at_a_different_commit(
+    ingested_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """A sealed run whose admission commit differs from the pin is rejected."""
+    env = ingested_env
+    run = env["runs"][0]
+    run_id = env["run_ids"][(run.case_id, run.profile_id)]
+    pin_dir = tmp_path / "comparison-pkg"
+    pin_dir.mkdir()
+    cmp_mod.create_execution_code_pin(pin_dir, commit=EXECUTION_COMMIT_B)
+    pin_bytes = (pin_dir / "execution-code-pin.json").read_bytes()
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.ingest_comparison_result(
+            env["workspace"],
+            run_id,
+            expected_run_index=run.run_index,
+            expected_arm_position=run.arm_position,
+            expected_pair_index=run.pair_index,
+            expected_case_id=run.case_id,
+            expected_profile_id=run.profile_id,
+            matrix_document=env["document"],
+            package_dir=pin_dir,
+        )
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISMATCH"
+    assert (pin_dir / "execution-code-pin.json").read_bytes() == pin_bytes
+
+
+def test_ingest_requires_the_execution_code_pin(
+    ingested_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    env = ingested_env
+    run = env["runs"][0]
+    run_id = env["run_ids"][(run.case_id, run.profile_id)]
+    empty_dir = tmp_path / "comparison-pkg"
+    empty_dir.mkdir()
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.ingest_comparison_result(
+            env["workspace"],
+            run_id,
+            expected_run_index=run.run_index,
+            expected_arm_position=run.arm_position,
+            expected_pair_index=run.pair_index,
+            expected_case_id=run.case_id,
+            expected_profile_id=run.profile_id,
+            matrix_document=env["document"],
+            package_dir=empty_dir,
+        )
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISSING"
