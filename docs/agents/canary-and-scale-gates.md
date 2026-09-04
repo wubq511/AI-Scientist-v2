@@ -1,13 +1,13 @@
 # Canary 与扩量 Gate 契约
 
-版本 v1.1 · 2026-09-04 · 来源 ticket [Compare DeepSeek reasoning effort and completion limits](../wayfinder/ideation-pipeline/tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md) 与规范 [DeepSeek Reasoning Effort Canary 比较规格](deepseek-reasoning-effort-canary-spec.md)（由 Robert 于 2026-09-04 批准算术修正与选择语义；首版 v1.0 于 2026-08-30 经 ticket 028 批准）。
+版本 v1.2 · 2026-09-04 · 来源 [跨领域 Ideation Prompt 资格验证规格](cross-domain-ideation-prompt-spec.md)、ticket [Compare DeepSeek reasoning effort and completion limits](../wayfinder/ideation-pipeline/tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md) 与规范 [DeepSeek Reasoning Effort Canary 比较规格](deepseek-reasoning-effort-canary-spec.md)（Robert 于 2026-09-04 批准先资格验证 domain-neutral Prompt Profile、暂停并撤回旧 035 Plan Gate；v1.1 同日批准 Canary 算术修正与选择语义；首版 v1.0 于 2026-08-30 经 ticket 028 批准）。
 
 本契约定义从「零真实调用」到「终波」的执行阶段、Canary 集的选择规则、成本与质量预算、失败处理，以及打开扩量 gate 的全部条件。修订规则同 027 验证矩阵：任何修订 = 新版本号 + Robert 批准。
 
 ## 阶段结构（三波）
 
 1. **smoke**：1 个 case、单次 Ideation Run，晃出 adapter、估价偏差、证据链落盘的首跑缺陷。
-2. **canary**：12 个 case，承载首跑验证与 035/036 比较实验（共享同一 Canary 集）。
+2. **canary**：12 个 case；先从中取固定四例资格验证 domain-neutral Prompt Profile，通过 Promotion Gate 后才允许在新 Design Epoch 上承载新的 035/036 比较。
 3. **终波**：规模不在本契约锁死，由扩量 gate 按面试叙事需要与 canary 实测成本决定（预期量级 ~50）。**面试任务不要求全量 237**；系统对 237 的支持与预处理验证义务由 009 独立成立，不以模型跑全量为前提。
 
 ## Canary 集选择规则 (v1.1)
@@ -35,7 +35,7 @@
 
 - canary 阶段（smoke + canary 上的一切真实调用，含 035/036 与失败重跑）**¥30 硬上限**，低谷期执行。
 - 031 的逐 run 估价、逐 run 批准在 smoke 与 canary 阶段不变；smoke 首跑得出实测单 run 成本后，后续每次估价按实测重校准。
-- **执行优先队列**：smoke(1) → 035 arm `reasoning_effort=high`(12) → 035 arm `max`(12) → 失败重跑 → 036 变体臂（3 case 子集，baseline 臂复用 035 胜方的既有 run）。
+- **执行优先队列**：smoke(已完成 1) → Proposal 002 domain-neutral Prompt Profile qualification（4 对/8 runs）→ Prompt Promotion Gate → 新 Design Epoch 的 reasoning-effort proposal（若另获 Plan Gate）→ 失败重跑 → 036 变体臂。Proposal 001 的旧 035 24-run matrix 已撤回，不得执行或计为新 epoch evidence。
 - 接近上限时从队尾截断（036 最先被牺牲）。预算耗尽导致 gate 要求的 case 未完成时，不擅自追加预算，回到 Robert 决定追加或收缩 Canary。
 - 终波预算包络不设死数：在扩量 gate 处按 canary 实测成本估算，由 Robert 连同终波规模一并批准。
 
@@ -52,6 +52,7 @@
 3. 验证矩阵中标注消费者 028 的行全部通过：VM-CONTRACT-018-02、VM-CONTRACT-019-01、VM-CONTRACT-020-02、VM-CONTRACT-026-02、VM-INTEGRATION-01、VM-REPLAY-02、VM-LEAKAGE-01、VM-LEAKAGE-02、VM-LEAKAGE-04、VM-ISOLATION-01、VM-ENV-01、VM-QUAL-01。
 4. 实际成本在 ¥30 包络内，实测单 run 成本已校准，终波估算与规模已提交。
 5. Robert 审读 canary 的 Evaluation Artifact 与失败归因后明确批准；同一次批准中确定终波规模与预算包络。
+6. `cross-domain-v1` 或后续获批替代 Prompt Profile 已通过 Promotion Gate；已知 ML 目标错配的 `ml-baseline-v1` 不得作为打开 Scale Gate 的 production prompt。Prompt comparison rejected 或 inconclusive 时，Scale Gate 保持关闭。
 
 ## 终波执行条款
 

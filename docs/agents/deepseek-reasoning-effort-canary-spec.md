@@ -5,6 +5,8 @@ label: ready-for-agent
 
 # DeepSeek Reasoning Effort Canary 比较规格
 
+> **Execution withdrawn (2026-09-04):** 该规格绑定的 Promotion Proposal 001 已在零 paid runs、零实际支出时撤回。当前 production prompt 对跨领域 IdeaBench 存在 ML 目标错配；在 [domain-neutral Prompt Profile 资格验证](cross-domain-ideation-prompt-spec.md)通过 Promotion Gate、开启新 Design Epoch 并取得新的 reasoning-effort Plan Gate 前，不得执行本文的 24-run matrix 或复用其 commands。
+
 ## Problem Statement
 
 可审计的 live DeepSeek 执行路径和单 Case smoke 已经完成，但 Robert 仍没有证据判断 `reasoning_effort=high` 与 `reasoning_effort=max` 哪一个更适合 ideation，也不知道当前 `max_tokens=32768` 是否足以避免 reasoning 或最终 JSON 截断。若凭一次 smoke、主观印象或事后挑选成功样本决定参数，后续 Canary、Scale Gate 与终波将建立在不可比较的设计状态上。

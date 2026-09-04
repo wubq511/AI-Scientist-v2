@@ -1,6 +1,6 @@
 ---
 id: 001-deepseek-reasoning-effort-canary
-state: plan-approved
+state: withdrawn
 filer: agent
 created: 2026-09-04
 ---
@@ -74,4 +74,12 @@ created: 2026-09-04
 
 ## Promotion Gate 记录
 
-*待对比实验执行、脱敏证据归档、双盲评审完成并揭盲后，由 Robert 对照 Pre-registered 判据正式宣判。*
+*未进入 Promotion Gate。*
+
+## Withdrawal 记录
+
+- **撤回日期**：2026-09-04
+- **撤回人**：Robert
+- **原因**：付费执行前发现当前 production prompt 将跨领域 IdeaBench 任务硬编码为 AI/ML researcher、top ML conference、conference abstract、algorithmic change 与 fixed metric 目标。`high`/`max` 对比即使内部公平，也只能选择谁更擅长执行目标错配的任务，不能支撑跨领域 ideation。
+- **执行事实**：本提案 paid runs = 0，actual spend = 0.00 CNY；既有私有 selection、matrix、blind mapping、ledger 与 commands 保持不可变但标记 inactive，不构成可执行授权。
+- **后续路径**：[Proposal 002](002-cross-domain-ideation-prompt.md) 先资格验证 domain-neutral Prompt Profile；只有该 prompt 经 Promotion Gate 开启新 Design Epoch 后，reasoning-effort 才能以新的 proposal、Run Specification、matrix hashes 与 Plan Gate 重启。
