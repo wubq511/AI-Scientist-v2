@@ -1,6 +1,6 @@
 ---
 id: 002-cross-domain-ideation-prompt
-state: proposed
+state: plan-approved
 filer: Robert
 created: 2026-09-04
 ---
@@ -92,12 +92,13 @@ created: 2026-09-04
 
 ## Plan Gate 记录
 
-- **状态**：`proposed`（Plan Gate 候选已完备，等待审批）
+- **状态**：`plan-approved`（Robert 于 2026-09-05 批准；执行模式经比较后选定方案 A：保持串行合同，利用周末低谷时段执行，人工盲审与 provider 等待流水线化；并行方案未采纳）
+- **批准 Artifact**：私有 package 内 `plan-gate-approval.json`（write-once `0600`，`comparison-plan-gate-approval-v1.1.0`），SHA-256 `6ad3b448bd439b7ae6b028dafda4c1c22107e73928ebb780eaf364ce62c5f003`；记录 `approved_by=Robert`、`planned_runs_count=8`、stage 总账 `0.14 CNY`、重审批阈值 `5.00 CNY`、硬上限 `30.00 CNY`、`scope=matrix_reapproval_threshold_not_per_run`
 - **准备完成日期**：2026-09-04
-- **拟议审批内容**：
+- **已批准内容**：
   - 4-case selection manifest 与 8-run frozen matrix 散列；
   - 2/2 执行顺序平衡与 2/2 A/B 双盲映射；
-  - 拟议累计实际支出重审批阈值 `5.00 CNY`：stage 总账当前为 `0.14 CNY`，距离下一次重审批触发点为 `4.86 CNY`；阈值不是硬上限，任何跨越都必须如实入账，并在下一 slot 前暂停；
+  - 累计实际支出重审批阈值 `5.00 CNY`：stage 总账当前为 `0.14 CNY`，距离下一次重审批触发点为 `4.86 CNY`；阈值不是硬上限，任何跨越都必须如实入账，并在下一 slot 前暂停；
   - Canary `30.00 CNY` 硬上限：当前剩余 `29.86 CNY`，每个 slot 前用当时实际总账加 `7.08 CNY` 峰值最坏上界做 reservation；exact `30.00` 可进入，`30.01` fail closed；同一 slot 在 exec 前写入 write-once `0600` reservation，重复/并发启动拒绝；
   - 执行代码 pin：首个 slot reservation 在私有 package 写入 write-once `execution-code-pin.json`（记录批准当时的 clean Git HEAD）；之后 7 个 slot 与全部 8 次 ingestion 必须等于该 commit，任何 drift/dirty/missing 均 fail closed，stale pin 保留为证据；
   - 3 胜 0 负盲审胜负、domain-method fit 改善、ML intrusion 不增与 2.0× Regression Budget 门槛；
