@@ -202,6 +202,10 @@ artifacts/ideation-runs/
 # Private post-seal Evaluation Artifacts (briefs, drafts, finalized versions)
 artifacts/evaluations/
 
+# Sanitized Evidence Chain exports (untracked so between-slot exports do not
+# dirty the worktree pinned by the comparison execution-code pin)
+evidence/ideation-runs/
+
 # final papers
 final_papers/
 
