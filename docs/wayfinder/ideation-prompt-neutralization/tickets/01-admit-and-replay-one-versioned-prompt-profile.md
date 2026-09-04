@@ -37,3 +37,8 @@ blocked_by: []
 - `run_store.py`：schema 版本 v1.1.0 + 双版本支持常量。
 - CLI：`new-run` 新增必需 `--prompt-profile <id>`；command 记录包含该 flag；`--help` 中不含任何模型/provider/endpoint/prompt 文本覆盖旗标。
 - 生产 default 不变（`ml-baseline-v1`）；`cross-domain-v1` 已可执行但仅在 comparison 中显式选用。
+
+## 对抗性审查修复记录 (2026-09-04, post-close)
+
+- Commit `3428909`（fix: close adversarial review findings in comparison boundary）落地后，本票 deliverable 未受实质影响：F7 死代码清理触及的是共享 comparison 代码（`ai_scientist/ideation/comparison.py` + `tests/test_prompt_comparison.py`），不涉及本票的 profile seam（`profiles.py` / `admission.py` / `controller.py` / `resume.py` / `evidence.py` / `run_store.py`）。
+- 本票的 baseline 字节保持声明已在 post-close 对立审查中独立复验：从实现前 commit `849336b` 重算 golden hashes（system `d2c000…62d`、generation `b933e8…035`、reflection `8ed8f5…47f7`，外加 registry/bundle hash），与当前 `profiles.py` 渲染输出五个组件逐一比对完全相同；该结论不受 commit `3428909` 任何修复影响。

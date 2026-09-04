@@ -40,11 +40,13 @@ created: 2026-09-04
   - 历史已发生实际支出：0.14 CNY（单 case smoke 产生）；
   - 当前 Canary 阶段剩余预算：29.86 CNY；
   - 拟议本提案 Plan Gate 实际支出子上限：`plan_gate_subcap_cny = 5.00 CNY`；
+  - 子上限约束的是矩阵级实际支出（stage 总账含 0.14 CNY 历史 smoke 支出的 opening balance），严格不等式防溢出；每个 run 的 7.08 CNY 最坏 bound 仅属于 live admission 交互批准 seam，不进入子上限算术。
   - 每个 run 仍受 7.08 CNY 单次准入最坏上限校验，且需 Robert 交互式逐 run 批准。
 
 ## Pre-registered 判据
 
 1. **完整性**：4 对、8 个 runs 全部获得可验证 Run Seal、sanitized export 和完整 Evaluation Artifact；缺一即 `inconclusive`，不得用完成子集晋升。
+  - pair packet 的 idea payload 现以 per-arm sealed idea SHA-256 绑定到 Evidence Chain，verdict 与 packet hash 在 reduction 处复核（`VERDICT_PACKET_MISMATCH` fail closed）。
 2. **盲审胜负**：揭盲后 challenger 至少胜 3 对，baseline 胜 0 对；tie 不计胜，`incomparable` 使矩阵不完整。
 3. **Domain-method fit**：challenger 至少 2 对严格优于 baseline，且 4 对中没有任何一对更差。评审必须区分“合理采用 ML”与“无问题/证据依据的 ML intrusion”。
 4. **既有质量底线**：challenger 不得引入 `problem_space_match=mismatched`、`feasibility_soundness=unsound`、`grounding_synthesis=name_dropped`、contamination signal 或 leakage；任一出现自动拒绝。
@@ -76,12 +78,12 @@ created: 2026-09-04
 - **选集批准记录 (`selection-approval.json`)**：`9944dc5e4d00fc6aaec1f541ccc6bb7481bca8a36e3634a3a6e63bcf49e893ba`
 - **8-Run 运行矩阵 (`run-matrix.json`)**：`c8a9217ffcf60718cc132ef04688bdf0bd3bd23758f0e54373993e1237d78ef4`（自验签 `matrix_sha256`: `c60d72748d8ab6aa06e712332e4bee2b4b7cf275b7f34ba58c210c09f5d963c3`）
 - **双盲平衡映射 (`blind-mapping.json`)**：`a605f3755b7bfeeb6497f6e27a9bc1e3f6f36822155497f1c9f19d85388f0a9e`
-- **初始花费账本 (`spend-ledger.json`)**：`6786cac6f7ca4c3d1c131d23646d6f1c0668d9b0d9e698b527ee637f2031a823`
+- **初始花费账本 (`spend-ledger.json`)**：`bec52349eb53b0328cafd67f152d25ce43e2b7e90ad0d1fbbf3f69fd01f03f29`（账本 schema 已升级为 `comparison-spend-ledger-v1.1.0`，包含 0.14 CNY 历史 smoke 支出 opening balance）
 - **CLI 运行命令 (`commands.txt`)**：`be30d7d81a4aaf6e2b388c122a1d167a6258a50a289119e4cd7b73564ad2ce2a`
 
 ### 代码与运行基准
 
-- **当前准备完成 Commit SHA**：`ce38917f6f04d414625d777c532a5d38b0a6454d`（及其在 Ticket 03 最终提交的 head commit）
+- **当前准备完成 Commit SHA**：`3428909f939a510534b481327c7c674f541e9956`（对抗性审查修复后的当前 HEAD，覆盖 Ticket 03 最终提交）
 - **依赖栈基准**：Python 3.13.2 reference stack, pinned dependencies.
 
 ## Plan Gate 记录
@@ -91,7 +93,7 @@ created: 2026-09-04
 - **拟议审批内容**：
   - 4-case selection manifest 与 8-run frozen matrix 散列；
   - 2/2 执行顺序平衡与 2/2 A/B 双盲映射；
-  - 拟议实际支出子上限 `5.00 CNY`（30.00 CNY Canary 硬上限内，剩余 29.86 CNY 可支配）；
+  - 拟议实际支出子上限 `5.00 CNY`：Plan Gate 为矩阵级严格不等式 consult 守卫（总 stage 支出须严格低于子上限与 30.00 CNY 硬上限，enforcement 于 result ingestion fail-closed `SUBCAP_EXCEEDED`）；本提案 runs 剩余可支配 tracked 预算 = 5.00 − 0.14 = 4.86 CNY（Canary 阶段剩余 29.86 CNY/30.00 CNY 硬上限）；
   - 3 胜 0 负盲审胜负、domain-method fit 改善、ML intrusion 不增与 2.0× Regression Budget 门槛；
   - 声明：Plan Gate 审批仅批准矩阵级架构与子上限，不替代每个 run 准入前的独立交互式费用确认。
 

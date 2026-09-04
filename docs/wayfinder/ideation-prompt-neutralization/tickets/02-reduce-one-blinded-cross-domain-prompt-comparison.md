@@ -42,3 +42,14 @@ blocked_by:
 - **测试**：`tests/test_prompt_comparison.py` 48 个测试（选择 7、矩阵 5、盲法/包 5、命令 2、ledger 7、verdict/reveal 4、reducer 17、E2E 1）；`tests/comparison_synthetic.py` fixture 工厂（4 prepared cases，来自 2 fixture targets × 各 2 个 case 身份，真实九步 preflight/批准链）。E2E 用真实生产 lifecycle 生成 8 个 synthetic sealed runs（admission→controller→seal→validate→export→evaluation artifact）后由 `ingest_comparison_result` 全量消费并 reduce 到 `promote`，重放 byte-identical。零网络、零真实 provider、零费用；不读活动 `.env`（synthetic workspace 有自己的 policies 目录）。
 - **Rollback 证据**：本票新增面全部是 additive（一个新模块 + 两个测试文件 + 文档）；无生产模块行为修改，回滚 = revert 本票 commits 即可，生产 lifecycle 与 ticket 01 seam 不受影响。
 - **边界声明**：最终私有 4-case selection manifest、Proposal 002 hash 补全、8-run 私有 package 冻结与命令零网络可执行性落盘属于 ticket 03；本票只交付并测试 boundary 函数本身。全程未调用 DeepSeek、实际支出 0.00 CNY、Proposal 002 未修改、ticket 035 未执行。
+
+## 对抗性审查修复记录 (2026-09-04, post-close)
+
+- Commit `3428909`（fix: close adversarial review findings in comparison boundary）关闭本票 deliverable 的全部实质发现：
+  - **F1/F2（Plan Gate 算术 + 历史支出核算）**：`plan_gate_next_run_allowed` 改为矩阵级严格不等式守卫（总 stage spend 需严格低于子上限与 30.00 CNY 硬上限），不再接收 per-run worst-case bound；逐 run 的 7.08 CNY 最坏 bound 仅属于 live admission 审批 seam。ledger 升级 `comparison-spend-ledger-v1.1.0`，纳入不变的历史 opening balance `0.14` CNY（`historical_spend_cny` + `total_stage_spend_cny`），移除旧 `current_actual_spend_cny`；`ingest_run_actual_cost` 在 ingest 处以 fail-closed `SUBCAP_EXCEEDED` 强制子上限。
+  - **F3（packet↔sealed-run 证据链绑定）**：`build_pair_packets_from_ingested` 成为 live packet 的唯一授权构造器，消费 ingested RunMetrics 与 frozen blind mapping；packet 携带 per-arm sealed idea `idea_sha256`（源自 sealed Evidence Chain）；`PairFacts` 要求 `packet_sha256`；reducer 在 verdict 绑定到不同 packet 时 fail closed `VERDICT_PACKET_MISMATCH`。
+  - **F5（原 reducer Gate 6 空转）**：以 recorded enforcement statement（`enforced_at: result_ingestion` + `ingested_gates` 列表）替代，确定性零容忍由 fail-closed result ingestion 结构性保证。
+  - **F6（verdict 判据语义）**：`VERDICT_SCHEMA_VERSION` 升 `comparison-pair-verdict-v1.1.0`；`domain_method_fit`（`challenger_better|tie|baseline_better|incomparable`）与 `unjustified_ml_intrusion`（`increased|unchanged|decreased|incomparable`）改为 pair-level 标量（在盲包上以 challenger 相对 baseline 判定），`rubric_floor` 保持 per-arm；Gate 3 计 improved = `challenger_better` ≥ 2、regressed = `baseline_better` = 0。
+  - **F7（死代码与记录漂移）**：移除未使用构造/死路径。
+  - **F10（selection 防伪造）**：selection seam 重算 canonical hashes，伪造 → `CANARY_HASH_FORGERY`。
+- 修复后全量测试 753 passed；Rollback 声明维持：修复全部落在 additive comparison boundary（`ai_scientist/ideation/comparison.py` + `tests/test_prompt_comparison.py`），生产 lifecycle 与 ticket 01 seam 不受影响。
