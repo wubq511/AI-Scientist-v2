@@ -2532,7 +2532,7 @@ def ingest_comparison_result(
 
     # 4. Evaluation Artifact coverage (VM-QUAL-01 semantics).
     coverage = _evaluation_coverage_for_run(workspace, run_id)
-    if coverage is None:
+    if not coverage:
         fail(
             "EVALUATION_ARTIFACT_MISSING",
             "The comparison run lacks a complete Evaluation Artifact",

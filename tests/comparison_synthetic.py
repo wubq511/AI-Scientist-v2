@@ -107,6 +107,15 @@ def finalize_content(name: str, paper_id: str) -> str:
     )
 
 
+def ungrounded_finalize_content(name: str) -> str:
+    """FinalizeIdea declaring a paper that was never retrieved (lying shape)."""
+    return (
+        "ACTION: FinalizeIdea\n"
+        f'ARGUMENTS: {{"idea": {json.dumps(idea_payload(name))}, '
+        '"grounding": ["unretrieved_hallucinated_paper"]}}'
+    )
+
+
 class SequencedTransport:
     """Stub transport serving scripted responses (duration-controlled)."""
 
@@ -405,6 +414,68 @@ def run_one_sealed_run(
     sealed = IdeationController(workspace, run_id, adapter=adapter).run()
     assert sealed["status"] == "sealed", sealed
     assert sealed["terminal_outcome"] == "success", sealed
+    return run_id
+
+
+def run_zero_idea_sealed_run(
+    workspace: Path,
+    helpers,
+    monkeypatch,
+    *,
+    case_id: str,
+    inputs: dict[str, str],
+    profile_id: str,
+    idea_name: str,
+    duration_ms: float = 30.0,
+) -> str:
+    """Admit -> execute -> seal one synthetic run that finalizes nothing.
+
+    The response script stays stable under the final-round convergence
+    contract: the last round's fixable violation receives the corrective
+    re-ask (an extra scripted response) and still refuses to finalize, so
+    the run seals success with zero finalized ideas on both contract sides.
+    """
+    from ai_scientist.ideation.controller import IdeationController
+    from ai_scientist.ideation.deepseek import DeepSeekAdapter, StubTransport
+    from ai_scientist.ideation.pricing import load_price_table
+
+    responses = [
+        _stub(SEARCH_CONTENT, "chatcmpl-zero-search-0", duration_ms=duration_ms),
+        _stub(SEARCH_CONTENT, "chatcmpl-zero-search-1", duration_ms=duration_ms),
+        _stub(
+            ungrounded_finalize_content(idea_name),
+            "chatcmpl-zero-lie-0",
+            duration_ms=duration_ms,
+        ),
+        _stub(
+            ungrounded_finalize_content(idea_name),
+            "chatcmpl-zero-lie-1",
+            duration_ms=duration_ms,
+        ),
+    ]
+    helpers._approve_cost(monkeypatch)
+    from ai_scientist.ideation.admission import NewRunRequest
+
+    request = NewRunRequest(
+        case_id=case_id,
+        workshop=inputs["workshop"],
+        workshop_sha256=inputs["workshop_sha256"],
+        corpus=inputs["corpus"],
+        corpus_sha256=inputs["corpus_sha256"],
+        max_num_generations=1,
+        num_reflections=3,
+        prompt_profile_id=profile_id,
+    )
+    result = helpers.run_new_run(workspace, request, execute=False)
+    assert result["status"] == "admitted", result
+    run_id = result["run_id"]
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=StubTransport(responses)
+    )
+    sealed = IdeationController(workspace, run_id, adapter=adapter).run()
+    assert sealed["status"] == "sealed", sealed
+    assert sealed["terminal_outcome"] == "success", sealed
+    assert sealed["idea_count"] == 0, sealed
     return run_id
 
 

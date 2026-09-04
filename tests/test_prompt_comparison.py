@@ -34,6 +34,7 @@ from ai_scientist.ideation.comparison import (
     COMPARISON_CLUSTERS,
     TargetSourceSnapshot,
     assert_single_variable_matrix,
+    build_comparison_commands,
     build_frozen_matrix,
     build_matrix_document,
     build_selection_approval,
@@ -1458,41 +1459,12 @@ def _synthetic_canary_identity(prepared, clusters) -> tuple[CanaryCase, ...]:
     return tuple(synthetic_cases)
 
 
-@pytest.fixture(scope="module")
-def ingested_env(
-    tmp_path_factory: Any,
-    helpers: Any,
-    synthetic_workspace: tuple[Any, Any],
-) -> dict[str, Any]:
-    """One full synthetic comparison envelope, prepared once per module.
+def _synthetic_matrix_parts(synthetic_workspace: tuple[Any, Any]) -> dict[str, Any]:
+    """The frozen 8-run matrix over the synthetic workspace identity.
 
-    Builds the 12-case identity, freezes matrix/mapping, seals all eight
-    runs against the real production lifecycle (admission -> controller ->
-    seal -> validate -> export -> evaluation), ingests them into metrics
-    and the spend ledger, and builds the pair packets from the ingested
-    sealed evidence (build_pair_packets_from_ingested, the only sanctioned
-    live packet builder). Tests share this envelope; verdicts, vaults, and
-    reveal documents stay per-test (write-once).
+    Shared by the ingested 8-run envelope and the zero-idea ingestion
+    fixtures: selection, freezing, and document building only — no runs.
     """
-    from ai_scientist.ideation.comparison import (
-        APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
-        CANARY_HARD_CAP_CNY,
-        TargetSourceSnapshot,
-        build_blind_mapping,
-        build_comparison_commands,
-        build_frozen_matrix,
-        build_matrix_document,
-        build_pair_packets_from_ingested,
-        build_selection_manifest,
-        ingest_comparison_result,
-        initialize_comparison_ledger,
-        select_comparison_cases,
-    )
-    from tests.comparison_synthetic import (
-        finish_sealed_run_pipeline,
-        run_one_sealed_run,
-    )
-
     workspace, prepared = synthetic_workspace
     clusters = list(COMPARISON_CLUSTERS)
     synthetic_cases = _synthetic_canary_identity(prepared, clusters)
@@ -1543,6 +1515,53 @@ def ingested_env(
     )
     commands = build_comparison_commands(runs, matrix_document=document)
     assert len(commands) == 8
+    return {
+        "workspace": workspace,
+        "prepared": prepared,
+        "selected": selected,
+        "manifest": manifest,
+        "runs": runs,
+        "pairs": pairs,
+        "document": document,
+    }
+
+
+@pytest.fixture(scope="module")
+def ingested_env(
+    tmp_path_factory: Any,
+    helpers: Any,
+    synthetic_workspace: tuple[Any, Any],
+) -> dict[str, Any]:
+    """One full synthetic comparison envelope, prepared once per module.
+
+    Builds the 12-case identity, freezes matrix/mapping, seals all eight
+    runs against the real production lifecycle (admission -> controller ->
+    seal -> validate -> export -> evaluation), ingests them into metrics
+    and the spend ledger, and builds the pair packets from the ingested
+    sealed evidence (build_pair_packets_from_ingested, the only sanctioned
+    live packet builder). Tests share this envelope; verdicts, vaults, and
+    reveal documents stay per-test (write-once).
+    """
+    from ai_scientist.ideation.comparison import (
+        CANARY_HARD_CAP_CNY,
+        build_blind_mapping,
+        build_pair_packets_from_ingested,
+        ingest_comparison_result,
+        initialize_comparison_ledger,
+    )
+    from tests.comparison_synthetic import (
+        finish_sealed_run_pipeline,
+        run_one_sealed_run,
+    )
+
+    parts = _synthetic_matrix_parts(synthetic_workspace)
+    workspace = parts["workspace"]
+    prepared = parts["prepared"]
+    runs = parts["runs"]
+    pairs = parts["pairs"]
+    manifest = parts["manifest"]
+    selected = parts["selected"]
+    document = parts["document"]
 
     by_case = {case_id: inputs for case_id, inputs in prepared}
     baseline_profile = cmp_mod.BASELINE_PROFILE_ID
@@ -1647,6 +1666,82 @@ def ingested_env(
         "baseline_profile": baseline_profile,
         "challenger_profile": challenger_profile,
     }
+
+
+@pytest.fixture(scope="module")
+def zero_idea_env(
+    tmp_path_factory: Any,
+    helpers: Any,
+    synthetic_workspace: tuple[Any, Any],
+) -> dict[str, Any]:
+    """A frozen matrix plus one sealed zero-idea run, exported and pinned.
+
+    The run seals success without a finalized idea and carries its
+    sanitized export but no Evaluation Artifact — the exact shape the
+    previously unreachable ingest coverage gate must reject.
+    """
+    from tests.comparison_synthetic import (
+        finish_sealed_run_pipeline,
+        run_zero_idea_sealed_run,
+    )
+
+    parts = _synthetic_matrix_parts(synthetic_workspace)
+    workspace = parts["workspace"]
+    prepared = parts["prepared"]
+    runs = parts["runs"]
+    document = parts["document"]
+    matrix_run = runs[0]
+    by_case = {case_id: inputs for case_id, inputs in prepared}
+    monkey = pytest.MonkeyPatch()
+    try:
+        run_id = run_zero_idea_sealed_run(
+            workspace,
+            helpers,
+            monkey,
+            case_id=matrix_run.case_id,
+            inputs=by_case[matrix_run.case_id],
+            profile_id=matrix_run.profile_id,
+            idea_name="zero_idea_probe",
+        )
+    finally:
+        monkey.undo()
+    finish_sealed_run_pipeline(workspace, helpers, run_id)
+    admission = json.loads(
+        (
+            workspace / "artifacts" / "ideation-runs" / run_id / "admission.json"
+        ).read_text(encoding="utf-8")
+    )
+    package_dir = tmp_path_factory.mktemp("zero-idea-pkg") / "pkg"
+    package_dir.mkdir()
+    cmp_mod.create_execution_code_pin(package_dir, commit=admission["code"]["commit"])
+    return {
+        "workspace": workspace,
+        "run_id": run_id,
+        "run": matrix_run,
+        "document": document,
+        "package_dir": package_dir,
+    }
+
+
+def test_ingest_fails_closed_on_zero_idea_run_without_evaluation_coverage(
+    zero_idea_env: dict[str, Any],
+) -> None:
+    """EVALUATION_ARTIFACT_MISSING must be reachable for zero-idea runs."""
+    env = zero_idea_env
+    run = env["run"]
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.ingest_comparison_result(
+            env["workspace"],
+            env["run_id"],
+            expected_run_index=run.run_index,
+            expected_arm_position=run.arm_position,
+            expected_pair_index=run.pair_index,
+            expected_case_id=run.case_id,
+            expected_profile_id=run.profile_id,
+            matrix_document=env["document"],
+            package_dir=env["package_dir"],
+        )
+    assert exc_info.value.code == "EVALUATION_ARTIFACT_MISSING"
 
 
 def _synthetic_facts(
