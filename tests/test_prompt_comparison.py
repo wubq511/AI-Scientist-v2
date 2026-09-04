@@ -11,8 +11,10 @@ Target identity or live-run artifacts.
 
 from __future__ import annotations
 
+import io
 import json
 import shlex
+import shutil
 import subprocess
 import sys
 from decimal import Decimal
@@ -2601,3 +2603,885 @@ def test_ingest_requires_the_execution_code_pin(
             package_dir=empty_dir,
         )
     assert exc_info.value.code == "EXECUTION_CODE_PIN_MISSING"
+
+
+# ==========================================================================
+# Slot replacement (Proposal 002 remediation, Layer 2): quarantine records,
+# forfeited-spend accounting, sequenced reservations, and pin supersede.
+# ==========================================================================
+
+ZERO_IDEA_RUN_REASON = "ZERO_FINALIZED_IDEA"
+
+
+def _write_synthetic_package(
+    package_dir: Path, document: dict[str, Any]
+) -> dict[str, Any]:
+    """Materialize a minimal frozen package (matrix + v1.3.0 ledger)."""
+    package_dir.mkdir(parents=True, exist_ok=True)
+    (package_dir / "run-matrix.json").write_bytes(canonical_json_bytes(document))
+    ledger = cmp_mod.initialize_comparison_ledger(
+        matrix_document=document,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
+    )
+    (package_dir / "spend-ledger.json").write_bytes(canonical_json_bytes(ledger))
+    return ledger
+
+
+def _read_package_ledger(package_dir: Path) -> dict[str, Any]:
+    return parse_json_bytes(
+        (package_dir / "spend-ledger.json").read_bytes(), label="spend ledger"
+    )
+
+
+@pytest.fixture()
+def quarantine_env(
+    tmp_path_factory: Any,
+    helpers: Any,
+    synthetic_workspace: tuple[Any, Any],
+) -> dict[str, Any]:
+    """One zero-idea sealed run mapped to frozen slot 1 with a reservation.
+
+    The package carries the matrix, the v1.3.0 ledger, the execution-code
+    pin at the run's admission commit, and slot 1's write-once reservation,
+    so quarantine and the replacement-reservation flow run against genuine
+    documents.
+    """
+    from tests.comparison_synthetic import (
+        finish_sealed_run_pipeline,
+        run_zero_idea_sealed_run,
+    )
+
+    parts = _synthetic_matrix_parts(synthetic_workspace)
+    workspace = parts["workspace"]
+    prepared = parts["prepared"]
+    runs = parts["runs"]
+    document = parts["document"]
+    matrix_run = runs[0]
+    by_case = {case_id: inputs for case_id, inputs in prepared}
+    monkey = pytest.MonkeyPatch()
+    try:
+        run_id = run_zero_idea_sealed_run(
+            workspace,
+            helpers,
+            monkey,
+            case_id=matrix_run.case_id,
+            inputs=by_case[matrix_run.case_id],
+            profile_id=matrix_run.profile_id,
+            idea_name="quarantine_probe",
+        )
+    finally:
+        monkey.undo()
+    finish_sealed_run_pipeline(workspace, helpers, run_id)
+    admission = json.loads(
+        (workspace / "artifacts/ideation-runs" / run_id / "admission.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    admission_commit = admission["code"]["commit"]
+    package_dir = tmp_path_factory.mktemp("quarantine-pkg") / "pkg"
+    _write_synthetic_package(package_dir, document)
+    cmp_mod.create_execution_code_pin(package_dir, commit=admission_commit)
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        workspace,
+        package_dir=package_dir,
+        expected_matrix_sha256=sha256_bytes(
+            (package_dir / "run-matrix.json").read_bytes()
+        ),
+        expected_reapproval_threshold_cny=Decimal("5.00"),
+        run_index=1,
+    )
+    reservation = cmp_mod.reserve_comparison_slot(
+        launch, execution_head_resolver=lambda _root: admission_commit
+    )
+    return {
+        "workspace": workspace,
+        "prepared": prepared,
+        "runs": runs,
+        "document": document,
+        "package_dir": package_dir,
+        "run_id": run_id,
+        "run": matrix_run,
+        "admission_commit": admission_commit,
+        "reservation": reservation,
+    }
+
+
+def _quarantine(env: dict[str, Any], run_id: str) -> dict[str, Any]:
+    return cmp_mod.quarantine_comparison_run(
+        env["workspace"],
+        run_id,
+        package_dir=env["package_dir"],
+        matrix_document=env["document"],
+    )
+
+
+def test_quarantine_records_zero_idea_run_and_forfeits_spend(
+    quarantine_env: dict[str, Any],
+) -> None:
+    """The zero-idea run gets a write-once quarantine record and forfeit entry."""
+    env = quarantine_env
+    result = _quarantine(env, env["run_id"])
+    record_path = Path(result["path"])
+    assert record_path == env["package_dir"] / "vault" / "quarantine" / "run-001.json"
+    assert record_path.is_file()
+    assert record_path.stat().st_mode & 0o777 == 0o600
+    assert result["sha256"] == sha256_bytes(record_path.read_bytes())
+    record = parse_json_bytes(record_path.read_bytes(), label="quarantine record")
+    assert record["schema_version"] == "comparison-run-quarantine-v1.0.0"
+    assert record["run_id"] == env["run_id"]
+    assert record["run_index"] == 1
+    assert record["sealed_outcome"] == "success"
+    assert record["reason"] == ZERO_IDEA_RUN_REASON
+    assert record["admission_commit"] == env["admission_commit"]
+    assert record["reservation_sha256"] == env["reservation"]["sha256"]
+    assert Decimal(record["actual_cost_cny"]) > 0
+    assert record["worst_case_bound_cny"] == "7.08"
+
+    ledger = _read_package_ledger(env["package_dir"])
+    assert ledger["schema_version"] == "comparison-spend-ledger-v1.3.0"
+    assert ledger["entries"] == []
+    assert len(ledger["forfeited_entries"]) == 1
+    forfeited = ledger["forfeited_entries"][0]
+    assert forfeited["run_id"] == env["run_id"]
+    assert forfeited["run_index"] == 1
+    assert forfeited["reason"] == ZERO_IDEA_RUN_REASON
+    assert forfeited["actual_cost_cny"] == record["actual_cost_cny"]
+    assert ledger["comparison_actual_spend_cny"] == "0.00"
+    assert ledger["forfeited_spend_cny"] == record["actual_cost_cny"]
+    expected_total = str(
+        cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY + Decimal(record["actual_cost_cny"])
+    )
+    assert ledger["total_stage_spend_cny"] == expected_total
+
+    # The quarantined run cannot be quarantined again.
+    with pytest.raises(IdeationInputError) as exc_info:
+        _quarantine(env, env["run_id"])
+    assert exc_info.value.code == "RUN_ALREADY_QUARANTINED"
+
+
+def test_quarantine_fails_closed_for_run_with_finalized_idea(
+    quarantine_env: dict[str, Any],
+    helpers: Any,
+    monkeypatch: Any,
+) -> None:
+    """A usable run with a finalized idea can never be quarantined."""
+    from tests.comparison_synthetic import run_one_sealed_run
+
+    env = quarantine_env
+    matrix_run = env["runs"][1]
+    by_case = {case_id: inputs for case_id, inputs in env["prepared"]}
+    run_id = run_one_sealed_run(
+        env["workspace"],
+        helpers,
+        monkeypatch,
+        case_id=matrix_run.case_id,
+        inputs=by_case[matrix_run.case_id],
+        profile_id=matrix_run.profile_id,
+        idea_name="usable_probe",
+    )
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.quarantine_comparison_run(
+            env["workspace"],
+            run_id,
+            package_dir=env["package_dir"],
+            matrix_document=env["document"],
+        )
+    assert exc_info.value.code == "QUARANTINE_REQUIRES_EMPTY_RUN"
+
+
+def test_quarantine_fails_closed_for_unsealed_run(
+    quarantine_env: dict[str, Any],
+    helpers: Any,
+    monkeypatch: Any,
+) -> None:
+    """An unsealed Run Suspension must reach a Terminal Outcome first."""
+    from ai_scientist.ideation.admission import NewRunRequest
+    from ai_scientist.perform_ideation_temp_free import run_new_run
+
+    env = quarantine_env
+    matrix_run = env["runs"][1]
+    by_case = {case_id: inputs for case_id, inputs in env["prepared"]}
+    inputs = by_case[matrix_run.case_id]
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    admitted = run_new_run(
+        env["workspace"],
+        NewRunRequest(
+            case_id=matrix_run.case_id,
+            workshop=inputs["workshop"],
+            workshop_sha256=inputs["workshop_sha256"],
+            corpus=inputs["corpus"],
+            corpus_sha256=inputs["corpus_sha256"],
+            max_num_generations=1,
+            num_reflections=3,
+            prompt_profile_id=matrix_run.profile_id,
+        ),
+        execute=False,
+    )
+    assert admitted["status"] == "admitted"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.quarantine_comparison_run(
+            env["workspace"],
+            admitted["run_id"],
+            package_dir=env["package_dir"],
+            matrix_document=env["document"],
+        )
+    assert exc_info.value.code == "RUN_NOT_SEALED"
+
+
+def test_quarantine_fails_closed_for_already_ingested_run(
+    quarantine_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """Ledgered results are immutable; quarantine is not a second exit."""
+    env = quarantine_env
+    package_copy = tmp_path / "ingested-pkg"
+    shutil.copytree(env["package_dir"], package_copy)
+    matrix_run = env["run"]
+    ledger = _read_package_ledger(package_copy)
+    ledger = cmp_mod.ingest_run_actual_cost(
+        ledger,
+        entry=cmp_mod.LedgerEntry(
+            run_index=1,
+            pair_index=matrix_run.pair_index,
+            case_id=matrix_run.case_id,
+            profile_id=matrix_run.profile_id,
+            run_id=env["run_id"],
+            status="success",
+            actual_cost_cny=Decimal("0.10"),
+            worst_case_bound_cny=Decimal("7.08"),
+            physical_attempt_count=3,
+        ),
+    )
+    (package_copy / "spend-ledger.json").write_bytes(canonical_json_bytes(ledger))
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.quarantine_comparison_run(
+            env["workspace"],
+            env["run_id"],
+            package_dir=package_copy,
+            matrix_document=env["document"],
+        )
+    assert exc_info.value.code == "RUN_ALREADY_INGESTED"
+
+
+def test_quarantine_fails_closed_for_unmapped_matrix_slot(
+    quarantine_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """A (case, arm) pair outside the frozen matrix maps to no slot."""
+    env = quarantine_env
+    without_slot = json.loads(json.dumps(env["document"]))
+    without_slot["runs"] = [
+        run for run in without_slot["runs"] if run["run_index"] != 1
+    ]
+    without_slot["planned_runs_count"] = 7
+    without_slot["matrix_sha256"] = cmp_mod.frozen_matrix_digest(without_slot)
+    package_copy = tmp_path / "unmapped-pkg"
+    _write_synthetic_package(package_copy, without_slot)
+    cmp_mod.create_execution_code_pin(package_copy, commit=env["admission_commit"])
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.quarantine_comparison_run(
+            env["workspace"],
+            env["run_id"],
+            package_dir=package_copy,
+            matrix_document=without_slot,
+        )
+    assert exc_info.value.code == "MATRIX_SLOT_UNMATCHED"
+
+
+def test_quarantine_fails_closed_for_unknown_epoch_commit(
+    quarantine_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """Only admitted-at-recorded-epoch runs are legitimate quarantine inputs."""
+    env = quarantine_env
+    package_copy = tmp_path / "other-epoch-pkg"
+    shutil.copytree(env["package_dir"], package_copy)
+    (package_copy / "execution-code-pin.json").unlink()
+    cmp_mod.create_execution_code_pin(package_copy, commit=EXECUTION_COMMIT_B)
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.quarantine_comparison_run(
+            env["workspace"],
+            env["run_id"],
+            package_dir=package_copy,
+            matrix_document=env["document"],
+        )
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISMATCH"
+
+
+def test_quarantine_epoch_membership_covers_superseded_pins(
+    quarantine_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """After a governed re-pin the old-epoch run can still be quarantined."""
+    env = quarantine_env
+    package_copy = tmp_path / "superseded-epoch-pkg"
+    shutil.copytree(env["package_dir"], package_copy)
+    cmp_mod.supersede_execution_code_pin(
+        package_copy,
+        new_commit=EXECUTION_COMMIT_B,
+        reason="Proposal 002 remediation Design-Epoch re-pin (Robert approved)",
+    )
+    result = cmp_mod.quarantine_comparison_run(
+        env["workspace"],
+        env["run_id"],
+        package_dir=package_copy,
+        matrix_document=env["document"],
+    )
+    record = parse_json_bytes(
+        Path(result["path"]).read_bytes(), label="quarantine record"
+    )
+    assert record["admission_commit"] == env["admission_commit"]
+
+
+def test_replacement_reservation_sequencing(
+    quarantine_env: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: Any,
+    helpers: Any,
+) -> None:
+    """Quarantine unlocks a sequenced replacement reservation; without it the slot stays locked."""
+    from tests.comparison_synthetic import run_zero_idea_sealed_run
+
+    env = quarantine_env
+
+    # A same-slot relaunch without a quarantine record is still blocked by
+    # the write-once reservation.
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        env["workspace"],
+        package_dir=env["package_dir"],
+        expected_matrix_sha256=sha256_bytes(
+            (env["package_dir"] / "run-matrix.json").read_bytes()
+        ),
+        expected_reapproval_threshold_cny=Decimal("5.00"),
+        run_index=1,
+    )
+    with pytest.raises(IdeationInputError) as exc_info:
+        _reserve(launch, commit=env["admission_commit"])
+    assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
+
+    _quarantine(env, env["run_id"])
+
+    # The replacement reservation is a new sequenced write-once document.
+    replacement = cmp_mod.reserve_comparison_slot(
+        launch,
+        execution_head_resolver=lambda _root: env["admission_commit"],
+    )
+    assert replacement["document"]["schema_version"] == (
+        "comparison-run-reservation-v1.2.0"
+    )
+    assert replacement["document"]["reservation_seq"] == 2
+    assert (
+        replacement["document"]["supersedes_reservation_sha256"]
+        == env["reservation"]["sha256"]
+    )
+    assert Path(replacement["path"]).name == "run-001-seq-2.json"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.reserve_comparison_slot(
+            launch,
+            execution_head_resolver=lambda _root: env["admission_commit"],
+        )
+    assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
+
+    # A third sequence requires a second quarantine covering the seq-2
+    # reservation: a fresh zero-idea replacement run fails the same way.
+    matrix_run = env["run"]
+    by_case = {case_id: inputs for case_id, inputs in env["prepared"]}
+    second_run_id = run_zero_idea_sealed_run(
+        env["workspace"],
+        helpers,
+        monkeypatch,
+        case_id=matrix_run.case_id,
+        inputs=by_case[matrix_run.case_id],
+        profile_id=matrix_run.profile_id,
+        idea_name="replacement_probe",
+    )
+    from tests.comparison_synthetic import finish_sealed_run_pipeline
+
+    finish_sealed_run_pipeline(env["workspace"], helpers, second_run_id)
+    second_quarantine = _quarantine(env, second_run_id)
+    assert Path(second_quarantine["path"]).name == "run-001-seq-2.json"
+    third = cmp_mod.reserve_comparison_slot(
+        launch,
+        execution_head_resolver=lambda _root: env["admission_commit"],
+    )
+    assert Path(third["path"]).name == "run-001-seq-3.json"
+    assert third["document"]["reservation_seq"] == 3
+    assert (
+        third["document"]["supersedes_reservation_sha256"]
+        == second_quarantine["document"]["reservation_sha256"]
+    )
+
+    # The slot-order gate is unchanged: slot 2 still cannot start before the
+    # replacement run ingests.
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.authorize_next_comparison_run(
+            _read_package_ledger(env["package_dir"]),
+            matrix_document=env["document"],
+            run_index=2,
+            next_run_worst_case_bound_cny=Decimal("7.08"),
+        )
+    assert exc_info.value.code == "PREVIOUS_SLOT_NOT_INGESTED"
+
+
+def test_ledger_v13_forfeited_accounting() -> None:
+    """Forfeited spend counts toward totals, the cap, and the reapproval gate."""
+    _runs, _pairs, document, _manifest = _matrix(_selected())
+    ledger = cmp_mod.initialize_comparison_ledger(
+        matrix_document=document,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
+    )
+    assert ledger["schema_version"] == "comparison-spend-ledger-v1.3.0"
+    assert ledger["forfeited_entries"] == []
+    assert ledger["forfeited_spend_cny"] == "0.00"
+
+    forfeited = ledger = cmp_mod.ingest_forfeited_comparison_cost(
+        ledger,
+        entry=cmp_mod.ForfeitedLedgerEntry(
+            run_index=1,
+            run_id="00000000-0000-4000-8000-0000000000f1",
+            actual_cost_cny=Decimal("0.10"),
+            worst_case_bound_cny=Decimal("7.08"),
+            physical_attempt_count=3,
+            reason=ZERO_IDEA_RUN_REASON,
+        ),
+    )
+    assert ledger["comparison_actual_spend_cny"] == "0.00"
+    assert ledger["forfeited_spend_cny"] == "0.10"
+    assert ledger["total_stage_spend_cny"] == "0.24"
+    assert ledger["status"] == "ingesting"
+
+    # The reapproval threshold counts forfeited spend.
+    at_threshold = cmp_mod.ingest_forfeited_comparison_cost(
+        forfeited,
+        entry=cmp_mod.ForfeitedLedgerEntry(
+            run_index=2,
+            run_id="00000000-0000-4000-8000-0000000000f2",
+            actual_cost_cny=Decimal("5.00"),
+            worst_case_bound_cny=Decimal("7.08"),
+            physical_attempt_count=2,
+            reason=ZERO_IDEA_RUN_REASON,
+        ),
+    )
+    assert at_threshold["status"] == "reapproval_required"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.authorize_next_comparison_run(
+            at_threshold,
+            matrix_document=document,
+            run_index=1,
+            next_run_worst_case_bound_cny=Decimal("7.08"),
+        )
+    assert exc_info.value.code == "PLAN_GATE_REAPPROVAL_REQUIRED"
+
+    # The hard cap counts forfeited spend.
+    capped = cmp_mod.ingest_forfeited_comparison_cost(
+        forfeited,
+        entry=cmp_mod.ForfeitedLedgerEntry(
+            run_index=2,
+            run_id="00000000-0000-4000-8000-0000000000f3",
+            actual_cost_cny=Decimal("29.90"),
+            worst_case_bound_cny=Decimal("7.08"),
+            physical_attempt_count=2,
+            reason=ZERO_IDEA_RUN_REASON,
+        ),
+    )
+    assert capped["status"] == "hard_cap_breached"
+
+
+def test_ledger_v13_rejects_drift_and_mixed_schema() -> None:
+    """Old ledgers and tampered forfeited accounting fail closed."""
+    _runs, _pairs, document, _manifest = _matrix(_selected())
+    ledger = cmp_mod.initialize_comparison_ledger(
+        matrix_document=document,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
+    )
+    ledger = cmp_mod.ingest_forfeited_comparison_cost(
+        ledger,
+        entry=cmp_mod.ForfeitedLedgerEntry(
+            run_index=1,
+            run_id="00000000-0000-4000-8000-0000000000d1",
+            actual_cost_cny=Decimal("0.10"),
+            worst_case_bound_cny=Decimal("7.08"),
+            physical_attempt_count=3,
+            reason=ZERO_IDEA_RUN_REASON,
+        ),
+    )
+
+    stale = dict(ledger)
+    stale["schema_version"] = "comparison-spend-ledger-v1.2.0"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod._validate_ledger_arithmetic(stale, matrix_document=document)
+    assert exc_info.value.code == "LEDGER_SCHEMA_DRIFT"
+
+    drifted = dict(ledger)
+    drifted["forfeited_spend_cny"] = "0.20"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod._validate_ledger_arithmetic(drifted, matrix_document=document)
+    assert exc_info.value.code == "LEDGER_ARITHMETIC_DRIFT"
+
+    total_drift = dict(ledger)
+    total_drift["total_stage_spend_cny"] = "0.30"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod._validate_ledger_arithmetic(total_drift, matrix_document=document)
+    assert exc_info.value.code == "LEDGER_ARITHMETIC_DRIFT"
+
+    duplicate_run_id = dict(ledger)
+    duplicate_run_id["entries"] = [
+        {
+            "actual_cost_cny": "0.10",
+            "case_id": document["runs"][1]["case_id"],
+            "pair_index": document["runs"][1]["pair_index"],
+            "physical_attempt_count": 3,
+            "profile_id": document["runs"][1]["prompt_profile_id"],
+            "run_id": "00000000-0000-4000-8000-0000000000d1",
+            "run_index": 2,
+            "status": "success",
+            "worst_case_bound_cny": "7.08",
+        }
+    ]
+    duplicate_run_id["ingested_runs_count"] = 1
+    duplicate_run_id["comparison_actual_spend_cny"] = "0.10"
+    duplicate_run_id["total_stage_spend_cny"] = "0.34"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod._validate_ledger_arithmetic(duplicate_run_id, matrix_document=document)
+    assert exc_info.value.code == "LEDGER_SLOT_DRIFT"
+
+
+def test_ledger_v13_slot_invariant_survives_forfeited_entries() -> None:
+    """A quarantined slot 1 can be re-run: run_index 1 appears in both lists."""
+    _runs, _pairs, document, _manifest = _matrix(_selected())
+    ledger = cmp_mod.initialize_comparison_ledger(
+        matrix_document=document,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
+    )
+    ledger = cmp_mod.ingest_forfeited_comparison_cost(
+        ledger,
+        entry=cmp_mod.ForfeitedLedgerEntry(
+            run_index=1,
+            run_id="00000000-0000-4000-8000-0000000000e1",
+            actual_cost_cny=Decimal("0.10"),
+            worst_case_bound_cny=Decimal("7.08"),
+            physical_attempt_count=3,
+            reason=ZERO_IDEA_RUN_REASON,
+        ),
+    )
+    slot_one_v2 = cmp_mod.ingest_run_actual_cost(
+        ledger,
+        entry=_entry(1, "0.12", "00000000-0000-4000-8000-0000000000e2"),
+    )
+    total, _threshold = cmp_mod._validate_ledger_arithmetic(
+        slot_one_v2, matrix_document=document
+    )
+    assert total == Decimal("0.36")
+    authorization = cmp_mod.authorize_next_comparison_run(
+        slot_one_v2,
+        matrix_document=document,
+        run_index=2,
+        next_run_worst_case_bound_cny=Decimal("7.08"),
+    )
+    assert authorization["current_total_stage_spend_cny"] == "0.36"
+
+
+def test_supersede_execution_code_pin_preserves_and_replaces(
+    tmp_path: Path,
+) -> None:
+    """The governed re-pin archives old bytes, links epochs, and creates the new pin."""
+    pkg_dir = tmp_path / "supersede-pkg"
+    pkg_dir.mkdir()
+    created = cmp_mod.create_execution_code_pin(pkg_dir, commit=EXECUTION_COMMIT_A)
+    old_bytes = (pkg_dir / "execution-code-pin.json").read_bytes()
+
+    record = cmp_mod.supersede_execution_code_pin(
+        pkg_dir,
+        new_commit=EXECUTION_COMMIT_B,
+        reason="Design-Epoch re-pin approved by Robert",
+    )
+    archived_path = (
+        pkg_dir / "superseded" / f"execution-code-pin-{EXECUTION_COMMIT_A}.json"
+    )
+    assert archived_path.is_file()
+    assert archived_path.read_bytes() == old_bytes
+    supersede_record = parse_json_bytes(
+        Path(record["record_path"]).read_bytes(), label="pin supersede record"
+    )
+    assert supersede_record["schema_version"] == (
+        "comparison-execution-code-pin-supersede-v1.0.0"
+    )
+    assert supersede_record["old_commit"] == EXECUTION_COMMIT_A
+    assert supersede_record["new_commit"] == EXECUTION_COMMIT_B
+    assert supersede_record["reason"] == "Design-Epoch re-pin approved by Robert"
+    assert record["old_sha256"] == created["sha256"]
+
+    new_pin = cmp_mod.load_execution_code_pin(pkg_dir)
+    assert new_pin["commit"] == EXECUTION_COMMIT_B
+
+    # A supersede to the same commit is a mistake and fails closed.
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.supersede_execution_code_pin(
+            pkg_dir,
+            new_commit=EXECUTION_COMMIT_B,
+            reason="same commit",
+        )
+    assert exc_info.value.code == "PIN_SUPERSEDE_SAME_COMMIT"
+
+    # A chained supersede gets its own write-once record.
+    cmp_mod.supersede_execution_code_pin(
+        pkg_dir,
+        new_commit=EXECUTION_COMMIT_A,
+        reason="second epoch",
+    )
+    chained = parse_json_bytes(
+        (pkg_dir / "pin-supersede-record-seq-2.json").read_bytes(),
+        label="chained supersede record",
+    )
+    assert chained["old_commit"] == EXECUTION_COMMIT_B
+    assert chained["new_commit"] == EXECUTION_COMMIT_A
+
+
+def test_ingest_after_supersede_still_rejects_old_epoch_runs(
+    ingested_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """Re-pinning never reopens ingestion for the old epoch; quarantine is the only exit."""
+    env = ingested_env
+    run = env["runs"][0]
+    run_id = env["run_ids"][(run.case_id, run.profile_id)]
+    admission_commit = json.loads(
+        (
+            env["workspace"] / "artifacts" / "ideation-runs" / run_id / "admission.json"
+        ).read_text(encoding="utf-8")
+    )["code"]["commit"]
+    pin_dir = tmp_path / "comparison-pkg"
+    pin_dir.mkdir()
+    cmp_mod.create_execution_code_pin(pin_dir, commit=admission_commit)
+    cmp_mod.supersede_execution_code_pin(
+        pin_dir,
+        new_commit=EXECUTION_COMMIT_B,
+        reason="Design-Epoch re-pin approved by Robert",
+    )
+    assert cmp_mod.load_execution_code_pin(pin_dir)["commit"] == EXECUTION_COMMIT_B
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.ingest_comparison_result(
+            env["workspace"],
+            run_id,
+            expected_run_index=run.run_index,
+            expected_arm_position=run.arm_position,
+            expected_pair_index=run.pair_index,
+            expected_case_id=run.case_id,
+            expected_profile_id=run.profile_id,
+            matrix_document=env["document"],
+            package_dir=pin_dir,
+        )
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISMATCH"
+
+
+def test_cli_slot_runner_preflight_survives_forfeited_spend(
+    tmp_path: Path,
+) -> None:
+    """CLI leg: after a forfeited slot-1 entry the frozen runner preflight still passes.
+
+    The runner only reaches its own reservation guard (clean tree) or the
+    clean-HEAD guard (dirty tree); both prove the v1.3.0 authorize path with
+    forfeited spend, and neither reaches exec.
+    """
+    pkg_dir = tmp_path / "comparison-pkg-cli"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    # Record the slot-1 forfeit directly in the frozen package ledger.
+    matrix = parse_json_bytes(
+        (pkg_dir / "run-matrix.json").read_bytes(), label="run matrix"
+    )
+    ledger = _read_package_ledger(pkg_dir)
+    slot_one = next(run for run in matrix["runs"] if run["run_index"] == 1)
+    ledger = cmp_mod.ingest_forfeited_comparison_cost(
+        ledger,
+        entry=cmp_mod.ForfeitedLedgerEntry(
+            run_index=1,
+            run_id="00000000-0000-4000-8000-0000000000c1",
+            actual_cost_cny=Decimal("0.10"),
+            worst_case_bound_cny=Decimal("7.08"),
+            physical_attempt_count=3,
+            reason=ZERO_IDEA_RUN_REASON,
+        ),
+    )
+    (pkg_dir / "spend-ledger.json").write_bytes(canonical_json_bytes(ledger))
+    # Pre-create the slot-1 reservation at the real repository HEAD so the
+    # runner stops at the reservation guard instead of exec'ing production.
+    real_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    _reserve(
+        cmp_mod.prepare_comparison_slot_launch(
+            REPO_ROOT,
+            **_slot_prepare_kwargs(pkg_dir, 1),
+        ),
+        commit=real_head,
+    )
+    completed = subprocess.run(
+        _slot_runner_argv(pkg_dir, 1),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2
+    code = json.loads(completed.stderr)["code"]
+    assert code in {"COMPARISON_SLOT_ALREADY_RESERVED", "DIRTY_WORKTREE"}
+    assert completed.stdout == b""
+
+
+def test_synthetic_matrix_survives_quarantine_and_replacement(
+    tmp_path_factory: Any,
+    helpers: Any,
+    synthetic_workspace: tuple[Any, Any],
+) -> None:
+    """E2E: slot 1 zero-idea -> quarantine -> replacement run -> full reduction."""
+    from ai_scientist.ideation.comparison import (
+        build_blind_mapping,
+        build_pair_packets_from_ingested,
+        ingest_comparison_result,
+        initialize_comparison_ledger,
+    )
+    from tests.comparison_synthetic import (
+        finish_sealed_run_pipeline,
+        run_one_sealed_run,
+        run_zero_idea_sealed_run,
+    )
+
+    parts = _synthetic_matrix_parts(synthetic_workspace)
+    workspace = parts["workspace"]
+    prepared = parts["prepared"]
+    runs = parts["runs"]
+    document = parts["document"]
+    by_case = {case_id: inputs for case_id, inputs in prepared}
+    baseline_profile = cmp_mod.BASELINE_PROFILE_ID
+    challenger_profile = cmp_mod.CHALLENGER_PROFILE_ID
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        # Slot 1 executes first and produces nothing: the quarantine shape.
+        forfeited_run_id = run_zero_idea_sealed_run(
+            workspace,
+            helpers,
+            monkey,
+            case_id=runs[0].case_id,
+            inputs=by_case[runs[0].case_id],
+            profile_id=runs[0].profile_id,
+            idea_name="e2e_forfeited",
+        )
+        finish_sealed_run_pipeline(workspace, helpers, forfeited_run_id)
+        # The replacement run for slot 1 and every later slot's arm run.
+        run_ids: dict[tuple[str, str], str] = {}
+        for run in runs:
+            key = (run.case_id, run.profile_id)
+            if key in run_ids:
+                continue
+            run_ids[key] = run_one_sealed_run(
+                workspace,
+                helpers,
+                monkey,
+                case_id=run.case_id,
+                inputs=by_case[run.case_id],
+                profile_id=run.profile_id,
+                idea_name="e2e_idea_"
+                + ("baseline" if run.profile_id == baseline_profile else "challenger"),
+            )
+            finish_sealed_run_pipeline(workspace, helpers, run_ids[key])
+    finally:
+        monkey.undo()
+
+    package_dir = tmp_path_factory.mktemp("e2e-quarantine-pkg") / "pkg"
+    ledger = _write_synthetic_package(package_dir, document)
+    admission_commit = _single_admission_commit(
+        workspace, list(run_ids.values()) + [forfeited_run_id]
+    )
+    cmp_mod.create_execution_code_pin(package_dir, commit=admission_commit)
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        workspace,
+        package_dir=package_dir,
+        expected_matrix_sha256=sha256_bytes(
+            (package_dir / "run-matrix.json").read_bytes()
+        ),
+        expected_reapproval_threshold_cny=Decimal("5.00"),
+        run_index=1,
+    )
+    cmp_mod.reserve_comparison_slot(
+        launch, execution_head_resolver=lambda _root: admission_commit
+    )
+    # Quarantine the zero-idea slot-1 run: forfeited spend enters the ledger.
+    quarantine = cmp_mod.quarantine_comparison_run(
+        workspace,
+        forfeited_run_id,
+        package_dir=package_dir,
+        matrix_document=document,
+    )
+    ledger = quarantine["ledger"]
+    assert ledger["forfeited_spend_cny"] == quarantine["document"]["actual_cost_cny"]
+
+    # Ingest the replacement run into slot 1, then every other slot in order.
+    metrics_by_run: dict[str, cmp_mod.RunMetrics] = {}
+    for run in runs:
+        key = (run.case_id, run.profile_id)
+        run_id = run_ids[key]
+        metrics = ingest_comparison_result(
+            workspace,
+            run_id,
+            expected_run_index=run.run_index,
+            expected_arm_position=run.arm_position,
+            expected_pair_index=run.pair_index,
+            expected_case_id=run.case_id,
+            expected_profile_id=run.profile_id,
+            matrix_document=document,
+            package_dir=package_dir,
+        )
+        metrics_by_run[run_id] = metrics
+        ledger = cmp_mod.ingest_run_actual_cost(
+            ledger,
+            entry=cmp_mod.LedgerEntry(
+                run_index=run.run_index,
+                pair_index=run.pair_index,
+                case_id=run.case_id,
+                profile_id=run.profile_id,
+                run_id=run_id,
+                status="success",
+                actual_cost_cny=metrics.actual_cost_cny,
+                worst_case_bound_cny=Decimal("0.50"),
+                physical_attempt_count=metrics.physical_attempt_count,
+            ),
+        )
+    assert len(ledger["entries"]) == 8
+    assert len(ledger["forfeited_entries"]) == 1
+
+    mappings = build_blind_mapping(parts["pairs"], selection_manifest=parts["manifest"])
+    packets = build_pair_packets_from_ingested(
+        workspace,
+        matrix_document=document,
+        selection_manifest=parts["manifest"],
+        mappings=mappings,
+        metrics_by_run=metrics_by_run,
+    )
+    assert sorted(packets) == [1, 2, 3, 4]
+
+
+def _single_admission_commit(workspace: Path, run_ids: list[str]) -> str:
+    commits = set()
+    for run_id in run_ids:
+        admission = json.loads(
+            (
+                workspace / "artifacts" / "ideation-runs" / run_id / "admission.json"
+            ).read_text(encoding="utf-8")
+        )
+        commits.add(admission["code"]["commit"])
+    assert len(commits) == 1
+    return commits.pop()

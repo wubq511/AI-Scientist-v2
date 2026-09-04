@@ -124,7 +124,11 @@ COMPARISON_MATRIX_SCHEMA_VERSION = "comparison-run-matrix-v1.0.0"
 EXECUTION_CODE_PIN_SCHEMA_VERSION = "comparison-execution-code-pin-v1.0.0"
 SELECTION_MANIFEST_SCHEMA_VERSION = "comparison-selection-manifest-v1.0.0"
 SELECTION_APPROVAL_SCHEMA_VERSION = "comparison-selection-approval-v1.0.0"
-SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.2.0"
+SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.3.0"
+RUN_QUARANTINE_SCHEMA_VERSION = "comparison-run-quarantine-v1.0.0"
+RUN_RESERVATION_SCHEMA_VERSION = "comparison-run-reservation-v1.2.0"
+PIN_SUPERSEDE_SCHEMA_VERSION = "comparison-execution-code-pin-supersede-v1.0.0"
+QUARANTINE_REASON_ZERO_FINALIZED_IDEA = "ZERO_FINALIZED_IDEA"
 VERDICT_SCHEMA_VERSION = "comparison-pair-verdict-v1.1.0"
 REDUCTION_SCHEMA_VERSION = "comparison-reduction-v1.0.0"
 RUN_RESULT_SCHEMA_VERSION = "comparison-run-result-v1.0.0"
@@ -1687,6 +1691,24 @@ class LedgerEntry:
     physical_attempt_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class ForfeitedLedgerEntry:
+    """One quarantined zero-idea run's actual-cost record.
+
+    Forfeited entries live in their own ledger list: the sequential slot
+    invariant and per-slot result identity of `entries` stay intact, while
+    the spent money still counts toward the hard cap and the reapproval
+    threshold (spent money cannot launder budget).
+    """
+
+    run_index: int
+    run_id: str
+    actual_cost_cny: Decimal
+    worst_case_bound_cny: Decimal
+    physical_attempt_count: int
+    reason: str
+
+
 def initialize_comparison_ledger(
     *,
     matrix_document: dict[str, Any],
@@ -1698,7 +1720,7 @@ def initialize_comparison_ledger(
     The ledger's opening balance is the immutable historical Canary-stage
     spend (the documented 0.14 CNY live smoke, Proposal 002); the tracked
     comparison actual spend starts at 0.00 CNY, and the total stage spend
-    (historical + tracked) is kept current on every ingest.
+    (historical + tracked + forfeited) is kept current on every ingest.
     """
     threshold = plan_gate_reapproval_threshold_cny
     if not isinstance(threshold, Decimal) or threshold <= 0:
@@ -1723,6 +1745,8 @@ def initialize_comparison_ledger(
         "canary_hard_cap_cny": str(CANARY_HARD_CAP_CNY),
         "comparison_actual_spend_cny": str(LEDGER_INIT_SPEND_CNY),
         "entries": [],
+        "forfeited_entries": [],
+        "forfeited_spend_cny": str(LEDGER_INIT_SPEND_CNY),
         "historical_spend_cny": str(historical),
         "matrix_sha256": matrix_sha256(matrix_document),
         "plan_gate_reapproval_threshold_cny": str(threshold),
@@ -1802,6 +1826,43 @@ def _validate_ledger_arithmetic(
             or entry.get("profile_id") != matrix_run["prompt_profile_id"]
         ):
             fail("LEDGER_SLOT_DRIFT", "A ledger entry drifted from its matrix slot")
+    # Forfeited entries (quarantined zero-idea runs) form their own list with
+    # their own closed shape; run ids stay unique across both lists and a run
+    # index may appear at most once per list.
+    forfeited_entries = ledger.get("forfeited_entries")
+    if not isinstance(forfeited_entries, list):
+        fail("LEDGER_SCHEMA_DRIFT", "The forfeited entries field must be an array")
+    normalized_forfeited: list[dict[str, Any]] = []
+    for index, value in enumerate(forfeited_entries):
+        normalized_forfeited.append(
+            closed_object(
+                value,
+                label=f"ledger.forfeited_entries[{index}]",
+                keys={
+                    "actual_cost_cny",
+                    "physical_attempt_count",
+                    "reason",
+                    "run_id",
+                    "run_index",
+                    "worst_case_bound_cny",
+                },
+            )
+        )
+        if normalized_forfeited[-1]["reason"] != QUARANTINE_REASON_ZERO_FINALIZED_IDEA:
+            fail("LEDGER_SCHEMA_DRIFT", "A forfeited entry carries an unknown reason")
+        run_index = normalized_forfeited[-1]["run_index"]
+        if (
+            not isinstance(run_index, int)
+            or isinstance(run_index, bool)
+            or not 1 <= run_index <= matrix_document["planned_runs_count"]
+        ):
+            fail("LEDGER_SLOT_DRIFT", "A forfeited entry names no frozen matrix slot")
+    ingested_run_ids = {entry.get("run_id") for entry in normalized_entries}
+    forfeited_run_ids = {entry.get("run_id") for entry in normalized_forfeited}
+    if len(ingested_run_ids | forfeited_run_ids) != len(ingested_run_ids) + len(
+        forfeited_run_ids
+    ):
+        fail("LEDGER_SLOT_DRIFT", "Run ids must be unique across entry lists")
     historical = _money(
         ledger.get("historical_spend_cny"), label="historical_spend_cny"
     )
@@ -1814,10 +1875,20 @@ def _validate_ledger_arithmetic(
         (_ledger_entry_cost(entry) for entry in normalized_entries), Decimal("0.00")
     )
     tracked = _quantize_cny(tracked)
-    total = _quantize_cny(historical + tracked)
+    forfeited = sum(
+        (
+            _money(entry["actual_cost_cny"], label="forfeited actual_cost_cny")
+            for entry in normalized_forfeited
+        ),
+        Decimal("0.00"),
+    )
+    forfeited = _quantize_cny(forfeited)
+    total = _quantize_cny(historical + tracked + forfeited)
     if (
         ledger_current_spend(ledger) != tracked
         or ledger_total_stage_spend(ledger) != total
+        or _money(ledger.get("forfeited_spend_cny"), label="forfeited_spend_cny")
+        != forfeited
     ):
         fail("LEDGER_ARITHMETIC_DRIFT", "The spend ledger totals do not recompute")
     threshold = _money(
@@ -1832,7 +1903,7 @@ def _validate_ledger_arithmetic(
         else (
             "reapproval_required"
             if total >= threshold
-            else "ingesting" if entries else "initialized"
+            else "ingesting" if entries or normalized_forfeited else "initialized"
         )
     )
     if ledger.get("status") != expected_status:
@@ -1973,6 +2044,99 @@ def load_execution_code_pin(package_dir: Path) -> dict[str, Any]:
     return pin
 
 
+def _pin_supersede_records(package_dir: Path) -> list[dict[str, Any]]:
+    """All pin supersede records, ordered by their sequence suffix."""
+    records: list[tuple[int, Path, dict[str, Any]]] = []
+    for path in Path(package_dir).glob("pin-supersede-record*.json"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        match = re.fullmatch(r"pin-supersede-record(?:-seq-(\d+))?\.json", path.name)
+        if match is None:
+            continue
+        seq = int(match.group(1)) if match.group(1) is not None else 1
+        document = parse_json_bytes(path.read_bytes(), label="pin supersede record")
+        if not isinstance(document, dict):
+            fail("INVALID_SCHEMA", "The pin supersede record is not a JSON object")
+        records.append((seq, path, document))
+    return [document for _seq, _path, document in sorted(records, key=lambda r: r[0])]
+
+
+def superseded_execution_code_commits(package_dir: Path) -> set[str]:
+    """Historic pin commits recorded by governed supersede records."""
+    return {
+        record["old_commit"]
+        for record in _pin_supersede_records(package_dir)
+        if isinstance(record.get("old_commit"), str)
+    }
+
+
+def supersede_execution_code_pin(
+    package_dir: Path,
+    *,
+    new_commit: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Governed execution-code re-pin (Design-Epoch change, Robert approved).
+
+    The old pin bytes are archived verbatim under `superseded/` (evidence is
+    never deleted), a write-once supersede record links the old and new
+    commits, and the new pin is exclusive-created. Old-epoch sealed runs keep
+    failing ingestion after a supersede: quarantine is their only exit.
+    """
+    package = Path(package_dir)
+    if not _is_full_git_sha(new_commit):
+        fail("INVALID_SCHEMA", "The superseded-to commit must be a full Git SHA")
+    reason = nonempty_string(reason, label="supersede reason")
+    existing_pin = load_execution_code_pin(package)
+    old_commit = existing_pin["commit"]
+    if old_commit == new_commit:
+        fail(
+            "PIN_SUPERSEDE_SAME_COMMIT",
+            "The execution code pin already carries this commit",
+            commit=new_commit,
+        )
+    existing_records = _pin_supersede_records(package)
+    seq = len(existing_records) + 1
+    record_path = package / (
+        "pin-supersede-record.json"
+        if seq == 1
+        else f"pin-supersede-record-seq-{seq}.json"
+    )
+    archive_dir = package / "superseded"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"execution-code-pin-{old_commit}.json"
+    old_bytes = execution_code_pin_path(package).read_bytes()
+    old_sha = sha256_bytes(old_bytes)
+    _write_bytes_once(
+        archive_path,
+        old_bytes,
+        label="archived execution code pin",
+        exists_code="EXECUTION_CODE_PIN_ARCHIVE_EXISTS",
+    )
+    record_document = {
+        "new_commit": new_commit,
+        "old_commit": old_commit,
+        "reason": reason,
+        "schema_version": PIN_SUPERSEDE_SCHEMA_VERSION,
+        "superseded_at": _now(),
+    }
+    record_sha = _write_bytes_once(
+        record_path,
+        canonical_json_bytes(record_document),
+        label="pin supersede record",
+        exists_code="PIN_SUPERSEDE_RECORD_EXISTS",
+    )
+    execution_code_pin_path(package).unlink()
+    create_execution_code_pin(package, commit=new_commit)
+    return {
+        "new_pin": load_execution_code_pin(package),
+        "old_sha256": old_sha,
+        "record_document": record_document,
+        "record_path": str(record_path),
+        "record_sha256": record_sha,
+    }
+
+
 def prepare_comparison_slot_launch(
     workspace_root: Path,
     *,
@@ -2095,6 +2259,52 @@ def prepare_comparison_slot_launch(
     }
 
 
+def _slot_document_seq_matches(filename: str, run_index: int) -> int | None:
+    """Parse `run-NNN.json` / `run-NNN-seq-K.json` for one slot; else None."""
+    match = re.fullmatch(rf"run-{run_index:03d}(?:-seq-(\d+))?\.json", filename)
+    if match is None:
+        return None
+    return int(match.group(1)) if match.group(1) is not None else 1
+
+
+def _slot_reservation_documents(
+    package_dir: Path, run_index: int
+) -> list[tuple[int, Path]]:
+    """All reservation documents for one slot, ordered by sequence."""
+    reservations_dir = package_dir / "vault" / "run-reservations"
+    if not reservations_dir.is_dir():
+        return []
+    sequenced: list[tuple[int, Path]] = []
+    for path in reservations_dir.iterdir():
+        if not path.is_file() or path.is_symlink():
+            continue
+        seq = _slot_document_seq_matches(path.name, run_index)
+        if seq is not None:
+            sequenced.append((seq, path))
+    return sorted(sequenced)
+
+
+def _slot_quarantine_records(
+    package_dir: Path, run_index: int
+) -> list[tuple[int, Path, dict[str, Any]]]:
+    """All quarantine records for one slot, ordered by sequence."""
+    quarantine_dir = package_dir / "vault" / "quarantine"
+    if not quarantine_dir.is_dir():
+        return []
+    sequenced: list[tuple[int, Path, dict[str, Any]]] = []
+    for path in quarantine_dir.iterdir():
+        if not path.is_file() or path.is_symlink():
+            continue
+        seq = _slot_document_seq_matches(path.name, run_index)
+        if seq is None:
+            continue
+        document = parse_json_bytes(path.read_bytes(), label="quarantine record")
+        if not isinstance(document, dict):
+            fail("INVALID_SCHEMA", "The quarantine record is not a JSON object")
+        sequenced.append((seq, path, document))
+    return sorted(sequenced, key=lambda item: item[0])
+
+
 def reserve_comparison_slot(
     launch: dict[str, Any],
     *,
@@ -2114,6 +2324,11 @@ def reserve_comparison_slot(
     DIRTY_WORKTREE). Tests inject `execution_head_resolver`; the production
     runner never does. A commit drift fails closed before any reservation is
     written, and the stale pin is preserved as evidence.
+
+    A quarantined slot is re-reserved as a new sequenced write-once document
+    (`run-NNN-seq-K.json`) whose `supersedes_reservation_sha256` links the
+    predecessor; the sequence derives from the slot's quarantine records, so
+    an occupied slot still fails closed without a covering quarantine.
     """
     authorization = launch.get("authorization")
     command_argv = launch.get("command_argv")
@@ -2157,15 +2372,42 @@ def reserve_comparison_slot(
         create_execution_code_pin(package, commit=execution_commit)
     reservations_dir = package / "vault" / "run-reservations"
     reservations_dir.mkdir(parents=True, exist_ok=True)
-    reservation_path = reservations_dir / f"run-{run_index:03d}.json"
+    reservation_seq = 1 + len(_slot_quarantine_records(package, run_index))
+    supersedes_sha256: str | None = None
+    if reservation_seq >= 2:
+        reservations = _slot_reservation_documents(package, run_index)
+        if not reservations:
+            fail(
+                "COMPARISON_SLOT_ALREADY_RESERVED",
+                "The comparison slot has no reservation record to supersede",
+                run_index=run_index,
+            )
+        latest_seq, latest_path = reservations[-1]
+        latest_sha = sha256_bytes(latest_path.read_bytes())
+        records = _slot_quarantine_records(package, run_index)
+        latest_record = records[-1][2]
+        if latest_record.get("reservation_sha256") != latest_sha:
+            fail(
+                "COMPARISON_SLOT_ALREADY_RESERVED",
+                "The latest reservation is not covered by a quarantine record",
+                run_index=run_index,
+            )
+        supersedes_sha256 = latest_sha
+    reservation_path = reservations_dir / (
+        f"run-{run_index:03d}.json"
+        if reservation_seq == 1
+        else f"run-{run_index:03d}-seq-{reservation_seq}.json"
+    )
     document = {
         "authorization": dict(authorization),
         "command_argv_sha256": sha256_bytes(canonical_json_bytes(list(command_argv))),
         "execution_code_commit": execution_commit,
         "price_table_sha256": launch.get("price_table_sha256"),
         "reserved_at": _now(),
+        "reservation_seq": reservation_seq,
         "run_index": run_index,
-        "schema_version": "comparison-run-reservation-v1.1.0",
+        "schema_version": RUN_RESERVATION_SCHEMA_VERSION,
+        "supersedes_reservation_sha256": supersedes_sha256,
     }
     data = canonical_json_bytes(document)
     digest = _write_bytes_once(
@@ -2254,6 +2496,281 @@ def ingest_run_actual_cost(
     else:
         updated["status"] = "ingesting"
     return updated
+
+
+def ingest_forfeited_comparison_cost(
+    ledger: dict[str, Any],
+    *,
+    entry: ForfeitedLedgerEntry,
+) -> dict[str, Any]:
+    """Append one quarantined run's forfeited actual cost.
+
+    Forfeited spend never touches `entries` (the sequential slot invariant
+    and per-slot result identity stay intact) but always counts toward the
+    30.00 CNY hard cap and the 5.00 CNY reapproval threshold: spent money
+    cannot launder budget. The returned status blocks future launches; the
+    hard cap itself is enforced by `authorize_next_comparison_run`.
+    """
+    if ledger.get("status") not in ("initialized", "ingesting"):
+        fail("LEDGER_CLOSED", "The ledger is not accepting run ingests")
+    if (
+        not isinstance(entry.actual_cost_cny, Decimal)
+        or entry.actual_cost_cny < 0
+        or not isinstance(entry.worst_case_bound_cny, Decimal)
+        or entry.worst_case_bound_cny <= 0
+    ):
+        fail("INVALID_BUDGET", "Ledger costs must be valid non-negative decimals")
+    if (
+        not isinstance(entry.physical_attempt_count, int)
+        or isinstance(entry.physical_attempt_count, bool)
+        or entry.physical_attempt_count < 0
+    ):
+        fail("INVALID_SCHEMA", "Physical attempt count must be non-negative")
+    if entry.reason != QUARANTINE_REASON_ZERO_FINALIZED_IDEA:
+        fail("INVALID_SCHEMA", "Forfeited entries carry the closed quarantine reason")
+    for run in ledger["entries"]:
+        if run["run_id"] == entry.run_id:
+            fail(
+                "LEDGER_DUPLICATE_RUN",
+                "The ledger already carries this run",
+                run_id=entry.run_id,
+            )
+    for run in ledger.get("forfeited_entries", []):
+        if run["run_id"] == entry.run_id:
+            fail(
+                "LEDGER_DUPLICATE_RUN",
+                "The ledger already carries this run",
+                run_id=entry.run_id,
+            )
+    threshold = _money(
+        ledger["plan_gate_reapproval_threshold_cny"],
+        label="plan_gate_reapproval_threshold_cny",
+    )
+    tracked = ledger_current_spend(ledger)
+    total = ledger_total_stage_spend(ledger)
+    forfeited_before = _money(
+        ledger.get("forfeited_spend_cny"), label="forfeited_spend_cny"
+    )
+    new_forfeited = _quantize_cny(forfeited_before + entry.actual_cost_cny)
+    new_total = _quantize_cny(total + entry.actual_cost_cny)
+    record = {
+        "actual_cost_cny": str(_quantize_cny(entry.actual_cost_cny)),
+        "physical_attempt_count": entry.physical_attempt_count,
+        "reason": entry.reason,
+        "run_id": entry.run_id,
+        "run_index": entry.run_index,
+        "worst_case_bound_cny": str(_quantize_cny(entry.worst_case_bound_cny)),
+    }
+    updated = dict(ledger)
+    updated["forfeited_entries"] = list(ledger.get("forfeited_entries", [])) + [record]
+    updated["forfeited_spend_cny"] = str(new_forfeited)
+    updated["total_stage_spend_cny"] = str(new_total)
+    if tracked == 0 and not ledger["entries"]:
+        updated["comparison_actual_spend_cny"] = ledger.get(
+            "comparison_actual_spend_cny", str(LEDGER_INIT_SPEND_CNY)
+        )
+    if new_total > CANARY_HARD_CAP_CNY:
+        updated["status"] = "hard_cap_breached"
+    elif new_total >= threshold:
+        updated["status"] = "reapproval_required"
+    else:
+        updated["status"] = "ingesting"
+    return updated
+
+
+def quarantine_comparison_run(
+    workspace_root: Path,
+    run_id: str,
+    *,
+    package_dir: Path,
+    matrix_document: dict[str, Any],
+) -> dict[str, Any]:
+    """Retire one sealed zero-idea run and unlock its matrix slot for a re-run.
+
+    Quarantine is the single legitimate exit for a run that sealed without a
+    finalized idea: a write-once record preserves the run's identity, sealed
+    outcome, derived actual cost, admission commit, covering reservation
+    hash, and the closed reason; its actual spend enters the ledger as a
+    forfeited entry that still counts toward the hard cap and the
+    reapproval threshold. Every precondition fails closed: the run must be
+    sealed, empty of finalized ideas, un-ingested, mapped to exactly one
+    frozen matrix slot by its (case, arm) identity, admitted at a recorded
+    code epoch, and covered by a reservation no other quarantine record
+    covers yet.
+    """
+    from .evidence import validate_evidence_chain
+
+    workspace = workspace_root.resolve(strict=True)
+    store = RunStore(workspace)
+    package = Path(package_dir)
+
+    seal_path = store.runs_root / run_id / "seal.json"
+    if seal_path.is_symlink() or not seal_path.is_file():
+        fail("RUN_NOT_SEALED", "Only a sealed run can be quarantined", run_id=run_id)
+    seal = parse_json_bytes(seal_path.read_bytes(), label="seal.json")
+    if not isinstance(seal, dict) or seal.get("terminal_outcome") not in (
+        "success",
+        "failed",
+    ):
+        fail(
+            "RUN_NOT_SEALED",
+            "Only a sealed run with a Terminal Outcome can be quarantined",
+            run_id=run_id,
+        )
+    if validate_evidence_chain(workspace, run_id, check_sealed=True).get("status") != (
+        "valid"
+    ):
+        fail(
+            "EVIDENCE_CHAIN_INVALID", "The quarantined run's Evidence Chain is invalid"
+        )
+
+    request, admission = _read_run_documents(store, run_id)
+    if _sealed_idea_count(seal) != 0:
+        fail(
+            "QUARANTINE_REQUIRES_EMPTY_RUN",
+            "Only a run without finalized ideas can be quarantined",
+            run_id=run_id,
+        )
+
+    # Map the run to its frozen slot by its (case, arm) identity.
+    request_case = request.get("case_id")
+    profile_field = validate_profile_field(
+        admission.get("prompt_profile"), label="admission.prompt_profile"
+    )
+    mapped = [
+        run
+        for run in matrix_document["runs"]
+        if run["case_id"] == request_case
+        and run["prompt_profile_id"] == profile_field["profile_id"]
+    ]
+    if len(mapped) != 1:
+        fail(
+            "MATRIX_SLOT_UNMATCHED",
+            "The quarantined run's (case, arm) identity maps to no unique "
+            "frozen matrix slot",
+            case_id=request_case,
+            profile_id=profile_field["profile_id"],
+            matches=len(mapped),
+        )
+    matrix_run = mapped[0]
+    run_index = matrix_run["run_index"]
+
+    ledger_path = package / "spend-ledger.json"
+    if not ledger_path.is_file():
+        fail("COMPARISON_PACKAGE_INCOMPLETE", "The comparison package lacks its ledger")
+    ledger = parse_json_bytes(ledger_path.read_bytes(), label="comparison spend ledger")
+    _validate_ledger_arithmetic(ledger, matrix_document=matrix_document)
+    for run in ledger["entries"]:
+        if run["run_id"] == run_id:
+            fail(
+                "RUN_ALREADY_INGESTED",
+                "The run is already ledgered and cannot be quarantined",
+                run_id=run_id,
+            )
+    for run in ledger.get("forfeited_entries", []):
+        if run["run_id"] == run_id:
+            fail(
+                "RUN_ALREADY_QUARANTINED",
+                "The run already has a quarantine record",
+                run_id=run_id,
+            )
+
+    # Provenance: the admission commit must belong to a recorded code epoch
+    # (the current pin or a governed superseded pin).
+    pin = load_execution_code_pin(package)
+    admission_code = admission.get("code", {})
+    admission_commit = (
+        admission_code.get("commit") if isinstance(admission_code, dict) else None
+    )
+    if admission_commit != pin["commit"] and (
+        admission_commit not in superseded_execution_code_commits(package)
+    ):
+        fail(
+            "EXECUTION_CODE_PIN_MISMATCH",
+            "The quarantined run's admission commit belongs to no recorded "
+            "code epoch",
+            expected=pin["commit"],
+            actual=admission_commit,
+        )
+
+    # The covering reservation: the slot's latest reservation document must
+    # not be covered by another quarantine record yet.
+    reservations = _slot_reservation_documents(package, run_index)
+    if not reservations:
+        fail(
+            "COMPARISON_SLOT_RESERVATION_MISSING",
+            "The quarantined slot has no reservation record",
+            run_index=run_index,
+        )
+    _latest_seq, latest_reservation_path = reservations[-1]
+    reservation_sha256 = sha256_bytes(latest_reservation_path.read_bytes())
+    reservation_document = parse_json_bytes(
+        latest_reservation_path.read_bytes(), label="comparison slot reservation"
+    )
+    for _seq, _path, record in _slot_quarantine_records(package, run_index):
+        if record.get("reservation_sha256") == reservation_sha256:
+            fail(
+                "COMPARISON_SLOT_ALREADY_QUARANTINED",
+                "The latest reservation is already covered by a quarantine record",
+                run_index=run_index,
+            )
+    authorization = reservation_document.get("authorization", {})
+    worst_case_bound_cny = authorization.get("next_run_worst_case_bound_cny")
+
+    derived = _sealed_run_metrics(store, run_id)
+    quarantine_seq = 1 + len(_slot_quarantine_records(package, run_index))
+    quarantine_dir = package / "vault" / "quarantine"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    record_path = quarantine_dir / (
+        f"run-{run_index:03d}.json"
+        if quarantine_seq == 1
+        else f"run-{run_index:03d}-seq-{quarantine_seq}.json"
+    )
+    document = {
+        "actual_cost_cny": str(derived["actual_cost_cny"]),
+        "admission_commit": admission_commit,
+        "case_id": matrix_run["case_id"],
+        "pair_index": matrix_run["pair_index"],
+        "physical_attempt_count": derived["physical_attempt_count"],
+        "profile_id": profile_field["profile_id"],
+        "quarantined_at": _now(),
+        "reason": QUARANTINE_REASON_ZERO_FINALIZED_IDEA,
+        "reservation_sha256": reservation_sha256,
+        "run_id": run_id,
+        "run_index": run_index,
+        "schema_version": RUN_QUARANTINE_SCHEMA_VERSION,
+        "sealed_outcome": seal.get("terminal_outcome"),
+        "worst_case_bound_cny": str(
+            _money(worst_case_bound_cny, label="reservation worst_case_bound_cny")
+        ),
+    }
+    digest = _write_bytes_once(
+        record_path,
+        canonical_json_bytes(document),
+        label=f"comparison slot {run_index} quarantine record",
+        exists_code="COMPARISON_SLOT_ALREADY_QUARANTINED",
+    )
+
+    updated = ingest_forfeited_comparison_cost(
+        ledger,
+        entry=ForfeitedLedgerEntry(
+            run_index=run_index,
+            run_id=run_id,
+            actual_cost_cny=derived["actual_cost_cny"],
+            worst_case_bound_cny=_money(
+                worst_case_bound_cny, label="reservation worst_case_bound_cny"
+            ),
+            physical_attempt_count=derived["physical_attempt_count"],
+            reason=QUARANTINE_REASON_ZERO_FINALIZED_IDEA,
+        ),
+    )
+    ledger_path.write_bytes(canonical_json_bytes(updated))
+    return {
+        "document": document,
+        "ledger": updated,
+        "path": str(record_path),
+        "sha256": digest,
+    }
 
 
 def plan_gate_approval_document(
