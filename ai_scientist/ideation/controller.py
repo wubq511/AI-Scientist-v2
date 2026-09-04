@@ -21,7 +21,7 @@ from pathlib import Path
 import re
 import signal
 import threading
-from typing import Any, Iterator, Sequence
+from typing import Any, Iterator, NamedTuple, Sequence
 
 from .canonical import (
     canonical_json_bytes,
@@ -538,6 +538,14 @@ class RoundResume:
     state: _GenerationState
     pending: PendingResponse | PendingReexecute | None
     final_round_correction: str | None = None
+
+
+class _FinalRoundCorrection(NamedTuple):
+    """The armed final-round correction of the generation in flight."""
+
+    operation_seq: int
+    feedback: str
+    round_prompt: str
 
 
 @dataclass(frozen=True)
@@ -1172,7 +1180,7 @@ class IdeationController:
         generation_retrieval_op_seqs = state.retrieval_op_seqs
         generation_finalized = state.finalized
 
-        final_round_correction: tuple[int, str, str] | None = None
+        final_round_correction: _FinalRoundCorrection | None = None
 
         def _record_fixable_error(
             *,
@@ -1210,10 +1218,14 @@ class IdeationController:
                     if correction_armed
                     else "model_fixable_error"
                 ),
-                attempt_seq=corrective_attempt if corrective_dispatch else 1,
+                attempt_seq=corrective_attempt,
             )
             if correction_armed:
-                final_round_correction = (model_op_seq, feedback, prompt_text)
+                final_round_correction = _FinalRoundCorrection(
+                    operation_seq=model_op_seq,
+                    feedback=feedback,
+                    round_prompt=prompt_text,
+                )
             return feedback
 
         def _report_model_result(round_result: ModelRoundResult) -> None:
@@ -1257,12 +1269,13 @@ class IdeationController:
             # A corrective dispatch (the extra iteration, a resumed corrective
             # re-ask, or a committed corrective response) records at the
             # corrective attempt's coordinates and never arms a new correction.
-            corrective_dispatch = correction_active or (
+            resumed_corrective = (
                 ref_round == self.num_reflections - 1
                 and ref_round == start_round
                 and round_resume is not None
                 and round_resume.final_round_correction is not None
             )
+            corrective_dispatch = correction_active or resumed_corrective
             corrective_attempt = 1
             pipeline_pos = {
                 "generation_index": gen_idx,
@@ -1272,30 +1285,29 @@ class IdeationController:
                 "reflection_index": dispatch_round,
             }
 
-            if ref_round == 0:
-                prompt_text = _render_generation_prompt(
-                    self.profile,
-                    workshop_description=self.workshop_description,
-                    prev_ideas_string=prev_ideas_string,
-                )
-            else:
-                prompt_text = _render_reflection_prompt(
-                    self.profile,
-                    current_round=ref_round + 1,
-                    last_tool_results=last_tool_results,
-                    num_reflections=self.num_reflections,
-                )
-            if (
-                ref_round == self.num_reflections - 1
-                and ref_round == start_round
-                and round_resume is not None
-                and round_resume.final_round_correction is not None
-            ):
-                # The resumed final-round call IS the corrective re-ask:
-                # restore its exact request bytes from the chain feedback.
-                prompt_text = prompt_text + _final_round_correction_suffix(
-                    round_resume.final_round_correction
-                )
+            prompt_text = ""
+            if not correction_active:
+                if ref_round == 0:
+                    prompt_text = _render_generation_prompt(
+                        self.profile,
+                        workshop_description=self.workshop_description,
+                        prev_ideas_string=prev_ideas_string,
+                    )
+                else:
+                    prompt_text = _render_reflection_prompt(
+                        self.profile,
+                        current_round=ref_round + 1,
+                        last_tool_results=last_tool_results,
+                        num_reflections=self.num_reflections,
+                    )
+                if resumed_corrective:
+                    # The resumed final-round call IS the corrective re-ask:
+                    # restore its exact request bytes from the chain feedback.
+                    assert round_resume is not None
+                    assert round_resume.final_round_correction is not None
+                    prompt_text = prompt_text + _final_round_correction_suffix(
+                        round_resume.final_round_correction
+                    )
 
             retrieval_reuse: tuple[int, int] | None = None
             if correction_active:
@@ -1452,10 +1464,13 @@ class IdeationController:
                 continue
 
             if action == "SearchLiterature":
-                if ref_round == self.num_reflections - 1 and not corrective_dispatch:
+                if corrective_dispatch or ref_round == self.num_reflections - 1:
                     # Final-round convergence: literature search is no longer
-                    # available on the last round; the corrective re-ask (one
-                    # extra attempt on this operation) must finalize instead.
+                    # available on (or after) the last round. The corrective
+                    # re-ask (one extra attempt on this operation) must
+                    # finalize instead; a corrective response that still
+                    # searches records the same violation without executing a
+                    # retrieval no round will ever consume.
                     last_tool_results = _record_fixable_error(
                         action="SearchLiterature",
                         error_code=FINAL_ROUND_FINALIZE_REQUIRED_CODE,

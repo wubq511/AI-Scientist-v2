@@ -489,7 +489,7 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
             ),
             30.0,
         ),
-        # Round 4: SearchLiterature succeeds!
+        # Round 4: SearchLiterature succeeds (satisfies the run-level backstop).
         TransportResponse(
             200,
             {"content-type": "application/json"},
@@ -499,15 +499,24 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
             ),
             30.0,
         ),
-        # Round 4 is the final round: its search violates the convergence
+        # Round 5 is the final round: its search violates the convergence
         # contract and receives one corrective re-ask, which searches again
-        # (still not converging; the generation ends budget-exhausted).
+        # (recorded without a retrieval; the generation ends budget-exhausted).
         TransportResponse(
             200,
             {"content-type": "application/json"},
             _make_response_bytes(
                 'ACTION: SearchLiterature\nARGUMENTS: {"query": "final refinement"}',
-                "r4c",
+                "r5",
+            ),
+            30.0,
+        ),
+        TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            _make_response_bytes(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "final refinement"}',
+                "r5c",
             ),
             30.0,
         ),
@@ -524,12 +533,12 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
         corpus=corpus_rel,
         corpus_sha256=corpus_sha,
         max_num_generations=1,
-        num_reflections=5,
+        num_reflections=6,
     )
 
     result = run_new_run(workspace, request, adapter=adapter, execute=True)
     assert result["status"] == "sealed"
-    # Round 4 was search, so 0 ideas finalized; but run completes and seals successfully
+    # No round finalized, so 0 ideas; but run completes and seals successfully
     assert result["terminal_outcome"] == "success"
     assert result["idea_count"] == 0
 
@@ -543,7 +552,7 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
     action_outcome_events = [
         e for e in events if e.get("event_type") == "action_outcome"
     ]
-    assert len(action_outcome_events) == 6
+    assert len(action_outcome_events) == 7
 
     # Verify rounds 0 to 3 produced model_fixable_error with minimal feedback
     expected_error_codes = [
@@ -569,15 +578,21 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
         assert artifact_path.is_file()
         assert artifact_path.read_text(encoding="utf-8") == fb
 
-    # Round 4 is the final round: the search is recorded as the closed
+    # Round 4 was a legitimate tool_result ...
+    assert action_outcome_events[4]["payload"]["outcome"] == "tool_result"
+    assert action_outcome_events[4]["payload"]["action"] == "SearchLiterature"
+    # ... and round 5 is the final round: the search is recorded as the closed
     # final_round_correction outcome and the corrective re-ask follows.
-    assert action_outcome_events[4]["payload"]["outcome"] == "final_round_correction"
+    assert action_outcome_events[5]["payload"]["outcome"] == "final_round_correction"
     assert (
-        action_outcome_events[4]["payload"]["error_code"]
+        action_outcome_events[5]["payload"]["error_code"]
         == "FINAL_ROUND_FINALIZE_REQUIRED"
     )
-    assert action_outcome_events[5]["payload"]["outcome"] == "tool_result"
-    assert action_outcome_events[5]["payload"]["action"] == "SearchLiterature"
+    assert action_outcome_events[6]["payload"]["outcome"] == "model_fixable_error"
+    assert (
+        action_outcome_events[6]["payload"]["error_code"]
+        == "FINAL_ROUND_FINALIZE_REQUIRED"
+    )
 
 
 # ==============================================================================
@@ -1168,12 +1183,17 @@ def test_final_round_correction_that_still_violates_budget_exhausts(
         for p in sorted((run_root / "events").glob("*.json"))
     ]
     action_outcomes = [e for e in events if e["event_type"] == "action_outcome"]
+    # The corrective search violates the same convergence contract and is
+    # recorded without executing a retrieval no round will ever consume.
     assert [e["payload"]["outcome"] for e in action_outcomes] == [
         "tool_result",
         "tool_result",
         "final_round_correction",
-        "tool_result",
+        "model_fixable_error",
     ]
+    assert (
+        action_outcomes[3]["payload"]["error_code"] == "FINAL_ROUND_FINALIZE_REQUIRED"
+    )
 
     # No third physical attempt: the final round's operation used exactly two.
     assert len(transport.sent_requests) == 4
