@@ -313,6 +313,33 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export.add_argument("--run-id", required=True)
 
+    # Evaluation entries: post-seal qualitative Evaluation Artifacts (ticket 12).
+    evaluation = subparsers.add_parser(
+        "evaluation",
+        help="Post-seal qualitative evaluation of finalized ideas (private).",
+    )
+    evaluation_actions = evaluation.add_subparsers(
+        dest="evaluation_action", required=True
+    )
+    ev_assemble = evaluation_actions.add_parser(
+        "assemble",
+        help="Assemble the private Evaluation Brief and draft skeleton.",
+    )
+    ev_assemble.add_argument("--run-id", required=True)
+    ev_assemble.add_argument("--idea-index", type=int, required=True)
+    ev_assemble.add_argument("--assembled-by", required=True)
+    ev_validate = evaluation_actions.add_parser(
+        "validate",
+        help="Validate an authored draft into an immutable Evaluation Artifact.",
+    )
+    ev_validate.add_argument("--run-id", required=True)
+    ev_validate.add_argument("--idea-index", type=int, required=True)
+    ev_validate.add_argument("--validated-by", required=True)
+    evaluation_actions.add_parser(
+        "list-coverage",
+        help="Read-only evaluation coverage over the seal inventory.",
+    )
+
     # Retained legacy baseline entry (expand-contract; removed by ticket 13).
     legacy = subparsers.add_parser(
         "legacy", help="Retained pre-fork baseline path (ticket 13 removes it)."
@@ -642,6 +669,99 @@ def _run_export(
     return 0
 
 
+def _run_evaluation_assemble(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Assemble the Evaluation Brief and draft skeleton: exit 0 assembled, 1 rejected."""
+    from pathlib import Path as _Path
+
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.evaluation import assemble_evaluation_brief
+
+    root = workspace_root or _Path.cwd()
+    try:
+        result = assemble_evaluation_brief(
+            root,
+            args.run_id,
+            args.idea_index,
+            assembled_by=args.assembled_by,
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "assemble_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_validate(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Validate an authored draft: exit 0 validated, 1 rejected (draft kept)."""
+    from pathlib import Path as _Path
+
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.evaluation import validate_evaluation_artifact
+
+    root = workspace_root or _Path.cwd()
+    try:
+        result = validate_evaluation_artifact(
+            root,
+            args.run_id,
+            args.idea_index,
+            validated_by=args.validated_by,
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "validation_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_list_coverage(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Read-only evaluation coverage over the seal inventory: exit 0 reported."""
+    from pathlib import Path as _Path
+
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.evaluation import list_evaluation_coverage
+
+    root = workspace_root or _Path.cwd()
+    try:
+        result = list_evaluation_coverage(root)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "error",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
 def _run_legacy(args: argparse.Namespace) -> int:
     # Create the LLM client
     client, client_model = create_client(args.model)
@@ -679,6 +799,13 @@ if __name__ == "__main__":
         raise SystemExit(_run_validate(_args))
     if _args.entry == "export":
         raise SystemExit(_run_export(_args))
+    if _args.entry == "evaluation":
+        if _args.evaluation_action == "assemble":
+            raise SystemExit(_run_evaluation_assemble(_args))
+        if _args.evaluation_action == "validate":
+            raise SystemExit(_run_evaluation_validate(_args))
+        if _args.evaluation_action == "list-coverage":
+            raise SystemExit(_run_evaluation_list_coverage(_args))
     if _args.entry == "legacy":
         raise SystemExit(_run_legacy(_args))
     # No subcommand: print the same help text and exit like --help.

@@ -34,6 +34,15 @@ CORPUS_POLICY_PATH = Path("ai_scientist/ideation/policies/reference-authority-v1
 CORPUS_POLICY_SHA256 = (
     "65b0d9aa5942eb164370fb6d7162fbd6b4a629488a6093e0e0ebfd44eb1e6a5f"
 )
+EVALUATION_ARTIFACT_SCHEMA_VERSION = "evaluation-artifact-v1.0.0"
+EVALUATION_RUBRIC_SCHEMA_VERSION = "idea-quality-rubric-schema-v1.0"
+EVALUATION_RUBRIC_POLICY_PATH = Path(
+    "ai_scientist/ideation/policies/idea-quality-rubric-v1.json"
+)
+EVALUATION_RUBRIC_POLICY_SHA256 = (
+    "3b1548d06060047ac29f759d8c5f3e46d0287d6593f3fd839ef80074ca0b3d8c"
+)
+EVALUATION_ROOT_RELPATH = Path("artifacts/evaluations")
 CORPUS_QUARANTINED_FIELDS = frozenset(
     {
         "targetPaperId",

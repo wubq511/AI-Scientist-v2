@@ -199,6 +199,9 @@ artifacts/ideation-inputs/
 # Private Ideation Run evidence (raw Evidence Chains)
 artifacts/ideation-runs/
 
+# Private post-seal Evaluation Artifacts (briefs, drafts, finalized versions)
+artifacts/evaluations/
+
 # final papers
 final_papers/
 
