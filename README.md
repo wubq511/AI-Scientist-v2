@@ -96,6 +96,21 @@ export S2_API_KEY="YOUR_S2_KEY_HERE"
 # export AWS_REGION_NAME="your-aws-region"
 ```
 
+For this fork's governed DeepSeek ideation path on macOS, keep the credential in
+the ignored project-root `.env` file. Run `scripts/setup-project-env` once to
+enter it without terminal echo; the wizard writes only `DEEPSEEK_API_KEY` and
+sets the file mode to `600`. Prefix later ideation commands with
+`scripts/with-project-env`, for example:
+
+```bash
+scripts/with-project-env python ai_scientist/perform_ideation_temp_free.py --help
+```
+
+The launcher parses `.env` as data rather than shell code, rejects other keys or
+unsafe permissions, and passes the credential only through the child process
+environment. Do not commit `.env` or paste its value into commands, logs, or
+chat.
+
 ## Generate Research Ideas
 
 Before running the full AI Scientist-v2 experiment pipeline, you first use the `ai_scientist/perform_ideation_temp_free.py` script to generate potential research ideas. This script uses an LLM to brainstorm and refine ideas based on a high-level topic description you provide, interacting with tools like Semantic Scholar to check for novelty.

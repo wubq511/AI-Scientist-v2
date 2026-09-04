@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Execute one command with the repo-local DeepSeek credential."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import stat
+import sys
+
+ENV_KEY = "DEEPSEEK_API_KEY"
+MAX_ENV_BYTES = 16 * 1024
+REQUIRED_MODE = 0o600
+
+
+class ConfigError(ValueError):
+    """The project credential file is absent or unsafe."""
+
+
+def _read_project_key(env_path: Path) -> str:
+    try:
+        path_stat = env_path.lstat()
+    except FileNotFoundError as exc:
+        raise ConfigError(
+            "project .env is missing; run scripts/setup-project-env first"
+        ) from exc
+    except OSError as exc:
+        raise ConfigError("project .env could not be inspected") from exc
+
+    if stat.S_ISLNK(path_stat.st_mode):
+        raise ConfigError("project .env must not be a symbolic link")
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+
+    try:
+        descriptor = os.open(env_path, flags)
+    except OSError as exc:
+        raise ConfigError("project .env could not be opened safely") from exc
+
+    try:
+        with os.fdopen(descriptor, "rb") as stream:
+            file_stat = os.fstat(stream.fileno())
+            if not stat.S_ISREG(file_stat.st_mode):
+                raise ConfigError("project .env must be a regular file")
+            if (path_stat.st_dev, path_stat.st_ino) != (
+                file_stat.st_dev,
+                file_stat.st_ino,
+            ):
+                raise ConfigError("project .env changed while it was being opened")
+            if hasattr(os, "geteuid") and file_stat.st_uid != os.geteuid():
+                raise ConfigError("project .env must be owned by the current user")
+
+            observed_mode = stat.S_IMODE(file_stat.st_mode)
+            if observed_mode != REQUIRED_MODE:
+                raise ConfigError(
+                    "project .env must have mode 600; " f"observed {observed_mode:03o}"
+                )
+            if file_stat.st_size > MAX_ENV_BYTES:
+                raise ConfigError("project .env is unexpectedly large")
+            payload = stream.read(MAX_ENV_BYTES + 1)
+    except ConfigError:
+        raise
+    except OSError as exc:
+        raise ConfigError("project .env could not be read safely") from exc
+
+    if len(payload) > MAX_ENV_BYTES:
+        raise ConfigError("project .env is unexpectedly large")
+    if b"\x00" in payload or b"\r" in payload:
+        raise ConfigError("project .env contains unsupported control characters")
+
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ConfigError("project .env must be UTF-8 text") from exc
+
+    value: str | None = None
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(f"{ENV_KEY}="):
+            raise ConfigError(
+                f"project .env contains an unsupported entry at line {line_number}"
+            )
+        if value is not None:
+            raise ConfigError(f"project .env repeats {ENV_KEY}")
+
+        candidate = line.removeprefix(f"{ENV_KEY}=")
+        if not candidate:
+            raise ConfigError(f"project .env contains an empty {ENV_KEY}")
+        if any(character.isspace() for character in candidate):
+            raise ConfigError(f"project .env contains whitespace in {ENV_KEY}")
+        if candidate[0] in "\"'" or candidate[-1] in "\"'":
+            raise ConfigError(f"project .env must store {ENV_KEY} without quotes")
+        value = candidate
+
+    if value is None:
+        raise ConfigError(f"project .env does not define {ENV_KEY}")
+    return value
+
+
+def main(argv: list[str]) -> int:
+    command = argv[1:]
+    if command[:1] == ["--"]:
+        command = command[1:]
+    if not command:
+        print(
+            "usage: scripts/with-project-env [--] COMMAND [ARG ...]",
+            file=sys.stderr,
+        )
+        return 2
+
+    env_path = Path(__file__).resolve().parents[1] / ".env"
+    try:
+        api_key = _read_project_key(env_path)
+    except ConfigError as exc:
+        print(f"with-project-env: {exc}", file=sys.stderr)
+        return 2
+
+    child_environment = os.environ.copy()
+    child_environment[ENV_KEY] = api_key
+    try:
+        os.execvpe(command[0], command, child_environment)
+    except OSError as exc:
+        detail = exc.strerror or "unknown operating-system error"
+        print(f"with-project-env: could not execute command: {detail}", file=sys.stderr)
+        return 126
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
