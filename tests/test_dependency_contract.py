@@ -6,13 +6,11 @@ EXACT_REQUIREMENT = re.compile(
     r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9][A-Za-z0-9._+-]*)"
 )
 
-# The ideation-only runtime import closure is pure standard library (ticket 13):
-# the canonical runtime contract intentionally pins no packages.
-EXPECTED_RUNTIME_PACKAGES = frozenset()
+# The canonical runtime contract pins httpx as the sole HTTP transport (ticket 01).
+EXPECTED_RUNTIME_PACKAGES = frozenset({"httpx"})
 EXPECTED_DEVELOPMENT_PACKAGES = frozenset(
     {
         "black",
-        "httpx",
         "pytest",
     }
 )

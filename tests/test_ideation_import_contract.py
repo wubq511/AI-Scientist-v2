@@ -40,9 +40,8 @@ EXPECTED_IMPORT_CLOSURE = ImportClosure(
             "ai_scientist.perform_ideation_temp_free",
         }
     ),
-    # Pure standard library after the legacy path contracted out of the entry
-    # closure (ticket 13); any new third-party import must update this set.
-    third_party_top_levels=frozenset(),
+    # httpx is the sole third-party package in the runtime closure (ticket 01).
+    third_party_top_levels=frozenset({"httpx"}),
     unresolved_internal_modules=frozenset(),
     dynamic_import_sites=frozenset(),
 )

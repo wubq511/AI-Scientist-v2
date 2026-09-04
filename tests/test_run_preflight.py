@@ -9,6 +9,8 @@ calls.
 
 from __future__ import annotations
 
+import argparse
+import io
 import json
 import os
 import shutil
@@ -330,20 +332,31 @@ def _commit_all(workspace: Path) -> None:
 
 def test_new_run_admits_after_all_nine_steps_and_writes_admission(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     workspace = _workspace(tmp_path)
     workshop_rel, workshop_sha = _approved_workshop_paths(workspace)
     corpus_rel, corpus_sha = _approved_corpus(workspace)
     _commit_all(workspace)
 
-    result = _run_new_run(
-        workspace,
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    from ai_scientist.perform_ideation_temp_free import _run_new_run as cli_run_new_run
+
+    args = argparse.Namespace(
+        case_id=CASE_ID,
         workshop=workshop_rel,
         workshop_sha256=workshop_sha,
         corpus=corpus_rel,
         corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=2,
+        entry="new-run",
     )
-    assert result.returncode == 0, result.stderr
+    result = cli_run_new_run(args, workspace_root=workspace, execute=False)
+    assert result == 0
 
     runs_root = workspace / "artifacts/ideation-runs"
     run_dirs = [child for child in runs_root.iterdir() if child.is_dir()]
