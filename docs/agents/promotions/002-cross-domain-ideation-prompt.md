@@ -31,6 +31,7 @@ created: 2026-09-04
   - `Genetics & Molecular Biology`: `case-5f3f2126efc376031caf6acf4d1d4c59`
   - `Health & Medicine`: `case-8c6ddd334df3bf058720ac8f14ce3db6`
 - **固定参数**：`reasoning_effort=high`、`max_tokens=32768`、`max_num_generations=1`、`num_reflections=3`、`model=deepseek-v4-pro`，retriever policy v1.0，rubric v1.0.0，其余 Run Specification 逐字段完全相同；
+- **执行代码 pin**：8 个 run 必须在同一 clean Git HEAD 下执行。首个 slot reservation 以 exclusive-create `0600` 写入 package 私有的 `execution-code-pin.json`；之后每个 slot 启动时要求当前 clean HEAD 等于 pin（dirty worktree 以 `DIRTY_WORKTREE` 拒绝），result ingestion 逐 run 比对 `admission.code.commit` 与 pin（`EXECUTION_CODE_PIN_MISMATCH` fail closed）。stale pin 永不静默删除；更换 pinned commit 需 Robert 显式批准新 Design Epoch；
 - **顺序与盲法**：2 对 baseline-first、2 对 challenger-first；2 对 A=baseline、2 对 A=challenger；映射在运行前 hash-frozen，Robert 写完所有可用 verdict 后才能揭盲；
 - **验证矩阵行**：VM-CONTRACT-COMPARE-01, VM-CONTRACT-COMPARE-02, VM-CONTRACT-COMPARE-03, VM-CONTRACT-COMPARE-04, VM-CONTRACT-018-02, VM-CONTRACT-019-01, VM-CONTRACT-020-02, VM-CONTRACT-026-02, VM-INTEGRATION-01, VM-REPLAY-02, VM-LEAKAGE-01, VM-LEAKAGE-02, VM-LEAKAGE-04, VM-ISOLATION-01, VM-ENV-01, VM-QUAL-01；
 - **环境与依赖锁定**：Python 3.13 参考栈，锁定 `requirements.txt` 与 `requirements-dev.txt`；
@@ -50,7 +51,7 @@ created: 2026-09-04
 2. **盲审胜负**：揭盲后 challenger 至少胜 3 对，baseline 胜 0 对；tie 不计胜，`incomparable` 使矩阵不完整。
 3. **Domain-method fit**：challenger 至少 2 对严格优于 baseline，且 4 对中没有任何一对更差。评审必须区分“合理采用 ML”与“无问题/证据依据的 ML intrusion”。
 4. **既有质量底线**：challenger 不得引入 `problem_space_match=mismatched`、`feasibility_soundness=unsound`、`grounding_synthesis=name_dropped`、contamination signal 或 leakage；任一出现自动拒绝。
-5. **Deterministic Regression Budget**：零容忍。profile schema/hash、Run Request/Admission、resume、replay、Evidence Chain、export、leakage、isolation、import/dependency 与 CLI 任一 baseline-pass/challenger-fail 均自动拒绝。
+5. **Deterministic Regression Budget**：零容忍。profile schema/hash、Run Request/Admission、resume、replay、Evidence Chain、export、leakage、isolation、import/dependency、CLI 与 execution-code pin（`admission.code.commit` 必须等于 pinned clean HEAD）任一 baseline-pass/challenger-fail 或 drift 均自动拒绝。
 6. **截断与异常**：challenger 不得新增 `finish_reason=length`、completion truncation、terminal failure、unresumable suspension、physical attempt 或仅 challenger 出现的异常模式。
 7. **成本与延迟**：challenger 实际总成本不得超过 baseline 的 2.0 倍；challenger 端到端中位延迟不得超过 baseline 的 2.0 倍；每个 live slot 必须通过 `current stage actual + 7.08 CNY <= 30.00 CNY` 的请求前硬上限 reservation。累计实际支出达到 `5.00 CNY` 时，下一 slot 必须重新取得 Plan Gate 批准；已逐 run 批准请求产生的阈值跨越被记录，不伪装成可事后撤销的硬限额。
 8. **Fail-closed 结果**：任何判据未通过均保持现有代码默认，但 035 和 Scale Gate 继续暂停；“challenger 未通过”不等于“已知目标错配 baseline 合格”。
@@ -65,6 +66,7 @@ created: 2026-09-04
 6. 盲包泄露 profile、执行顺序、成本、延迟或模型元数据；
 7. 任一 run 失败、挂起、截断或因预算停止，矩阵变为 inconclusive；
 8. 实际成本显著高于 smoke 外推，触发 `5.00 CNY` 重审批阈值，或使下一 run 的 `7.08 CNY` reservation 无法装入 `30.00 CNY` Canary 硬上限。
+9. 执行代码在矩阵期间漂移（跨 commit 运行或 dirty worktree 启动），把 runtime 变化混入单变量归因；由 execution-code pin 在 slot 启动与 ingestion 两处 fail closed 防护。
 
 ## 实验证据
 
@@ -80,12 +82,13 @@ created: 2026-09-04
 - **双盲平衡映射 (`blind-mapping.json`)**：`a605f3755b7bfeeb6497f6e27a9bc1e3f6f36822155497f1c9f19d85388f0a9e`
 - **初始花费账本 (`spend-ledger.json`)**：`56562175984e4a99a4eb734cb1fc6c88527afb1059bc31fc62da1b3093f35d3f`（`comparison-spend-ledger-v1.2.0`；含 0.14 CNY 历史 opening balance、5.00 CNY 重审批阈值与 30.00 CNY 硬上限）
 - **CLI 运行命令 (`commands.txt`)**：`3851ca37ed6fdc9fe2c634238d865693db4f3663859f9d1c6bcedc2b62664af6`（8 条命令均经项目 credential wrapper 进入 `scripts/run-prompt-comparison-slot`，并携带 frozen matrix file SHA-256 与 `5.00 CNY` threshold 外部 pin，不再绕过 aggregate preflight）
+- **执行代码 pin (`execution-code-pin.json`)**：付费期 runtime 产物，当前不存在；首个 slot reservation 时 exclusive-create（`0600`，`comparison-execution-code-pin-v1.0.0`），其 hash 在创建后纳入对账记录，不改动上列冻结物料。
 
 ### 代码与运行基准
 
-- **当前准备完成 Commit SHA**：`696176c9a9395601e2fcba23b02f3555aa46c179`（付费前 budget/slot guard 修复 commit；覆盖外部 matrix/threshold pin、immutable opening balance 与 write-once reservation）
+- **当前准备完成 Commit SHA**：`ac34ab773ae1f1882b89c8c30e7fb7cd87f2f7e9`（execution-code pin 修复 commit；覆盖首 slot write-once pin、后续 slot clean-HEAD 等值、ingestion `admission.code.commit` 比对与 stale pin 保留）。此前为 `696176c9a9395601e2fcba23b02f3555aa46c179`（付费前 budget/slot guard 修复）。
 - **依赖栈基准**：Python 3.13.2 reference stack, pinned dependencies.
-- **零网络验证**：`tests/test_prompt_comparison.py` 65 passed；Prompt Profile 相关聚焦集 97 passed；全量 suite 759 passed；真实私有 package 的越序 slot 在 reservation/provider 前以 `PREVIOUS_SLOT_NOT_INGESTED` 拒绝。新增 provider 调用 0 次，新增实际支出 0.00 CNY。
+- **零网络验证**：`tests/test_prompt_comparison.py` 72 passed；Prompt Profile 相关聚焦集 104 passed；全量 suite 766 passed；真实私有 package 的越序 slot 在 reservation/provider 前以 `PREVIOUS_SLOT_NOT_INGESTED` 拒绝，dirty worktree 下 slot 1 启动以 `DIRTY_WORKTREE` 拒绝，两次检查均未产生 pin/reservation 状态变化。新增 provider 调用 0 次，新增实际支出 0.00 CNY。
 
 ## Plan Gate 记录
 
@@ -96,6 +99,7 @@ created: 2026-09-04
   - 2/2 执行顺序平衡与 2/2 A/B 双盲映射；
   - 拟议累计实际支出重审批阈值 `5.00 CNY`：stage 总账当前为 `0.14 CNY`，距离下一次重审批触发点为 `4.86 CNY`；阈值不是硬上限，任何跨越都必须如实入账，并在下一 slot 前暂停；
   - Canary `30.00 CNY` 硬上限：当前剩余 `29.86 CNY`，每个 slot 前用当时实际总账加 `7.08 CNY` 峰值最坏上界做 reservation；exact `30.00` 可进入，`30.01` fail closed；同一 slot 在 exec 前写入 write-once `0600` reservation，重复/并发启动拒绝；
+  - 执行代码 pin：首个 slot reservation 在私有 package 写入 write-once `execution-code-pin.json`（记录批准当时的 clean Git HEAD）；之后 7 个 slot 与全部 8 次 ingestion 必须等于该 commit，任何 drift/dirty/missing 均 fail closed，stale pin 保留为证据；
   - 3 胜 0 负盲审胜负、domain-method fit 改善、ML intrusion 不增与 2.0× Regression Budget 门槛；
   - 声明：Plan Gate 审批仅批准矩阵级架构与重审批阈值，不替代每个 run 准入前的独立交互式费用确认，也不替代请求前的 30 CNY aggregate reservation。
 

@@ -51,3 +51,9 @@ blocked_by:
 - 新 `spend-ledger.json` 为 `comparison-spend-ledger-v1.2.0`，SHA-256 `56562175984e4a99a4eb734cb1fc6c88527afb1059bc31fc62da1b3093f35d3f`；现行 `commands.txt` SHA-256 `3851ca37ed6fdc9fe2c634238d865693db4f3663859f9d1c6bcedc2b62664af6`。selection manifest、selection approval、run matrix、blind mapping 四项 SHA-256 完全不变。
 - 首版 v1.2 self-pin-only `commands.txt`（SHA-256 `0cde44509078974fa43bd79414000f252645c293ff7dee53d8bb8e71558db905`）已原样归档到私有 `superseded/v1.2.0-self-pin-only-command/`；现行命令额外携带 run-matrix file SHA-256 与 5.00 CNY threshold 外部 pin，防止 matrix/ledger 协同改写绕过冻结合同。
 - 新命令路径固定为 project credential wrapper → `scripts/run-prompt-comparison-slot` → 请求前 matrix/ledger/slot/budget 校验 → exclusive-create `0600` reservation → 同进程 exec production `new-run`。测试验证越序、外部 pin/opening-balance 漂移与重复 reservation 均在 exec/network 前拒绝。
+
+## Execution-code pin 修正记录 (2026-09-04, post-close)
+
+- Originating session 确认 frozen matrix 缺少执行代码身份 pin，跨 commit 执行会破坏 one-major-variable 归因；Robert 批准有界修正后于 commit `ac34ab7` 落地。
+- 本 package 的六项冻结物料 SHA-256 全部不变；`execution-code-pin.json` 是付费期 runtime 产物（首个 slot reservation 时由 `reserve_comparison_slot` exclusive-create，`0600`，`comparison-execution-code-pin-v1.0.0`），当前不存在，其创建后 hash 应纳入对账记录。
+- 复测：越序 slot 2 仍以 `PREVIOUS_SLOT_NOT_INGESTED` 在 reservation/provider 前拒绝；dirty worktree 下 slot 1 prepare 以 `DIRTY_WORKTREE` 拒绝；两次检查均未在私有 package 产生 pin/reservation 状态变化，vault 仍为空，实际支出 0.00 CNY。
