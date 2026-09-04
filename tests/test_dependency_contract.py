@@ -6,14 +6,9 @@ EXACT_REQUIREMENT = re.compile(
     r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9][A-Za-z0-9._+-]*)"
 )
 
-EXPECTED_RUNTIME_PACKAGES = frozenset(
-    {
-        "anthropic",
-        "backoff",
-        "openai",
-        "requests",
-    }
-)
+# The ideation-only runtime import closure is pure standard library (ticket 13):
+# the canonical runtime contract intentionally pins no packages.
+EXPECTED_RUNTIME_PACKAGES = frozenset()
 EXPECTED_DEVELOPMENT_PACKAGES = frozenset(
     {
         "black",
@@ -23,6 +18,8 @@ EXPECTED_DEVELOPMENT_PACKAGES = frozenset(
 )
 EXPECTED_RETAINED_UPSTREAM_PACKAGES = frozenset(
     {
+        "anthropic",
+        "backoff",
         "boto3",
         "botocore",
         "coolname",
@@ -35,9 +32,11 @@ EXPECTED_RETAINED_UPSTREAM_PACKAGES = frozenset(
         "matplotlib",
         "numpy",
         "omegaconf",
+        "openai",
         "pymupdf4llm",
         "pypdf",
         "python-igraph",
+        "requests",
         "rich",
         "seaborn",
         "shutup",

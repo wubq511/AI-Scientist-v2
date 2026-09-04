@@ -37,22 +37,12 @@ EXPECTED_IMPORT_CLOSURE = ImportClosure(
             "ai_scientist.ideation.run_store",
             "ai_scientist.ideation.schema",
             "ai_scientist.ideation.text",
-            "ai_scientist.llm",
             "ai_scientist.perform_ideation_temp_free",
-            "ai_scientist.tools",
-            "ai_scientist.tools.base_tool",
-            "ai_scientist.tools.semantic_scholar",
-            "ai_scientist.utils.token_tracker",
         }
     ),
-    third_party_top_levels=frozenset(
-        {
-            "anthropic",
-            "backoff",
-            "openai",
-            "requests",
-        }
-    ),
+    # Pure standard library after the legacy path contracted out of the entry
+    # closure (ticket 13); any new third-party import must update this set.
+    third_party_top_levels=frozenset(),
     unresolved_internal_modules=frozenset(),
     dynamic_import_sites=frozenset(),
 )
