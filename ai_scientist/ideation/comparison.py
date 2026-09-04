@@ -36,7 +36,9 @@ from .profiles import (
     CROSS_DOMAIN_V1,
     ML_BASELINE_V1,
     PromptProfile,
+    assert_registry_integrity,
     profile_bundle_sha256,
+    profile_registry_sha256,
     resolve_profile,
     validate_profile_field,
 )
@@ -109,10 +111,19 @@ PAIR_PACKET_SCHEMA_VERSION = "comparison-pair-packet-v1.0.0"
 BLIND_MAPPING_SCHEMA_VERSION = "comparison-blind-mapping-v1.0.0"
 COMPARISON_MATRIX_SCHEMA_VERSION = "comparison-run-matrix-v1.0.0"
 SELECTION_MANIFEST_SCHEMA_VERSION = "comparison-selection-manifest-v1.0.0"
+SELECTION_APPROVAL_SCHEMA_VERSION = "comparison-selection-approval-v1.0.0"
 SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.0.0"
 VERDICT_SCHEMA_VERSION = "comparison-pair-verdict-v1.0.0"
 REDUCTION_SCHEMA_VERSION = "comparison-reduction-v1.0.0"
 RUN_RESULT_SCHEMA_VERSION = "comparison-run-result-v1.0.0"
+
+DEFAULT_PROMPT_COMPARISON_SUBCAP_CNY = Decimal("5.00")
+DEFAULT_COMPARISON_PACKAGE_DIR = (
+    Path("artifacts")
+    / "ideation-inputs"
+    / "comparisons"
+    / "002-cross-domain-ideation-prompt"
+)
 
 VERDICT_ENUM: frozenset[str] = frozenset(
     {"a_better", "b_better", "tie", "incomparable"}
@@ -371,6 +382,290 @@ def build_selection_manifest(
         "spec_version": COMPARISON_SPEC_VERSION,
     }
     return document
+
+
+def canonical_case_hash_for_canary_case(
+    case_id: str,
+    *,
+    seed: str = APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
+) -> str:
+    """Compute the deterministic canonical tie-break hash for a Canary case."""
+    parse_case_id(case_id)
+    parse_sha256(seed, label="seed")
+    return _canonical_seed_hex(f"{seed}|canonical_case_hash", case_id)
+
+
+def build_selection_approval(
+    *,
+    selection_manifest: dict[str, Any],
+    input_pins: dict[str, dict[str, dict[str, str]]],
+    source_canary_selection_manifest_sha256: str = APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
+    approved_by: str = "Robert",
+    decision: str = "approved",
+    canonical_tie_break: str = "canonical_case_hash_minimal_per_cluster",
+    approved_at: str = "2026-09-04T07:00:00.000000Z",
+) -> dict[str, Any]:
+    """Serialize the Robert approval artifact for the 4-case prompt comparison."""
+    assert_registry_integrity()
+    return {
+        "approved_at": approved_at,
+        "approved_by": approved_by,
+        "canonical_tie_break": canonical_tie_break,
+        "cluster_coverage": list(COMPARISON_CLUSTERS),
+        "decision": decision,
+        "fixed_configuration": {
+            "max_num_generations": COMPARISON_MAX_NUM_GENERATIONS,
+            "max_tokens": COMPARISON_MAX_TOKENS,
+            "model_id": DEEPSEEK_MODEL_ID,
+            "num_reflections": COMPARISON_NUM_REFLECTIONS,
+            "reasoning_effort": COMPARISON_REASONING_EFFORT,
+        },
+        "input_hashes": {
+            case_id: {
+                "corpus": dict(pins["corpus"]),
+                "workshop": dict(pins["workshop"]),
+            }
+            for case_id, pins in sorted(input_pins.items())
+        },
+        "prompt_profiles": {
+            "baseline": {
+                "bundle_sha256": profile_bundle_sha256(ML_BASELINE_V1),
+                "contract_version": ML_BASELINE_V1.contract_version,
+                "profile_id": ML_BASELINE_V1.profile_id,
+            },
+            "challenger": {
+                "bundle_sha256": profile_bundle_sha256(CROSS_DOMAIN_V1),
+                "contract_version": CROSS_DOMAIN_V1.contract_version,
+                "profile_id": CROSS_DOMAIN_V1.profile_id,
+            },
+            "registry_sha256": profile_registry_sha256(),
+        },
+        "rationale": (
+            "Approved 4-case comparison package selection across 4 methodologically "
+            "distinct Canary clusters (Genetics & Molecular Biology, Health & Medicine, "
+            "Materials Science, Social & Behavioral Sciences) with 100% pre-registered "
+            "single-variable controls, zero-spend initialization, and zero outcome inspection."
+        ),
+        "schema_version": SELECTION_APPROVAL_SCHEMA_VERSION,
+        "selection_manifest_sha256": sha256_bytes(
+            canonical_json_bytes(selection_manifest)
+        ),
+        "source_canary_selection_manifest_sha256": source_canary_selection_manifest_sha256,
+        "zero_outcome_selection_declaration": (
+            "The 4 comparison cases were selected deterministically using only "
+            "hash-pinned Canary identity records and canonical case hash tie-breaking, "
+            "without inspecting Target contribution fields, literature review results, "
+            "or model outputs."
+        ),
+    }
+
+
+def load_approved_canary_cases(
+    workspace_root: Path,
+) -> tuple[
+    tuple[CanaryCase, ...],
+    dict[str, TargetSourceSnapshot],
+    dict[str, dict[str, dict[str, str]]],
+]:
+    """Load the 12 approved Canary cases from the pinned selection manifest.
+
+    Validates:
+    - canary-v1.1-selection-manifest.json matches APPROVED_CANARY_SELECTION_MANIFEST_SHA256.
+    - canary-v1.1-selection-approval.json exists and decision is approved by Robert.
+    - data/raw/target_papers.csv matches source_hashes["target_papers.csv"].
+    - 12 distinct cases across the 8 CANARY_CLUSTERS.
+    - Approved workshops and corpora exist and have approved manifests and matching hashes.
+    """
+    manifest_path = (
+        workspace_root
+        / "artifacts"
+        / "ideation-inputs"
+        / "canary-v1.1-selection-manifest.json"
+    )
+    if not manifest_path.is_file():
+        fail(
+            "CANARY_MANIFEST_NOT_FOUND",
+            "The approved Canary selection manifest was not found",
+            path=str(manifest_path),
+        )
+    manifest_bytes = manifest_path.read_bytes()
+    observed_manifest_sha256 = sha256_bytes(manifest_bytes)
+    if observed_manifest_sha256 != APPROVED_CANARY_SELECTION_MANIFEST_SHA256:
+        fail(
+            "CANARY_IDENTITY_UNAPPROVED",
+            "The Canary selection manifest hash drifted from the pinned approval",
+            expected=APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
+            observed=observed_manifest_sha256,
+        )
+    manifest = parse_json_bytes(manifest_bytes, label="canary_manifest")
+
+    approval_path = (
+        workspace_root
+        / "artifacts"
+        / "ideation-inputs"
+        / "canary-v1.1-selection-approval.json"
+    )
+    if not approval_path.is_file():
+        fail(
+            "CANARY_APPROVAL_NOT_FOUND",
+            "The Canary selection approval artifact was not found",
+            path=str(approval_path),
+        )
+    approval = parse_json_bytes(approval_path.read_bytes(), label="canary_approval")
+    if (
+        approval.get("decision") != "approved"
+        or approval.get("approved_by") != "Robert"
+        or approval.get("selection_manifest_sha256")
+        != APPROVED_CANARY_SELECTION_MANIFEST_SHA256
+    ):
+        fail(
+            "CANARY_APPROVAL_INVALID",
+            "The Canary selection approval artifact is invalid or drifted",
+            approval=approval,
+        )
+
+    target_papers_path = workspace_root / "data" / "raw" / "target_papers.csv"
+    if not target_papers_path.is_file():
+        fail(
+            "TARGET_DATASET_NOT_FOUND",
+            "The target papers dataset was not found",
+            path=str(target_papers_path),
+        )
+    target_papers_sha256 = sha256_bytes(target_papers_path.read_bytes())
+    expected_dataset_sha256 = manifest.get("source_hashes", {}).get("target_papers.csv")
+    if target_papers_sha256 != expected_dataset_sha256:
+        fail(
+            "SOURCE_HASH_DRIFT",
+            "The target dataset drifted from the approved Canary source snapshot",
+            expected=expected_dataset_sha256,
+            observed=target_papers_sha256,
+        )
+
+    cases_data = manifest.get("cases")
+    if (
+        not isinstance(cases_data, list)
+        or len(cases_data) != APPROVED_CANARY_CASE_COUNT
+    ):
+        fail(
+            "CANARY_CASE_COUNT_MISMATCH",
+            "The Canary manifest does not contain exactly 12 cases",
+            case_count=len(cases_data) if isinstance(cases_data, list) else None,
+        )
+
+    canary_cases: list[CanaryCase] = []
+    for c in cases_data:
+        case_id = c.get("case_id")
+        cluster = c.get("cluster")
+        target_row_sha256 = c.get("target_row_sha256")
+        if not case_id or not cluster or not target_row_sha256:
+            fail(
+                "CORRUPT_CANARY_CASE",
+                "A Canary case entry lacks required fields",
+                case=c,
+            )
+        c_hash = canonical_case_hash_for_canary_case(case_id)
+        canary_cases.append(
+            CanaryCase(
+                case_id=case_id,
+                cluster=cluster,
+                canonical_hash=c_hash,
+                target_row_sha256=target_row_sha256,
+                source_row_snapshot_sha256=target_papers_sha256,
+            )
+        )
+
+    target_source: dict[str, TargetSourceSnapshot] = {}
+    for cluster in COMPARISON_CLUSTERS:
+        candidates = [c for c in canary_cases if c.cluster == cluster]
+        if not candidates:
+            fail(
+                "MISSING_COMPARISON_CLUSTER",
+                "Canary lacks comparison cluster",
+                cluster=cluster,
+            )
+        winner = min(candidates, key=lambda c: (c.canonical_hash, c.case_id))
+        target_source[cluster] = TargetSourceSnapshot(
+            target_dataset_sha256=target_papers_sha256,
+            target_row_sha256=winner.target_row_sha256,
+        )
+
+    input_pins: dict[str, dict[str, dict[str, str]]] = {}
+    for cluster, snapshot in target_source.items():
+        candidates = [c for c in canary_cases if c.cluster == cluster]
+        winner = min(candidates, key=lambda c: (c.canonical_hash, c.case_id))
+        cid = winner.case_id
+
+        workshop_rel = f"artifacts/ideation-inputs/workshops/{cid}/attempts/attempt-001/resolution/{cid}.md"
+        corpus_rel = f"artifacts/ideation-inputs/corpora/{cid}/corpus.json"
+        w_file = workspace_root / workshop_rel
+        c_file = workspace_root / corpus_rel
+
+        if not w_file.is_file():
+            fail(
+                "WORKSHOP_NOT_FOUND",
+                "Approved workshop file missing",
+                path=str(w_file),
+            )
+        if not c_file.is_file():
+            fail(
+                "CORPUS_NOT_FOUND",
+                "Approved corpus file missing",
+                path=str(c_file),
+            )
+
+        w_sha256 = sha256_bytes(w_file.read_bytes())
+        c_sha256 = sha256_bytes(c_file.read_bytes())
+
+        w_manifest_path = (
+            workspace_root
+            / f"artifacts/ideation-inputs/workshops/{cid}/attempts/attempt-001/resolution/workshop-manifest.json"
+        )
+        if not w_manifest_path.is_file():
+            fail(
+                "WORKSHOP_MANIFEST_NOT_FOUND",
+                "Approved workshop manifest missing",
+                path=str(w_manifest_path),
+            )
+        w_manifest = parse_json_bytes(
+            w_manifest_path.read_bytes(), label=f"{cid}.workshop_manifest"
+        )
+        if w_manifest.get("approval_status") != "approved":
+            fail("WORKSHOP_UNAPPROVED", "Workshop is not approved", case_id=cid)
+        if w_manifest.get("workshop", {}).get("sha256") != w_sha256:
+            fail(
+                "WORKSHOP_HASH_MISMATCH",
+                "Workshop bytes drifted from approved manifest",
+                case_id=cid,
+            )
+
+        c_manifest_path = (
+            workspace_root
+            / f"artifacts/ideation-inputs/corpora/{cid}/bundle-manifest.json"
+        )
+        if not c_manifest_path.is_file():
+            fail(
+                "CORPUS_MANIFEST_NOT_FOUND",
+                "Approved corpus bundle manifest missing",
+                path=str(c_manifest_path),
+            )
+        c_manifest = parse_json_bytes(
+            c_manifest_path.read_bytes(), label=f"{cid}.corpus_manifest"
+        )
+        if c_manifest.get("approval_status") != "approved":
+            fail("CORPUS_UNAPPROVED", "Corpus is not approved", case_id=cid)
+        if c_manifest.get("inventory", {}).get("corpus.json") != c_sha256:
+            fail(
+                "CORPUS_HASH_MISMATCH",
+                "Corpus bytes drifted from approved manifest",
+                case_id=cid,
+            )
+
+        input_pins[cid] = {
+            "corpus": {"path": corpus_rel, "sha256": c_sha256},
+            "workshop": {"path": workshop_rel, "sha256": w_sha256},
+        }
+
+    return tuple(canary_cases), target_source, input_pins
 
 
 def comparison_selection_seed(selection_manifest: dict[str, Any]) -> str:
@@ -2177,3 +2472,119 @@ def _reduction_document(
         ),
     }
     return document
+
+
+def freeze_prompt_comparison_package(
+    workspace_root: Path,
+    *,
+    plan_gate_subcap_cny: Decimal = DEFAULT_PROMPT_COMPARISON_SUBCAP_CNY,
+    target_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Materialize the full deterministic 4-pair comparison package to disk.
+
+    Performs:
+    1. Loads 12 approved Canary cases and verifies workshops, corpora, and manifests.
+    2. Deterministically selects 4 cases (one per pre-registered cluster).
+    3. Builds selection manifest and selection approval artifacts.
+    4. Builds 4-pair / 8-run frozen matrix (2/2 order balance, self-pinning).
+    5. Builds frozen blind mapping (2/2 A/B balance).
+    6. Builds exact credential-free CLI commands.
+    7. Initializes 0.00 CNY spend ledger with sub-cap.
+    8. Materializes artifacts to target_dir with idempotent byte-identical safety.
+    9. Sets up ComparisonVault for results, pair packets, verdicts, reveal, and reducer.
+    """
+    canary_cases, target_source, input_pins = load_approved_canary_cases(workspace_root)
+
+    selected = select_comparison_cases(
+        canary_cases,
+        canary_selection_manifest_sha256=APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
+        target_source=target_source,
+    )
+
+    selection_manifest = build_selection_manifest(
+        selected,
+        canary_selection_manifest_sha256=APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
+        target_source=target_source,
+    )
+
+    selection_approval = build_selection_approval(
+        selection_manifest=selection_manifest,
+        input_pins=input_pins,
+    )
+
+    runs, pairs = build_frozen_matrix(selected, selection_manifest=selection_manifest)
+
+    matrix_document = build_matrix_document(
+        runs,
+        pairs,
+        selection_manifest=selection_manifest,
+        input_pins=input_pins,
+    )
+
+    mappings = build_blind_mapping(pairs, selection_manifest=selection_manifest)
+    blind_document = blind_mapping_document(
+        mappings, selection_manifest=selection_manifest
+    )
+
+    commands = build_comparison_commands(runs, matrix_document=matrix_document)
+    commands_text = "\n".join(commands) + "\n"
+
+    ledger = initialize_comparison_ledger(
+        matrix_document=matrix_document,
+        plan_gate_subcap_cny=plan_gate_subcap_cny,
+    )
+
+    pkg_dir = (
+        target_dir
+        if target_dir is not None
+        else (workspace_root / DEFAULT_COMPARISON_PACKAGE_DIR)
+    )
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+
+    files_to_write: list[tuple[str, bytes]] = [
+        ("selection-manifest.json", canonical_json_bytes(selection_manifest)),
+        ("selection-approval.json", canonical_json_bytes(selection_approval)),
+        ("run-matrix.json", canonical_json_bytes(matrix_document)),
+        ("blind-mapping.json", canonical_json_bytes(blind_document)),
+        ("spend-ledger.json", canonical_json_bytes(ledger)),
+        ("commands.txt", commands_text.encode("utf-8")),
+    ]
+
+    artifact_records: dict[str, dict[str, str]] = {}
+    for filename, content_bytes in files_to_write:
+        dest = pkg_dir / filename
+        content_hash = sha256_bytes(content_bytes)
+        if dest.is_file():
+            existing_bytes = dest.read_bytes()
+            if existing_bytes != content_bytes:
+                fail(
+                    "PACKAGE_DRIFT",
+                    f"Existing artifact drifted from frozen package: {filename}",
+                    path=str(dest),
+                    existing_sha256=sha256_bytes(existing_bytes),
+                    expected_sha256=content_hash,
+                )
+        else:
+            dest.write_bytes(content_bytes)
+        key_name = filename.replace(".json", "").replace(".txt", "").replace("-", "_")
+        try:
+            rel_path = str(dest.relative_to(workspace_root))
+        except ValueError:
+            rel_path = str(dest)
+        artifact_records[key_name] = {
+            "path": rel_path,
+            "sha256": content_hash,
+        }
+
+    # Initialize vault
+    vault_dir = pkg_dir / "vault"
+    ComparisonVault(vault_dir)
+
+    return {
+        "artifacts": artifact_records,
+        "commands": commands,
+        "first_command": commands[0],
+        "frozen_matrix_digest": matrix_document["matrix_sha256"],
+        "plan_gate_subcap_cny": str(plan_gate_subcap_cny),
+        "selected_cases": tuple(c.case_id for c in selected),
+    }

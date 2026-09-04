@@ -19,25 +19,28 @@ created: 2026-09-04
 
 ## 假设
 
-- **可证伪假设**：在四个方法学差异显著的 Canary cases、相同输入、模型、`reasoning_effort=high`、`max_tokens=32768`、retriever、rubric 和运行预算下，`cross-domain-v1` 相比字节语义保持的 `ml-baseline-v1` 能显著提高 domain-method fit、减少不必要的 ML/benchmark framing，同时不降低 problem-space match、relative novelty、feasibility soundness、grounding synthesis、确定性可靠性或运行可恢复性。
-- **单主变量声明**：两臂唯一差异是 Prompt Profile。任何 Workshop/Corpus hash、模型参数、轮次预算、retrieval、action schema、rubric、执行环境或评审流程差异均使 pair 不合格。
-
-## 备选方案
-
-1. **只把 `top ML conferences` 改为 `top venues in the relevant field`**：仍以发表 venue 代替科研价值，并不能修复 AI researcher、conference abstract、algorithmic changes、metrics 与 feasibility 的连锁偏置，排除。
-2. **为八个 cluster 各写一套 prompt**：需要把辅助 cluster metadata 提升为模型控制输入，引入错误分类、八套维护分支和新的泄漏/漂移表面；在一个领域中立 prompt 尚未失败前不成立，排除。
-3. **立即替换 prompt、不做对照**：无法区分改善、泛化变差或过度纠偏，违反 Evidence Feedback Loop 与 Promotion Gate，排除。
-4. **先完成 `high` vs `max` 再修 prompt**：内部比较虽公平，但只会选择谁更擅长执行已知目标错配的任务，产生不可用于新 Design Epoch 的付费证据，排除。
+- **可证伪假设**：在四个方法学差异显著的 Canary cases、相同输入、模型、`reasoning_effort=high`、`max_tokens=32768`、retriever、rubric 和运行预算下，`cross-domain-v1` 相比字节语义保持的 `ml-baseline-v1` 能显著提高 domain-method fit、减少不必要的 ML/benchmark framing，同时不降低 problem-space match、relative novelty、feasibility soundness、retrieval grounding synthesis 与整体可用性。
 
 ## 对比方案
 
 - **Baseline**：`ml-baseline-v1`，保持当前生产 prompt 的 model-visible 语义；
 - **Challenger**：`cross-domain-v1`，采用规格中批准的 multidisciplinary role、field-appropriate methods、领域相称 feasibility、field-neutral Abstract 与 validation-plan 语义；
-- **Cases**：从已冻结 12-case Canary 中，对 Genetics & Molecular Biology、Health & Medicine、Social & Behavioral Sciences、Materials Science 各按 canonical case hash 取一例，共 4 对、8 个 Ideation Runs；
-- **固定参数**：`reasoning_effort=high`、`max_tokens=32768`、`max_num_generations=1`、`num_reflections=3`，其余 Run Specification 相同；
+- **Cases**：从已冻结 12-case Canary 中，对四个 pre-registered clusters 依据确定性 `canonical_case_hash` 仲裁各选出一例，共 4 对、8 个 Ideation Runs：
+  - `Materials Science`: `case-589dbcb35662706939b2f0d6dfd32800`
+  - `Social & Behavioral Sciences`: `case-2a08725ced2acab00c56dc9db7d4a7c3`
+  - `Genetics & Molecular Biology`: `case-5f3f2126efc376031caf6acf4d1d4c59`
+  - `Health & Medicine`: `case-8c6ddd334df3bf058720ac8f14ce3db6`
+- **固定参数**：`reasoning_effort=high`、`max_tokens=32768`、`max_num_generations=1`、`num_reflections=3`、`model=deepseek-v4-pro`，retriever policy v1.0，rubric v1.0.0，其余 Run Specification 逐字段完全相同；
 - **顺序与盲法**：2 对 baseline-first、2 对 challenger-first；2 对 A=baseline、2 对 A=challenger；映射在运行前 hash-frozen，Robert 写完所有可用 verdict 后才能揭盲；
-- **验证**：两臂均通过既有 Workshop/Corpus、adapter、retrieval、controller、Evidence Chain、resume、export、leakage、isolation 与 Evaluation Artifact 矩阵；新增 Prompt Profile schema/hash/legacy/resume 和 comparison reducer 契约测试；
-- **成本**：8 个 runs 的非权威预测为 1.12–2.24 CNY；比较必须在既有 30 CNY Canary 硬上限内另设 Plan Gate 实际支出子上限，并在 Plan Gate 前重新核对官方价格。每个 run 仍需单独交互批准。
+- **验证矩阵行**：VM-CONTRACT-COMPARE-01, VM-CONTRACT-COMPARE-02, VM-CONTRACT-COMPARE-03, VM-CONTRACT-COMPARE-04, VM-CONTRACT-018-02, VM-CONTRACT-019-01, VM-CONTRACT-020-02, VM-CONTRACT-026-02, VM-INTEGRATION-01, VM-REPLAY-02, VM-LEAKAGE-01, VM-LEAKAGE-02, VM-LEAKAGE-04, VM-ISOLATION-01, VM-ENV-01, VM-QUAL-01；
+- **环境与依赖锁定**：Python 3.13 参考栈，锁定 `requirements.txt` 与 `requirements-dev.txt`；
+- **成本与预算核算**：
+  - 8 个 runs 的非权威预测为 1.12–2.24 CNY（参考 live smoke 实测 0.14 CNY/run）；
+  - Canary 阶段总硬上限：30.00 CNY；
+  - 历史已发生实际支出：0.14 CNY（单 case smoke 产生）；
+  - 当前 Canary 阶段剩余预算：29.86 CNY；
+  - 拟议本提案 Plan Gate 实际支出子上限：`plan_gate_subcap_cny = 5.00 CNY`；
+  - 每个 run 仍受 7.08 CNY 单次准入最坏上限校验，且需 Robert 交互式逐 run 批准。
 
 ## Pre-registered 判据
 
@@ -63,11 +66,34 @@ created: 2026-09-04
 
 ## 实验证据
 
-*尚未启动。当前新增 provider 调用 0 次，Proposal 002 实际支出 0.00 CNY。先完成三个零网络准备 tickets；Robert 回到 originating session 后再决定 Plan Gate。*
+*尚未启动付费调用。当前新增 provider 调用 0 次，Proposal 002 实际支出 0.00 CNY。准备工作（Tickets 01/02/03）已全部完成，全套离线对比物料已冻结落盘，等待 Robert 在 originating session 审批 Plan Gate。*
+
+### 冻结私有对比物料清单 (SHA-256)
+
+所有对比物料均物化于被 `.gitignore` 保护的私有目录 `artifacts/ideation-inputs/comparisons/002-cross-domain-ideation-prompt/`：
+
+- **4-Case 选集清单 (`selection-manifest.json`)**：`b09488322ce934e1aca1ce3020791240a23c6f55a68eee2dc66a14c3076bc83f`
+- **选集批准记录 (`selection-approval.json`)**：`9944dc5e4d00fc6aaec1f541ccc6bb7481bca8a36e3634a3a6e63bcf49e893ba`
+- **8-Run 运行矩阵 (`run-matrix.json`)**：`c8a9217ffcf60718cc132ef04688bdf0bd3bd23758f0e54373993e1237d78ef4`（自验签 `matrix_sha256`: `c60d72748d8ab6aa06e712332e4bee2b4b7cf275b7f34ba58c210c09f5d963c3`）
+- **双盲平衡映射 (`blind-mapping.json`)**：`a605f3755b7bfeeb6497f6e27a9bc1e3f6f36822155497f1c9f19d85388f0a9e`
+- **初始花费账本 (`spend-ledger.json`)**：`6786cac6f7ca4c3d1c131d23646d6f1c0668d9b0d9e698b527ee637f2031a823`
+- **CLI 运行命令 (`commands.txt`)**：`be30d7d81a4aaf6e2b388c122a1d167a6258a50a289119e4cd7b73564ad2ce2a`
+
+### 代码与运行基准
+
+- **当前准备完成 Commit SHA**：`ce38917f6f04d414625d777c532a5d38b0a6454d`（及其在 Ticket 03 最终提交的 head commit）
+- **依赖栈基准**：Python 3.13.2 reference stack, pinned dependencies.
 
 ## Plan Gate 记录
 
-*待定。Robert 于 2026-09-04 批准了问题判断、领域中立方向、四方法学家族的小规模比较和先暂停 035 的顺序，但没有批准最终私有四例 manifest、当前价格证据、实际支出子上限或任何 provider request。*
+- **状态**：`proposed`（Plan Gate 候选已完备，等待审批）
+- **准备完成日期**：2026-09-04
+- **拟议审批内容**：
+  - 4-case selection manifest 与 8-run frozen matrix 散列；
+  - 2/2 执行顺序平衡与 2/2 A/B 双盲映射；
+  - 拟议实际支出子上限 `5.00 CNY`（30.00 CNY Canary 硬上限内，剩余 29.86 CNY 可支配）；
+  - 3 胜 0 负盲审胜负、domain-method fit 改善、ML intrusion 不增与 2.0× Regression Budget 门槛；
+  - 声明：Plan Gate 审批仅批准矩阵级架构与子上限，不替代每个 run 准入前的独立交互式费用确认。
 
 ## Promotion Gate 记录
 

@@ -1,7 +1,7 @@
 ---
 title: Qualify a Domain-Neutral Ideation Prompt
 label: wayfinder:map
-status: open
+status: closed
 ---
 
 # Qualify a Domain-Neutral Ideation Prompt
@@ -26,3 +26,4 @@ Ticket frontmatter is authoritative for status and blocking edges. This effort d
 <!-- Add one line per closed ticket. -->
 - Ticket 01 (closed 2026-09-04): 封闭、版本化 Prompt Profile seam 落地——`ml-baseline-v1`（字节级 golden 保持生产 baseline）与 `cross-domain-v1`（规格批准的领域中立 challenger）登记入 hash-pinned registry；`new-run` 强制 `--prompt-profile`，v1.1.0 Run Request/Admission pin id/contract-version/bundle-hash/registry-hash；fresh/resume/validation/export 全链同一 profile，legacy v1.0.0 恒解释为 baseline；生产 default 不变，零网络零费用完成。
 - Ticket 02 (closed 2026-09-04): 离线 comparison boundary 落地——新模块 `ai_scientist/ideation/comparison.py` 提供四 cluster canonical-hash 选择（pinned 已批准 Canary identity、拒绝 contribution 字段进入选择流）、4 对/8-run frozen matrix（2/2 顺序平衡 + 单变量断言 + self-pin）、frozen blind mapping（2/2 A 侧平衡 + `REVEAL_BLOCKED`/`VERDICT_AFTER_REVEAL` fail-closed reveal gate）、脱敏 pair packet（禁元数据扫描）、credential-free parser-contract 命令、append-only spend ledger（0.00 起、subcap/30 CNY、exact 接受 +0.01 拒、Plan Gate ≠ 逐 run）、fail-closed result ingestion（真实 sealed chain 校验 + Evaluation coverage）、write-once verdict（封闭四枚举）与 9 门槛 deterministic reducer；48 个测试（含 E2E：8 个真实 synthetic sealed runs → byte-identical promote reduction）；零网络、零 credential、零费用；最终私有 selection manifest 留给 ticket 03。
+- Ticket 03 (closed 2026-09-04): 付费运行就绪的 Canary comparison package 冻结——从已批准 12-case Canary 中按规格经确定性 tie-break 选定四跨领域 cases（Materials, Social, Genetics, Health）；在私有目录 `artifacts/ideation-inputs/comparisons/002-cross-domain-ideation-prompt/` 物化 6 项冻结 artifacts（清单、批准、8-run 矩阵、平衡双盲、0.00 CNY 花费账本、8 条生产 parser 校验通过命令）与空 vault；Proposal 002 补齐全部私有物料 SHA-256 并设为 `proposed` 等待 Plan Gate 审批；旧 035 标记 inactive 并暂停；保持零网络调用、零真实支出（0.00 CNY），安全悬挂并交回 Robert 决策。

@@ -34,10 +34,16 @@ from ai_scientist.ideation.comparison import (
     assert_single_variable_matrix,
     build_frozen_matrix,
     build_matrix_document,
+    build_selection_approval,
     build_selection_manifest,
+    canonical_case_hash_for_canary_case,
     comparison_selection_seed,
+    freeze_prompt_comparison_package,
+    load_approved_canary_cases,
     select_comparison_cases,
 )
+from ai_scientist.ideation.errors import IdeationInputError
+from ai_scientist.perform_ideation_temp_free import _build_parser
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -1633,3 +1639,116 @@ def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
         ledger=ledger,
     )
     assert canonical_json_bytes(reduction) == canonical_json_bytes(again)
+
+
+def test_load_approved_canary_cases_and_canonical_tie_break() -> None:
+    """Loading approved Canary cases verifies manifest, approvals, and inputs."""
+    canary_cases, target_source, input_pins = load_approved_canary_cases(REPO_ROOT)
+    assert len(canary_cases) == 12
+    assert {c.cluster for c in canary_cases} == cmp_mod.CANARY_CLUSTERS
+    assert set(target_source.keys()) == set(COMPARISON_CLUSTERS)
+    assert len(input_pins) == 4
+    for case_id, pins in input_pins.items():
+        assert "workshop" in pins and "corpus" in pins
+        assert pins["workshop"]["path"].endswith(f"{case_id}.md")
+        assert pins["corpus"]["path"].endswith("corpus.json")
+        assert len(pins["workshop"]["sha256"]) == 64
+        assert len(pins["corpus"]["sha256"]) == 64
+
+
+def test_canonical_case_hash_deterministic() -> None:
+    h1 = canonical_case_hash_for_canary_case("case-5f3f2126efc376031caf6acf4d1d4c59")
+    h2 = canonical_case_hash_for_canary_case("case-5f3f2126efc376031caf6acf4d1d4c59")
+    assert h1 == h2
+    assert len(h1) == 64
+    assert h1.islower()
+
+
+def test_freeze_prompt_comparison_package_reproducibility_and_drift(
+    tmp_path: Path,
+) -> None:
+    pkg_dir = tmp_path / "comparison-pkg"
+    result = freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_subcap_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    assert len(result["selected_cases"]) == 4
+    assert len(result["commands"]) == 8
+    assert result["plan_gate_subcap_cny"] == "5.00"
+
+    expected_files = [
+        "selection-manifest.json",
+        "selection-approval.json",
+        "run-matrix.json",
+        "blind-mapping.json",
+        "spend-ledger.json",
+        "commands.txt",
+    ]
+    for filename in expected_files:
+        p = pkg_dir / filename
+        assert p.is_file()
+        assert p.stat().st_size > 0
+
+    assert (pkg_dir / "vault").is_dir()
+
+    # Idempotent re-run produces identical package
+    result2 = freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_subcap_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    assert result["artifacts"] == result2["artifacts"]
+
+    # Tampering triggers PACKAGE_DRIFT
+    tampered_file = pkg_dir / "commands.txt"
+    tampered_file.write_bytes(b"tampered content")
+    with pytest.raises(IdeationInputError) as exc_info:
+        freeze_prompt_comparison_package(
+            REPO_ROOT,
+            plan_gate_subcap_cny=Decimal("5.00"),
+            target_dir=pkg_dir,
+        )
+    assert exc_info.value.code == "PACKAGE_DRIFT"
+
+
+def test_freeze_prompt_comparison_commands_parser_contract(
+    tmp_path: Path,
+) -> None:
+    pkg_dir = tmp_path / "comparison-pkg"
+    result = freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_subcap_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    commands = result["commands"]
+    assert len(commands) == 8
+
+    parser = _build_parser()
+    profile_counts: dict[str, int] = {}
+    for cmd in commands:
+        parts = shlex.split(cmd)
+        # Expected: python scripts/with-project-env -- python ai_scientist/perform_ideation_temp_free.py new-run ...
+        assert parts[0] == "python"
+        assert parts[1] == "scripts/with-project-env"
+        assert parts[2] == "--"
+        assert parts[3] == "python"
+        assert parts[4] == "ai_scientist/perform_ideation_temp_free.py"
+        assert parts[5] == "new-run"
+
+        # Production CLI parser checks
+        args = parser.parse_args(parts[5:])
+        profile_counts[args.prompt_profile] = (
+            profile_counts.get(args.prompt_profile, 0) + 1
+        )
+        assert args.max_num_generations == 1
+        assert args.num_reflections == 3
+        assert not hasattr(args, "reasoning_effort")
+        assert not hasattr(args, "max_tokens")
+
+        # Zero-credential check
+        assert "DEEPSEEK_API_KEY" not in cmd
+        assert "api_key" not in cmd.lower()
+        assert "--key" not in cmd
+
+    assert profile_counts == {"ml-baseline-v1": 4, "cross-domain-v1": 4}
