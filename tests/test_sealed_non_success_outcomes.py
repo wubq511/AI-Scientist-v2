@@ -873,6 +873,7 @@ def test_cli_seam_backstop_failure_seals_failed(
         case_id=CASE_ID,
         corpus=corpus_rel,
         corpus_sha256=corpus_sha,
+        prompt_profile="ml-baseline-v1",
         entry="new-run",
         max_num_generations=1,
         num_reflections=2,

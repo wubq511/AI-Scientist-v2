@@ -41,6 +41,12 @@ from .admission import (
 )
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
 from .contract import _now
+from .profiles import (
+    validate_profile_field as _validate_profile_field,
+)
+from .profiles import (
+    resolve_admission_profile as _resolve_admission_profile,
+)
 from .controller import IdeationController, rebuild_resume_plan
 from .errors import IdeationInputError, fail
 from .run_store import RunHandle, RunStore, _validate_run_id
@@ -61,6 +67,10 @@ def _request_from_document(document: dict[str, Any], run_id: str) -> NewRunReque
         fail("RUN_CORRUPT", "request.json belongs to another run")
     workshop = document.get("workshop") or {}
     corpus = document.get("corpus") or {}
+    profile_field = document.get("prompt_profile")
+    prompt_profile_id = (
+        profile_field.get("profile_id") if isinstance(profile_field, dict) else None
+    )
     request = NewRunRequest(
         case_id=document.get("case_id"),
         workshop=workshop.get("path"),
@@ -69,6 +79,7 @@ def _request_from_document(document: dict[str, Any], run_id: str) -> NewRunReque
         corpus_sha256=corpus.get("sha256"),
         max_num_generations=document.get("max_num_generations"),
         num_reflections=document.get("num_reflections"),
+        prompt_profile_id=prompt_profile_id or NewRunRequest.prompt_profile_id,
     )
     request.validate()
     return request
@@ -237,6 +248,12 @@ def resume_run(
             "admission.json content does not match admission hash pinned in event chain",
         )
 
+    # Prompt Profile pin re-verification (ticket 01): a resumed run rebuilds
+    # prompt bytes from its admitted profile only. New-schema admissions are
+    # re-validated field by field against the registry; legacy admissions are
+    # interpreted exclusively as ml-baseline-v1 and never upgraded.
+    _resolve_admission_profile(admission)
+
     # -- Admission pins re-verification --------------------------------------
     request_bytes = store.read_artifact(run_id, "request.json")
     if sha256_bytes(request_bytes) != admission["request_sha256"]:
@@ -244,9 +261,19 @@ def resume_run(
             "ADMISSION_TAMPERED",
             "request.json content does not match the admission pin",
         )
-    request = _request_from_document(
-        parse_json_bytes(request_bytes, label="request.json"), run_id
-    )
+    request_document = parse_json_bytes(request_bytes, label="request.json")
+    request_profile_field = request_document.get("prompt_profile")
+    if request_profile_field is not None:
+        _validate_profile_field(
+            request_profile_field, label="request.json.prompt_profile"
+        )
+        admission_field = admission.get("prompt_profile")
+        if admission_field is None or admission_field != request_profile_field:
+            fail(
+                "ADMISSION_TAMPERED",
+                "The request profile pin does not match the admission pin",
+            )
+    request = _request_from_document(request_document, run_id)
     workshop = _load_approved_workshop(workspace, request)
     if workshop != admission["workshop"]:
         fail(

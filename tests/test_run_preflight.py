@@ -180,6 +180,8 @@ def _run_new_run(
         overrides.get("max_num_generations", "1"),
         "--num-reflections",
         overrides.get("num_reflections", "2"),
+        "--prompt-profile",
+        overrides.get("prompt_profile", "ml-baseline-v1"),
     ]
     for flag, key in (
         ("--workshop", "workshop"),
@@ -353,6 +355,7 @@ def test_new_run_admits_after_all_nine_steps_and_writes_admission(
         corpus_sha256=corpus_sha,
         max_num_generations=1,
         num_reflections=2,
+        prompt_profile="ml-baseline-v1",
         entry="new-run",
     )
     result = cli_run_new_run(args, workspace_root=workspace, execute=False)
@@ -465,6 +468,8 @@ def test_new_run_rejects_dirty_worktree_before_admission(tmp_path: Path) -> None
             "1",
             "--num-reflections",
             "2",
+            "--prompt-profile",
+            "ml-baseline-v1",
         ],
         cwd=workspace,
         input="yes\n",
@@ -750,6 +755,8 @@ def test_new_run_fails_closed_in_a_non_interactive_environment(
             corpus_rel,
             "--corpus-sha256",
             corpus_sha,
+            "--prompt-profile",
+            "ml-baseline-v1",
         ],
         cwd=workspace,
         stdin=subprocess.DEVNULL,

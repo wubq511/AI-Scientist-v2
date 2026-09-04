@@ -24,3 +24,4 @@ Ticket frontmatter is authoritative for status and blocking edges. This effort d
 ## Decisions so far
 
 <!-- Add one line per closed ticket. -->
+- Ticket 01 (closed 2026-09-04): 封闭、版本化 Prompt Profile seam 落地——`ml-baseline-v1`（字节级 golden 保持生产 baseline）与 `cross-domain-v1`（规格批准的领域中立 challenger）登记入 hash-pinned registry；`new-run` 强制 `--prompt-profile`，v1.1.0 Run Request/Admission pin id/contract-version/bundle-hash/registry-hash；fresh/resume/validation/export 全链同一 profile，legacy v1.0.0 恒解释为 baseline；生产 default 不变，零网络零费用完成。

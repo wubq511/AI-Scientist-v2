@@ -3,11 +3,16 @@
 Implements ticket 11:
 - validate_evidence_chain: validates request, admission, events (1..N, hashes,
   epochs, artifact refs, linkage), seal, inventory, symlinks, staging emptiness.
-  Any corruption fails closed with RUN_CORRUPT (VM-CONTRACT-023-02).
+  Any corruption fails closed with RUN_CORRUPT (VM-CONTRACT-023-02). Since
+  ticket 01 (Prompt Profiles) the validator accepts both the new and legacy
+  request/admission schema versions and re-derives the resolved Prompt
+  Profile identity from each admission.
 - export_sanitized_evidence: positive allowlist construction of manifest.json
   and events.json under evidence/ideation-runs/<run_id>/, gated by schema,
   canonical bytes, forbidden key/path/credential/target scans, with atomic commit
-  and idempotency (VM-CONTRACT-023-03, VM-LEAKAGE-03).
+  and idempotency (VM-CONTRACT-023-03, VM-LEAKAGE-03). The sanitized manifest
+  exposes only the safe prompt-profile identity (resolved id, contract
+  version, bundle hash), never prompt text or templates.
 - replay_recorded_run: development-time offline replay verifier from recorded evidence.
 """
 
@@ -28,17 +33,22 @@ from .contract import (
     URL_PATTERN,
 )
 from .errors import fail
+from .profiles import profile_bundle_sha256 as _profile_bundle_sha256
+from .profiles import resolve_admission_profile as _resolve_admission_profile
 from .run_store import (
     ADMISSION_NAME,
     ARTIFACTS_DIR,
     EVENTS_DIR,
     EVIDENCE_EVENT_SCHEMA_VERSION,
+    LEGACY_RUN_REQUEST_SCHEMA_VERSION,
     REQUEST_NAME,
     RUN_ADMISSION_SCHEMA_VERSION,
     RUN_REQUEST_SCHEMA_VERSION,
     RUN_SEAL_SCHEMA_VERSION,
     SEAL_NAME,
     STAGING_DIR_NAME,
+    SUPPORTED_RUN_ADMISSION_SCHEMA_VERSIONS,
+    SUPPORTED_RUN_REQUEST_SCHEMA_VERSIONS,
     RunStore,
     _validate_run_id,
 )
@@ -117,6 +127,11 @@ FORBIDDEN_KEY_PATTERNS: frozenset[str] = frozenset(
         "raw_abstract",
         "reasoning",
         "response",
+        "reflection_template",
+        "system_template",
+        "generation_template",
+        "tool_descriptions_template",
+        "tool_names_template",
         "secret",
         "thought",
         "title",
@@ -175,13 +190,29 @@ def validate_evidence_chain(
     request_doc = parse_json_bytes(request_bytes, label="request.json")
     if not isinstance(request_doc, dict):
         fail("RUN_CORRUPT", "request.json is not a JSON object")
-    if request_doc.get("schema_version") != RUN_REQUEST_SCHEMA_VERSION:
+    if request_doc.get("schema_version") not in SUPPORTED_RUN_REQUEST_SCHEMA_VERSIONS:
         fail(
             "RUN_CORRUPT",
             f"Invalid request schema_version: {request_doc.get('schema_version')}",
         )
     if request_doc.get("run_id") != run_id:
         fail("RUN_CORRUPT", "request.json belongs to another run")
+    # Version-specific closed prompt-profile semantics (ticket 01): a legacy
+    # request cannot carry a profile field (injection attempt), and a
+    # new-schema request must pin exactly the registered profile field.
+    request_profile_field = request_doc.get("prompt_profile")
+    if request_doc.get("schema_version") == LEGACY_RUN_REQUEST_SCHEMA_VERSION:
+        if request_profile_field is not None:
+            fail(
+                "RUN_CORRUPT",
+                "A legacy request cannot carry a prompt profile field",
+            )
+    else:
+        from .profiles import validate_profile_field as _validate_profile_field
+
+        _validate_profile_field(
+            request_profile_field, label="request.json.prompt_profile"
+        )
     request_sha = sha256_bytes(request_bytes)
 
     # Admission check
@@ -193,15 +224,23 @@ def validate_evidence_chain(
         admission_doc = parse_json_bytes(admission_bytes, label="admission.json")
         if not isinstance(admission_doc, dict):
             fail("RUN_CORRUPT", "admission.json is not a JSON object")
-        if admission_doc.get("schema_version") != RUN_ADMISSION_SCHEMA_VERSION:
+        if (
+            admission_doc.get("schema_version")
+            not in SUPPORTED_RUN_ADMISSION_SCHEMA_VERSIONS
+        ):
             fail(
                 "RUN_CORRUPT",
-                f"Invalid admission schema_version: {admission_doc.get('schema_version')}",
+                f"Invalid admission schema_version: "
+                f"{admission_doc.get('schema_version')}",
             )
         if admission_doc.get("run_id") != run_id:
             fail("RUN_CORRUPT", "admission.json belongs to another run")
         if admission_doc.get("request_sha256") != request_sha:
             fail("RUN_CORRUPT", "admission.json does not bind request_sha256")
+        # Version-specific closed prompt-profile semantics (ticket 01): the
+        # resolved profile identity must be re-derivable from the admission;
+        # legacy admissions are interpreted exclusively as ml-baseline-v1.
+        _resolve_admission_profile(admission_doc)
         admission_sha = sha256_bytes(admission_bytes)
     elif check_sealed:
         fail("RUN_CORRUPT", "Sealed run lacks admission.json")
@@ -499,6 +538,21 @@ def _scan_for_credentials(text: str) -> None:
             )
 
 
+def _sanitized_profile(admission: dict[str, Any]) -> dict[str, str]:
+    """Build the sanitized prompt-profile identity from the admission.
+
+    Positive allowlist: only the safe profile identity fields (resolved id,
+    profile contract version, and the pinned hashes) are exported. Prompt
+    text, templates, and any model-visible bytes never enter sanitized output.
+    """
+    profile = _resolve_admission_profile(admission)
+    return {
+        "bundle_sha256": _profile_bundle_sha256(profile),
+        "profile_id": profile.profile_id,
+        "profile_contract_version": profile.contract_version,
+    }
+
+
 def _load_target_identities(workspace_root: Path, case_id: str) -> list[str]:
     """Load private Target Paper identities for leak detection."""
     target_csv = workspace_root / "data/raw/target_papers.csv"
@@ -666,6 +720,7 @@ def export_sanitized_evidence(workspace_root: Path, run_id: str) -> dict[str, An
             or admission["model"].get("model"),
             "provider": admission["model"].get("provider"),
         },
+        "prompt_profile": _sanitized_profile(admission),
         "request_sha256": seal["request_sha256"],
         "run_id": run_id,
         "schema_version": SANITIZED_MANIFEST_SCHEMA_VERSION,

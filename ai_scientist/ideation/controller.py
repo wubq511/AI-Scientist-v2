@@ -30,6 +30,19 @@ from .canonical import (
     workspace_relative_path,
 )
 from .contract import _now
+from .profiles import PromptProfile
+from .profiles import (
+    render_generation_prompt as _render_generation_prompt,
+)
+from .profiles import (
+    render_reflection_prompt as _render_reflection_prompt,
+)
+from .profiles import (
+    render_system_prompt as _render_system_prompt,
+)
+from .profiles import (
+    resolve_admission_profile as _resolve_admission_profile,
+)
 from .deepseek import (
     DEEPSEEK_ADAPTER_SCHEMA_VERSION,
     DeepSeekAdapter,
@@ -166,6 +179,9 @@ ARGUMENTS_PATTERN = re.compile(
 )
 
 # Baseline generation and reflection prompts verbatim (Ticket 006 / Ticket 024)
+# Legacy module constants retained as canonical evidence of the production
+# baseline semantics (tests extract them from HEAD); the runtime renders all
+# model-visible prompt bytes through the closed Prompt Profile registry.
 IDEA_GENERATION_PROMPT = """{workshop_description}
 
 Here are the proposals that you have already generated:
@@ -195,75 +211,28 @@ Results from your last action (if any):
 
 
 def build_tool_catalog() -> tuple[str, str]:
-    """Return the model-visible tool descriptions and comma-separated quoted names."""
-    descriptions = (
-        "- **SearchLiterature**: Search the literature for relevant research papers and background work. "
-        'Provide a concise natural language search query as {"query": "your query"}.\n\n'
-        "- **FinalizeIdea**: Finalize your idea by providing the idea details and declared grounding.\n\n"
-        "The IDEA JSON should include the following fields:\n"
-        '- "Name": A short descriptor of the idea. Lowercase, no spaces, underscores allowed.\n'
-        '- "Title": A catchy and informative title for the proposal.\n'
-        '- "Short Hypothesis": A concise statement of the main hypothesis or research question. '
-        "Clarify the need for this specific direction, ensure this is the best setting to investigate this idea, "
-        "and there are not obvious other simpler ways to answer the question.\n"
-        '- "Related Work": A brief discussion of the most relevant related work and how the proposal clearly '
-        "distinguishes from it, and is not a trivial extension.\n"
-        '- "Abstract": An abstract that summarizes the proposal in conference format (approximately 250 words).\n'
-        '- "Experiments": A list of experiments that would be conducted to validate the proposal. '
-        "Ensure these are simple and feasible. Be specific in exactly how you would test the hypothesis, "
-        "and detail precise algorithmic changes. Include the evaluation metrics you would use.\n"
-        '- "Risk Factors and Limitations": A list of potential risks and limitations of the proposal.'
+    """Return the model-visible tool descriptions and comma-separated quoted names.
+
+    Legacy baseline helper retained for tests and documentation: runtime
+    rendering goes through the closed Prompt Profile registry (ticket 01).
+    """
+    from .profiles import ML_BASELINE_V1
+
+    return (
+        ML_BASELINE_V1.tool_descriptions_template,
+        ML_BASELINE_V1.tool_names_template,
     )
-    names_str = '"SearchLiterature", "FinalizeIdea"'
-    return descriptions, names_str
 
 
 def build_system_prompt() -> str:
-    """Build the model-visible system prompt adhering to Ticket 024 and Ticket 038."""
-    tool_descriptions, tool_names_str = build_tool_catalog()
-    return f"""You are an experienced AI researcher who aims to propose high-impact research ideas resembling exciting grant proposals. Feel free to propose any novel ideas or experiments; make sure they are novel. Be very creative and think out of the box. Each proposal should stem from a simple and elegant question, observation, or hypothesis about the topic. For example, they could involve very interesting and simple interventions or investigations that explore new possibilities or challenge existing assumptions. Clearly clarify how the proposal distinguishes from the existing literature.
+    """Build the default (production baseline) model-visible system prompt.
 
-Ensure that the proposal does not require resources beyond what an academic lab could afford. These proposals should lead to papers that are publishable at top ML conferences.
+    Legacy baseline helper retained for tests and documentation: runtime
+    paths resolve the admitted Prompt Profile instead of a mutable default.
+    """
+    from .profiles import ML_BASELINE_V1
 
-You have access to the following tools:
-
-{tool_descriptions}
-
-Respond in the following format:
-
-ACTION:
-<The action to take, exactly one of {tool_names_str}>
-
-ARGUMENTS:
-<If ACTION is "SearchLiterature", provide the search query as {{"query": "your search query"}}. If ACTION is "FinalizeIdea", provide the idea details and grounding as {{"idea": {{ ... }}, "grounding": ["paper_id_1", ...]}} with the IDEA JSON specified below.>
-
-If you choose to finalize your idea, provide the IDEA JSON in the arguments:
-
-IDEA JSON:
-```json
-{{
-  "idea": {{
-    "Name": "...",
-    "Title": "...",
-    "Short Hypothesis": "...",
-    "Related Work": "...",
-    "Abstract": "...",
-    "Experiments": [
-      "..."
-    ],
-    "Risk Factors and Limitations": [
-      "..."
-    ]
-  }},
-  "grounding": [
-    "paper_id_1"
-  ]
-}}
-```
-
-Ensure the JSON is properly formatted for automatic parsing.
-
-Note: You should perform at least one literature search before finalizing your idea to ensure it is well-informed by existing research."""
+    return _render_system_prompt(ML_BASELINE_V1)
 
 
 def _failure_message(exc: ModelRoundError) -> str:
@@ -595,6 +564,13 @@ class IdeationController:
         self.admission_sha = sha256_bytes(admission_bytes)
         self.request_sha = self.admission["request_sha256"]
 
+        # Resolve the Prompt Profile pinned by the admission (ticket 01).
+        # Legacy admissions without a profile field are interpreted
+        # exclusively as ml-baseline-v1; new admissions are re-validated
+        # against the registry so model-visible bytes match the pin before
+        # the first model operation.
+        self.profile: PromptProfile = _resolve_admission_profile(self.admission)
+
         # Verify admission event pin in evidence chain. The `admitted` event
         # is located by type, not by fixed sequence: a preflight re-run during
         # resume (ticket 10) rewrites the preflight events, so its position is
@@ -721,7 +697,7 @@ class IdeationController:
 
     def _run_loop(self) -> dict[str, Any]:
         """Execute the complete generation loop through final seal."""
-        system_prompt = build_system_prompt()
+        system_prompt = _render_system_prompt(self.profile)
         sealed = self._run_generations(system_prompt, 0)
         if sealed is not None:
             return sealed
@@ -825,7 +801,7 @@ class IdeationController:
         if isinstance(terminal, SealTerminalCompletion):
             return self._write_missing_seal(terminal)
 
-        system_prompt = build_system_prompt()
+        system_prompt = _render_system_prompt(self.profile)
         sealed = self._run_generations(
             system_prompt, plan.start_generation, plan.round_resume
         )
@@ -1159,14 +1135,16 @@ class IdeationController:
             }
 
             if ref_round == 0:
-                prompt_text = IDEA_GENERATION_PROMPT.format(
+                prompt_text = _render_generation_prompt(
+                    self.profile,
                     workshop_description=self.workshop_description,
                     prev_ideas_string=prev_ideas_string,
                 )
             else:
-                prompt_text = IDEA_REFLECTION_PROMPT.format(
+                prompt_text = _render_reflection_prompt(
+                    self.profile,
                     current_round=ref_round + 1,
-                    last_tool_results=last_tool_results or "No new results.",
+                    last_tool_results=last_tool_results,
                     num_reflections=self.num_reflections,
                 )
 
@@ -1663,6 +1641,10 @@ def rebuild_resume_plan(
     budgets = admission["budgets"]
     max_generations = budgets["max_num_generations"]
     num_reflections = budgets["num_reflections"]
+    # The resume path rebuilds prompt bytes from the admitted profile only:
+    # registry drift, unknown versions, or hash mismatch fail closed before
+    # any model round; a legacy admission stays ml-baseline-v1.
+    profile: PromptProfile = _resolve_admission_profile(admission)
 
     # -- Group events --------------------------------------------------------
     known_event_types = {
@@ -2014,13 +1996,15 @@ def rebuild_resume_plan(
 
     def _round_prompt(ref_round: int) -> str:
         if ref_round == 0:
-            return IDEA_GENERATION_PROMPT.format(
+            return _render_generation_prompt(
+                profile,
                 workshop_description=workshop_description,
                 prev_ideas_string=archive_string,
             )
-        return IDEA_REFLECTION_PROMPT.format(
+        return _render_reflection_prompt(
+            profile,
             current_round=ref_round + 1,
-            last_tool_results=state.last_tool_results or "No new results.",
+            last_tool_results=state.last_tool_results,
             num_reflections=num_reflections,
         )
 

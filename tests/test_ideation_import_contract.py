@@ -32,6 +32,7 @@ EXPECTED_IMPORT_CLOSURE = ImportClosure(
             "ai_scientist.ideation.evidence",
             "ai_scientist.ideation.preparation",
             "ai_scientist.ideation.pricing",
+            "ai_scientist.ideation.profiles",
             "ai_scientist.ideation.resume",
             "ai_scientist.ideation.retrieval",
             "ai_scientist.ideation.run_store",

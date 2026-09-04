@@ -8,7 +8,9 @@ sys.path.append(osp.join(osp.dirname(__file__), ".."))
 # Module-level imports stay standard-library only. The ideation-only import
 # closure is pinned by tests/test_ideation_import_contract.py; legacy provider
 # and literature-search modules stay in retained code outside this entry
-# (ticket 13 contracted the legacy subcommand out of this file).
+# (ticket 13 contracted the legacy subcommand out of this file). Since ticket
+# 01 the new-run entry also carries the closed --prompt-profile id; free
+# prompt text, paths, and unregistered ids fail closed in Run Admission.
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -29,6 +31,12 @@ def _build_parser() -> argparse.ArgumentParser:
     new_run.add_argument("--corpus-sha256", required=True)
     new_run.add_argument("--max-num-generations", type=int, required=True)
     new_run.add_argument("--num-reflections", type=int, required=True)
+    new_run.add_argument(
+        "--prompt-profile",
+        required=True,
+        metavar="PROFILE_ID",
+        help="Closed, versioned Prompt Profile id: ml-baseline-v1 or cross-domain-v1.",
+    )
 
     # Resume entry: continue one suspended Ideation Run; exact run_id only
     # (ticket 10). No other control surface is accepted.
@@ -154,6 +162,7 @@ def _run_new_run(
         corpus_sha256=args.corpus_sha256,
         max_num_generations=args.max_num_generations,
         num_reflections=args.num_reflections,
+        prompt_profile_id=args.prompt_profile,
     )
     # Production CLI executes by default after admission (ticket 01);
     # tests and library callers may still pass execute=False.
@@ -178,6 +187,8 @@ def _run_new_run(
         str(args.max_num_generations),
         "--num-reflections",
         str(args.num_reflections),
+        "--prompt-profile",
+        args.prompt_profile,
     ]
 
     # Admission phase: failures are preflight rejections (exit 2).

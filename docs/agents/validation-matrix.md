@@ -2,7 +2,7 @@
 
 版本:v1.0(2026-08-30,经 ticket [Define the validation and test matrix](../wayfinder/ideation-pipeline/tickets/027-define-the-validation-and-test-matrix.md) 由 Robert 批准)
 
-本文档是 ideation-only pipeline 的系统级验证矩阵:定义哪些检查存在、各自证明什么、什么证据算通过。它受版本治理——任何修订 = 新版本 + Robert 批准(012);优化类修订必须携带证据并过 promotion gate(029)。
+本文档是 ideation-only pipeline 的系统级验证矩阵:定义哪些检查存在、各自证明什么、什么证据算通过。它受版本治理——任何修订 = 新版本 + Robert 批准(012);优化类修订必须携带证据并过 promotion gate(029)。v1.1(2026-09-04,经 ticket 01 of [ideation-prompt-neutralization](../wayfinder/ideation-prompt-neutralization/tickets/01-admit-and-replay-one-versioned-prompt-profile.md) 按 Robert 批准的 cross-domain prompt spec 追加 VM-CONTRACT-024-04/05/06 与 VM-CONTRACT-023-04):封闭 Prompt Profile seam 的身份/hash/legacy/resume/export 契约测试。
 
 ## 定位与边界
 
@@ -73,6 +73,10 @@
 | VM-CONTRACT-025-02 | finalization gate 固定优先级:hygiene → 结构 → grounding → 去重;每轮只报一个;terminal 条件不被 model-fixable 掩盖 | gate 行为顺序确定 | 025, 038 | dev-time | pytest pass |
 | VM-CONTRACT-026-01 | Declared Grounding 三码(`INVALID_GROUNDING`/`EMPTY_GROUNDING`/`UNRETRIEVED_PAPER`)与 per-generation eligibility | 说谎检测确定且可回灌 | 026, 038 | dev-time | pytest pass |
 | VM-CONTRACT-026-02 | payload hygiene scan:模式命中即 terminal;run 内去重近重复 = model-fixable | Idea Leakage 防御纵深生效 | 026 | dev-time;028 | pytest pass + 扫描记录 |
+| VM-CONTRACT-024-04 | Prompt Profile 封闭身份:仅两个登记 id 可被 `new-run` 接受;自由文本/路径/fragment/未知 id/legacy 文档注入 profile 字段一律 fail closed;registry hash pin 漂移即拒绝 | prompt 身份封闭且防漂移 | 024, cross-domain-ideation-prompt-spec | dev-time;全部 gate | pytest pass (`tests/test_prompt_profiles.py`) |
+| VM-CONTRACT-024-05 | baseline 字节级保持:`ml-baseline-v1` 的 system/generation/reflection 渲染与既有生产 baseline SHA-256 golden 一致;challenger 无 ML venue/algorithm/metric 硬编码指令;两 profile 共享 scaffold/generation/工具名逐字节一致 | control 臂真实、challenger 单变量 | cross-domain-ideation-prompt-spec | dev-time | pytest pass + golden hashes |
+| VM-CONTRACT-024-06 | Run Request/Admission v1.1.0 pin profile id/contract version/bundle hash/registry hash,admission 前后双重验证;resume 只从 admission 重建,拒绝 drift/未知版本/试图换 profile;legacy v1.0.0 恒解释为 `ml-baseline-v1` | fresh/resume 同一 profile,历史证据不被改写 | cross-domain-ideation-prompt-spec, 023 | dev-time;runtime | pytest pass (e2e lifecycle) |
+| VM-CONTRACT-023-04 | sanitized manifest 只含安全 profile 身份(id/version/hash);prompt 文本、Workshop、模板字节不出现在 sanitized 输出;private Provider Attempt request 继续保留 model-visible prompt | 脱敏边界不被 profile 扩大 | 023, 010, cross-domain-ideation-prompt-spec | dev-time;030 | pytest pass + sanitized fixture |
 
 ### integration 层
 

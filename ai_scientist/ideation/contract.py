@@ -34,6 +34,13 @@ CORPUS_POLICY_PATH = Path("ai_scientist/ideation/policies/reference-authority-v1
 CORPUS_POLICY_SHA256 = (
     "65b0d9aa5942eb164370fb6d7162fbd6b4a629488a6093e0e0ebfd44eb1e6a5f"
 )
+# Closed, versioned Prompt Profile seam (cross-domain prompt spec, ticket 01):
+# the registry hash pins the exact canonical bundle bytes of the two
+# registered profiles; a template drift fails closed before any model round.
+PROMPT_PROFILE_CONTRACT_VERSION = "prompt-profile-contract-v1.0"
+PROMPT_PROFILE_REGISTRY_SHA256 = (
+    "658fcb028e5d649a1a08caae7824684d7fe8e95af6c494970c2f45f2071822d7"
+)
 EVALUATION_ARTIFACT_SCHEMA_VERSION = "evaluation-artifact-v1.0.0"
 EVALUATION_RUBRIC_SCHEMA_VERSION = "idea-quality-rubric-schema-v1.0"
 EVALUATION_RUBRIC_POLICY_PATH = Path(

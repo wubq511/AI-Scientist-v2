@@ -3,7 +3,9 @@
 Implements the ticket-04 slice of the run identity and evidence layout
 contract: a fixed repo-relative private trust root, exclusive-create run
 roots, write-once request/admission documents, and a strictly linked
-canonical event hash chain.
+canonical event hash chain. Since ticket 01 (Prompt Profiles) the current
+request/admission schema versions are v1.1.0 and pin the resolved Prompt
+Profile identity; v1.0.0 documents remain valid legacy evidence.
 """
 
 from __future__ import annotations
@@ -19,10 +21,22 @@ from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
 from .contract import _now
 from .errors import fail
 
-RUN_REQUEST_SCHEMA_VERSION = "run-request-v1.0.0"
-RUN_ADMISSION_SCHEMA_VERSION = "run-admission-v1.0.0"
+RUN_REQUEST_SCHEMA_VERSION = "run-request-v1.1.0"
+RUN_ADMISSION_SCHEMA_VERSION = "run-admission-v1.1.0"
+# Pre-Prompt-Profile documents (ticket 01): interpreted exclusively as
+# ml-baseline-v1 and never carrying a prompt_profile field.
+LEGACY_RUN_REQUEST_SCHEMA_VERSION = "run-request-v1.0.0"
+LEGACY_RUN_ADMISSION_SCHEMA_VERSION = "run-admission-v1.0.0"
 EVIDENCE_EVENT_SCHEMA_VERSION = "evidence-event-v1.0.0"
 RUN_SEAL_SCHEMA_VERSION = "run-seal-v1.0.0"
+# Admission schema versions understood by the version-specific closed
+# semantics (ticket 01): v1.1.0 carries the pinned prompt_profile field;
+# v1.0.0 legacy admissions are interpreted exclusively as ml-baseline-v1.
+SUPPORTED_RUN_REQUEST_SCHEMA_VERSIONS = ("run-request-v1.1.0", "run-request-v1.0.0")
+SUPPORTED_RUN_ADMISSION_SCHEMA_VERSIONS = (
+    "run-admission-v1.1.0",
+    "run-admission-v1.0.0",
+)
 
 RUNS_ROOT_RELPATH = Path("artifacts/ideation-runs")
 REQUEST_NAME = "request.json"

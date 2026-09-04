@@ -14,6 +14,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, TextIO
 
+from . import profiles as prompt_profiles
 from . import pricing
 from .canonical import parse_json_bytes, sha256_bytes, workspace_relative_path
 from .contract import (
@@ -24,6 +25,7 @@ from .contract import (
     _now,
 )
 from .errors import IdeationInputError, fail
+from .profiles import resolve_profile as _resolve_request_profile
 from .retrieval import bind_corpus
 from .run_store import (
     RUN_ADMISSION_SCHEMA_VERSION,
@@ -56,6 +58,7 @@ class NewRunRequest:
     corpus_sha256: str
     max_num_generations: int
     num_reflections: int
+    prompt_profile_id: str = prompt_profiles.DEFAULT_PROMPT_PROFILE_ID
 
     def validate(self) -> None:
         """Step 1: closed request schema (a failure is a run-external error)."""
@@ -64,6 +67,9 @@ class NewRunRequest:
         parse_sha256(self.corpus_sha256, label="corpus_sha256")
         positive_integer(self.max_num_generations, label="max_num_generations")
         positive_integer(self.num_reflections, label="num_reflections")
+        # Closed Prompt Profile resolution: only registered ids are accepted;
+        # free text, paths, fragments and unknown ids fail closed here.
+        _resolve_request_profile(self.prompt_profile_id)
         for path_field, label in [(self.workshop, "workshop"), (self.corpus, "corpus")]:
             if not isinstance(path_field, str) or not path_field:
                 fail("INVALID_PATH", f"{label} path must be a non-empty string")
@@ -77,6 +83,16 @@ class NewRunRequest:
                     f"Prior run evidence cannot be used as {label} runtime input: {path_field}",
                 )
 
+    def prompt_profile_field(self) -> dict[str, Any]:
+        """Return the closed profile pin field for the request/admission docs."""
+        profile = _resolve_request_profile(self.prompt_profile_id)
+        return {
+            "bundle_sha256": prompt_profiles.profile_bundle_sha256(profile),
+            "contract_version": profile.contract_version,
+            "profile_id": profile.profile_id,
+            "registry_sha256": prompt_profiles.profile_registry_sha256(),
+        }
+
     def document(self, run_id: str, command: list[str]) -> dict[str, Any]:
         return {
             "schema_version": RUN_REQUEST_SCHEMA_VERSION,
@@ -84,6 +100,7 @@ class NewRunRequest:
             "requested_at": _now(),
             "case_id": self.case_id,
             "command": list(command),
+            "prompt_profile": self.prompt_profile_field(),
             "workshop": {"path": self.workshop, "sha256": self.workshop_sha256},
             "corpus": {"path": self.corpus, "sha256": self.corpus_sha256},
             "max_num_generations": self.max_num_generations,
@@ -435,6 +452,7 @@ def _run_preflight_steps(
         "case_id": request.case_id,
         "request_sha256": request_sha,
         "code": {"commit": commit_sha},
+        "prompt_profile": request.prompt_profile_field(),
         "workshop": workshop,
         "corpus": corpus,
         "retriever": {"policy_version": bound.policy_version},
@@ -476,10 +494,11 @@ def _run_preflight_steps(
     )
     if stream is not None and getattr(stream, "isatty", lambda: False)():
         stream.write(
-            f"\n  ✓ 费用已批准，Run 准入成功 (Run ID: {run.run_id})，正在启动推理与检索控制循环...\n\n"
+            f"\n  ✓ 费用已批准，Run 准入成功 (Run ID: {run.run_id}，Prompt Profile: {request.prompt_profile_id})，正在启动推理与检索控制循环...\n\n"
         )
         stream.flush()
     return {
+        "prompt_profile": request.prompt_profile_id,
         "status": "admitted",
         "run_id": run.run_id,
         "admission_sha256": admission_sha,
