@@ -68,3 +68,10 @@ blocked_by:
 - `reserve_comparison_slot` 持有 execution-code seam：在写 reservation 前以生产默认（admission 边界的 `_require_clean_worktree`）解析当前 clean HEAD（dirty worktree → `DIRTY_WORKTREE`；测试经 `execution_head_resolver` 注入固定 commit，生产 runner 永不注入），并创建或校验 package 私有 write-once `execution-code-pin.json`（`0600`，`comparison-execution-code-pin-v1.0.0`）——首 slot 创建，后续 slot 缺 pin → `EXECUTION_CODE_PIN_MISSING`，commit drift → `EXECUTION_CODE_PIN_MISMATCH` 且不写 reservation，pin 内容/schema drift → `EXECUTION_CODE_PIN_DRIFT`；reservation 文档升 `comparison-run-reservation-v1.1.0` 记录 pinned commit。HEAD 解析故意放在 reservation seam（exec 前最后一个比较级检查点），不以 prepare 时刻的旧值为准。
 - `ingest_comparison_result` 新增必需 `package_dir`，逐 run 比对 sealed `admission.code.commit` 与 pin；pin 是 pair packet/reducer 之前的 choke point。
 - stale pin/reservation 均为证据：永不静默删除；更换 pinned commit 需 Robert 显式批准新 Design Epoch。真实私有 package 复测（越序 slot 2 拒绝；dirty worktree 下 slot 1 reservation seam 以 `DIRTY_WORKTREE` 拒绝）均 fail closed 且零状态变化；冻结物料 hash 不变。
+
+## 收敛保障与 Slot 更替补记 (2026-09-05, post-close)
+
+- slot 1 实机执行（run `966d0fdc`，success seal 但零 finalized idea）暴露本票交付物的两个缺陷，Robert 批准 remediation 后由编码会话修复（commits `bf92ea0` / `2d61d6a` / `dec4058` / `a02d8cd`）：
+  - **coverage 闸门自引入不可达**：`_evaluation_coverage_for_run` 只返回 bool，而 `ingest_comparison_result` 检查 `is None`——`EVALUATION_ARTIFACT_MISSING` 从未触发过，零 idea sealed run 会"ingest 成功"后在 pair packet 构建时才 `RUN_CORRUPT` 爆炸。已修复为真正 fail-closed（`if not coverage`），并以零 idea sealed run 的全链路 ingest 测试锁定。
+  - **串行 slot 链无更替机制**：新增 `quarantine_comparison_run`（write-once `0600` `comparison-run-quarantine-v1.0.0` 记录 + 六类 fail-closed 前置校验）、`ingest_forfeited_comparison_cost` 与 ledger `v1.3.0`（forfeited spend 计入 30.00 硬上限与 5.00 重审批阈值）、sequenced reservation（`comparison-run-reservation-v1.2.0`，seq = 1 + quarantine 记录数）与 `supersede_execution_code_pin`（旧字节逐字入 `superseded/` + write-once 记录）。
+- 本票既有不变式全部保留并经测试复核：ingested entries 严格 [1..N] 顺序与 run_id 唯一不受 forfeited 影响；reduction 只消费 ingested metrics；硬上限/重审批阈值/投影守卫改用含 forfeited 的总额，语义从"只算 ingested"收紧为"花掉的钱必须占预算"。全量 pytest 787 passed（零 provider 调用、零新增支出）。

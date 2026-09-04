@@ -57,3 +57,8 @@ blocked_by:
 - Originating session 确认 frozen matrix 缺少执行代码身份 pin，跨 commit 执行会破坏 one-major-variable 归因；Robert 批准有界修正后于 commit `ac34ab7` 落地。
 - 本 package 的六项冻结物料 SHA-256 全部不变；`execution-code-pin.json` 是付费期 runtime 产物（首个 slot reservation 时由 `reserve_comparison_slot` exclusive-create，`0600`，`comparison-execution-code-pin-v1.0.0`），当前不存在，其创建后 hash 应纳入对账记录。
 - 复测：越序 slot 2 仍以 `PREVIOUS_SLOT_NOT_INGESTED` 在 reservation/provider 前拒绝；dirty worktree 下 slot 1 prepare 以 `DIRTY_WORKTREE` 拒绝；两次检查均未在私有 package 产生 pin/reservation 状态变化，vault 仍为空，实际支出 0.00 CNY。
+
+## 收敛保障与 Slot 更替补记 (2026-09-05, post-close)
+
+- slot 1（run `966d0fdc`）以 success seal 但零 finalized idea，定性为仪器缺陷而非模型故障：末轮反思指令无强制收敛语义。remediation 正式规格见 `docs/agents/comparison-convergence-slot-replacement-spec.md`（Proposal 002 修订案已批准）。本票的冻结边界不变：矩阵字段、两臂 profile 模板、30.00/5.00/7.08 三个数字与 commands 生成输入零改动；重冻结后 `run-matrix.json`（`c8a9217f…`）与 `commands.txt`（`3851ca37…`）断言字节不变，仅 spend-ledger 升 `comparison-spend-ledger-v1.3.0`（新增 `forfeited_entries` / `forfeited_spend_cny`）。
+- 迁移序列（originating session 执行，矩阵当前保持暂停）：旧 v1.2.0 ledger 字节移入私有 `superseded/v1.2.0-pre-quarantine/` → `freeze_prompt_comparison_package` 幂等重冻结（ledger 变 v1.3.0，其余五项字节不变）→ `supersede_execution_code_pin` 到新 HEAD（Robert 对本修复方向的确认覆盖 Design-Epoch re-pin 批准，reason 引用修订案）→ `quarantine_comparison_run(966d0fdc…)`（forfeited 0.10 CNY 入账，总额 0.24 CNY）→ 把同一条 frozen slot 1 命令交回 Robert 执行。
