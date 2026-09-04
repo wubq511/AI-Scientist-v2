@@ -40,6 +40,9 @@ from ai_scientist.ideation.deepseek import (
 from ai_scientist.ideation.errors import IdeationInputError
 from ai_scientist.ideation.evidence import (
     EVIDENCE_ROOT_RELPATH,
+    _load_target_identities,
+    _scan_for_forbidden_paths,
+    _scan_for_target_leaks,
     export_sanitized_evidence,
     replay_recorded_run,
     validate_evidence_chain,
@@ -861,3 +864,74 @@ def test_cli_validate_and_export_commands(tmp_path: Path) -> None:
     assert bad_val_proc.returncode == 1
     err_output = json.loads(bad_val_proc.stderr)
     assert err_output["code"] == "RUN_CORRUPT"
+
+
+def test_adversarial_forbidden_path_scans() -> None:
+    """Adversarial check: all absolute paths, Windows drives, and private roots are blocked."""
+    for bad_path in [
+        "/etc/passwd",
+        "/private/var/folders/secret",
+        "/home/user/code",
+        "C:\\Users\\admin\\secret.txt",
+        "D:/workspace/leak",
+        "some/path/artifacts/ideation-runs/secret",
+        "nested/data/raw/papers.csv",
+        "path/with\\backslash",
+        "path/with/../traversal",
+    ]:
+        with pytest.raises(IdeationInputError) as exc:
+            _scan_for_forbidden_paths({"key": bad_path})
+        assert exc.value.code == "RELEASE_GATE_FORBIDDEN_PATH"
+
+
+def test_adversarial_target_paper_leak_detection(tmp_path: Path) -> None:
+    """Adversarial check: target paper identifiers from raw CSV are extracted and blocked."""
+    workspace = _setup_workspace(tmp_path)
+    targets = _load_target_identities(workspace, CASE_ID)
+    assert TARGET_ID in targets
+    assert any("Target Paper Alpha" in t for t in targets)
+
+    with pytest.raises(IdeationInputError) as exc:
+        _scan_for_target_leaks(f"text containing {TARGET_ID}", targets)
+    assert exc.value.code == "RELEASE_GATE_TARGET_LEAK"
+
+
+def test_adversarial_export_extra_uninventoried_file_conflict(tmp_path: Path) -> None:
+    """Adversarial check: existing export directory with extra uninventoried files fails closed."""
+    workspace = _setup_workspace(tmp_path)
+    result = _create_sealed_run(workspace)
+    run_id = result["run_id"]
+
+    # First export succeeds
+    res = export_sanitized_evidence(workspace, run_id)
+    assert res["status"] == "exported"
+
+    # Inject an extra uninventoried file into destination
+    dest_dir = workspace / EVIDENCE_ROOT_RELPATH / run_id
+    (dest_dir / "untracked_spy.txt").write_text("leak", encoding="utf-8")
+
+    with pytest.raises(IdeationInputError) as exc:
+        export_sanitized_evidence(workspace, run_id)
+    assert exc.value.code == "EXPORT_EXISTS_MISMATCH"
+
+
+def test_adversarial_write_artifact_to_symlink_leaf_denied(tmp_path: Path) -> None:
+    """Adversarial check: writing an artifact where the leaf target is a symlink fails closed."""
+    workspace = _setup_workspace(tmp_path)
+    store = RunStore(workspace)
+    handle = store.create_run()
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+
+    run_root = workspace / "artifacts/ideation-runs" / handle.run_id
+    art_dir = run_root / "artifacts"
+    art_dir.mkdir(parents=True, exist_ok=True)
+    symlink_target = art_dir / "poisoned.json"
+    symlink_target.symlink_to(outside)
+
+    with pytest.raises(IdeationInputError) as exc:
+        store.write_artifact(
+            handle.run_id, "artifacts/poisoned.json", b'{"safe": true}\n'
+        )
+    assert exc.value.code == "SYMLINK_FORBIDDEN"

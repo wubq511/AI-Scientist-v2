@@ -340,6 +340,11 @@ class RunStore:
                     "SYMLINK_FORBIDDEN",
                     f"Artifact path component is a symlink: {current.name}",
                 )
+        if (run_root / relative).is_symlink():
+            fail(
+                "SYMLINK_FORBIDDEN",
+                f"Artifact target is a symlink: {relative.name}",
+            )
         sha = self._commit_file(run_root, relative, data, label=label or relative.name)
         return relative.as_posix(), len(data), sha
 

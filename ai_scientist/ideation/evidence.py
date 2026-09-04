@@ -462,15 +462,17 @@ def _scan_for_forbidden_paths(obj: Any) -> None:
                 "RELEASE_GATE_FORBIDDEN_PATH",
                 f"Sanitized value contains parent traversal: {obj}",
             )
-        if (
-            obj.startswith("/Users/")
-            or obj.startswith("/home/")
-            or re.match(r"^[a-zA-Z]:\\", obj)
-        ):
+        if obj.startswith("/") or re.match(r"^[a-zA-Z]:[\\/]", obj):
             fail(
                 "RELEASE_GATE_FORBIDDEN_PATH",
                 f"Sanitized value contains absolute path: {obj}",
             )
+        for forbidden_sub in ("artifacts/ideation-runs", "data/raw"):
+            if forbidden_sub in obj:
+                fail(
+                    "RELEASE_GATE_FORBIDDEN_PATH",
+                    f"Sanitized value contains forbidden path substring '{forbidden_sub}': {obj}",
+                )
     elif isinstance(obj, dict):
         for value in obj.values():
             _scan_for_forbidden_paths(value)
@@ -507,10 +509,11 @@ def _load_target_identities(workspace_root: Path, case_id: str) -> list[str]:
         with open(target_csv, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                pid = row.get("paper_id", "").strip()
-                title = row.get("title", "").strip()
-                doi = row.get("doi", "").strip()
-                url = row.get("url", "").strip()
+                pid = (row.get("paper_id") or row.get("paperId") or "").strip()
+                title = (row.get("title") or "").strip()
+                doi = (row.get("doi") or "").strip()
+                url = (row.get("url") or "").strip()
+                ext = (row.get("externalIds") or "").strip()
                 if pid:
                     identities.append(pid)
                 if len(title) > 10:
@@ -519,6 +522,10 @@ def _load_target_identities(workspace_root: Path, case_id: str) -> list[str]:
                     identities.append(doi)
                 if url:
                     identities.append(url)
+                if ext:
+                    for m in re.findall(r"'([A-Za-z0-9_\-\.\/]+)'", ext):
+                        if len(m) >= 6 and not m.isupper():
+                            identities.append(m)
     except Exception:
         pass
     return identities
@@ -688,9 +695,10 @@ def export_sanitized_evidence(workspace_root: Path, run_id: str) -> dict[str, An
     if dest_dir.exists():
         if dest_dir.is_symlink():
             fail("SYMLINK_FORBIDDEN", "Destination export directory is a symlink")
+        existing_files = {p.name for p in dest_dir.iterdir()}
         existing_manifest = dest_dir / "manifest.json"
         existing_events = dest_dir / "events.json"
-        if existing_manifest.is_file() and existing_events.is_file():
+        if existing_files == {"manifest.json", "events.json"}:
             if (
                 existing_manifest.read_bytes() == manifest_bytes
                 and existing_events.read_bytes() == events_bytes
@@ -706,14 +714,14 @@ def export_sanitized_evidence(workspace_root: Path, run_id: str) -> dict[str, An
             f"Export directory already exists with different contents: {run_id}",
         )
 
-    # Write atomically via temp dir
-    staging_temp = Path(tempfile.mkdtemp(prefix="export-staging-", dir=workspace))
+    # Write atomically via temp dir inside evidence root
+    evidence_parent = workspace / EVIDENCE_ROOT_RELPATH
+    evidence_parent.mkdir(parents=True, exist_ok=True)
+    staging_temp = Path(tempfile.mkdtemp(prefix=".staging-", dir=evidence_parent))
     try:
         (staging_temp / "manifest.json").write_bytes(manifest_bytes)
         (staging_temp / "events.json").write_bytes(events_bytes)
 
-        # Ensure parent exists
-        dest_dir.parent.mkdir(parents=True, exist_ok=True)
         os.rename(staging_temp, dest_dir)
     except Exception as exc:
         if staging_temp.exists():
