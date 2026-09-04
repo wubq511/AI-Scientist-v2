@@ -105,7 +105,10 @@ class RunStore:
         parsed = _validate_run_id(run_id)
         if self.runs_root.is_symlink():
             fail("SYMLINK_FORBIDDEN", "The ideation-runs root is a symlink")
-        return self.runs_root / parsed
+        run_root = self.runs_root / parsed
+        if run_root.is_symlink():
+            fail("SYMLINK_FORBIDDEN", f"The run root is a symlink: {run_id}")
+        return run_root
 
     def _ensure_runs_root(self) -> None:
         if self.runs_root.is_symlink():
@@ -283,6 +286,34 @@ class RunStore:
         sha = self._commit_file(run_root, Path(rel_path), data, label=label or filename)
         return rel_path, len(data), sha
 
+    def _validate_run_relative_path(
+        self, relative_path: object, *, label: str = "Artifact path"
+    ) -> Path:
+        if not isinstance(relative_path, str) or not relative_path:
+            fail("INVALID_PATH", f"{label} must be a non-empty relative POSIX path")
+        if "\\" in relative_path:
+            fail("INVALID_PATH", f"{label} must be a POSIX relative path")
+        if (
+            relative_path != relative_path.strip()
+            or relative_path.startswith("./")
+            or relative_path.endswith("/")
+        ):
+            fail(
+                "INVALID_PATH",
+                f"{label} must be normalized under the run root: {relative_path}",
+            )
+        relative = Path(relative_path)
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            fail(
+                "INVALID_PATH",
+                f"{label} must be normalized under the run root: {relative_path}",
+            )
+        return relative
+
     def write_artifact(
         self,
         run_id: str,
@@ -297,19 +328,18 @@ class RunStore:
         escape segments; parents are created as needed. Returns
         (relative_path, byte_length, sha256).
         """
-        if not isinstance(relative_path, str) or "\\" in relative_path:
-            fail("INVALID_PATH", "Artifact path must be a POSIX relative path")
-        relative = Path(relative_path)
-        if (
-            relative.is_absolute()
-            or not relative.parts
-            or any(part in {"", ".", ".."} for part in relative.parts)
-        ):
-            fail(
-                "INVALID_PATH",
-                f"Artifact path must be normalized under the run root: {relative_path}",
-            )
+        relative = self._validate_run_relative_path(
+            relative_path, label=label or "Artifact path"
+        )
         run_root = self._run_root(run_id)
+        current = run_root
+        for part in relative.parts[:-1]:
+            current = current / part
+            if current.is_symlink():
+                fail(
+                    "SYMLINK_FORBIDDEN",
+                    f"Artifact path component is a symlink: {current.name}",
+                )
         sha = self._commit_file(run_root, relative, data, label=label or relative.name)
         return relative.as_posix(), len(data), sha
 
@@ -348,7 +378,12 @@ class RunStore:
 
         files: list[dict[str, Any]] = []
         for path in artifacts_dir.rglob("*"):
-            if path.is_file() and not path.is_symlink():
+            if path.is_symlink():
+                fail(
+                    "SYMLINK_FORBIDDEN",
+                    f"Committed artifact is a symlink: {path.name}",
+                )
+            if path.is_file():
                 rel_path = path.relative_to(run_root).as_posix()
                 data = path.read_bytes()
                 media_type = (
@@ -376,8 +411,19 @@ class RunStore:
         label: str | None = None,
     ) -> bytes:
         """Read a run artifact and optionally verify its SHA-256."""
+        relative = self._validate_run_relative_path(
+            relative_path, label=label or "Artifact path"
+        )
         run_root = self._run_root(run_id)
-        target = run_root / relative_path
+        current = run_root
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                fail(
+                    "SYMLINK_FORBIDDEN",
+                    f"Artifact path component is a symlink: {current.name}",
+                )
+        target = current
         try:
             resolved = target.resolve(strict=True)
         except OSError:

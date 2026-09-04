@@ -301,6 +301,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     resume.add_argument("--run-id", required=True)
 
+    # Validate entry: verify a sealed Evidence Chain; exact run_id only (ticket 11).
+    validate = subparsers.add_parser(
+        "validate", help="Validate one sealed Evidence Chain by its exact run_id."
+    )
+    validate.add_argument("--run-id", required=True)
+
+    # Export entry: export sanitized evidence; exact run_id only (ticket 11).
+    export = subparsers.add_parser(
+        "export", help="Export sanitized evidence for one sealed Ideation Run."
+    )
+    export.add_argument("--run-id", required=True)
+
     # Retained legacy baseline entry (expand-contract; removed by ticket 13).
     legacy = subparsers.add_parser(
         "legacy", help="Retained pre-fork baseline path (ticket 13 removes it)."
@@ -574,6 +586,62 @@ def _run_resume(
     return 0
 
 
+def _run_validate(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Validate a sealed run: exit 0 valid, 1 corrupt/error."""
+    from pathlib import Path as _Path
+
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.evidence import validate_evidence_chain
+
+    root = workspace_root or _Path.cwd()
+    try:
+        result = validate_evidence_chain(root, args.run_id, check_sealed=True)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "corrupt" if exc.code == "RUN_CORRUPT" else "error",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_export(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Export sanitized evidence: exit 0 exported, 1 corrupt/rejected."""
+    from pathlib import Path as _Path
+
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.evidence import export_sanitized_evidence
+
+    root = workspace_root or _Path.cwd()
+    try:
+        result = export_sanitized_evidence(root, args.run_id)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "export_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
 def _run_legacy(args: argparse.Namespace) -> int:
     # Create the LLM client
     client, client_model = create_client(args.model)
@@ -607,6 +675,10 @@ if __name__ == "__main__":
         raise SystemExit(_run_new_run(_args))
     if _args.entry == "resume":
         raise SystemExit(_run_resume(_args))
+    if _args.entry == "validate":
+        raise SystemExit(_run_validate(_args))
+    if _args.entry == "export":
+        raise SystemExit(_run_export(_args))
     if _args.entry == "legacy":
         raise SystemExit(_run_legacy(_args))
     # No subcommand: print the same help text and exit like --help.

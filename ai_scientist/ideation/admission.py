@@ -62,6 +62,18 @@ class NewRunRequest:
         parse_sha256(self.corpus_sha256, label="corpus_sha256")
         positive_integer(self.max_num_generations, label="max_num_generations")
         positive_integer(self.num_reflections, label="num_reflections")
+        for path_field, label in [(self.workshop, "workshop"), (self.corpus, "corpus")]:
+            if not isinstance(path_field, str) or not path_field:
+                fail("INVALID_PATH", f"{label} path must be a non-empty string")
+            if (
+                path_field.startswith("artifacts/ideation-runs/")
+                or path_field.startswith("evidence/ideation-runs/")
+                or "/ideation-runs/" in path_field
+            ):
+                fail(
+                    "CROSS_RUN_INPUT_FORBIDDEN",
+                    f"Prior run evidence cannot be used as {label} runtime input: {path_field}",
+                )
 
     def document(self, run_id: str, command: list[str]) -> dict[str, Any]:
         return {
@@ -128,6 +140,15 @@ def _read_pinned_input(
     workspace_root: Path, relpath: str, expected_sha256: str, *, label: str
 ) -> tuple[Path, bytes]:
     """Resolve a pinned input through the guarded path boundary and hash it."""
+    if (
+        relpath.startswith("artifacts/ideation-runs/")
+        or relpath.startswith("evidence/ideation-runs/")
+        or "/ideation-runs/" in relpath
+    ):
+        fail(
+            "CROSS_RUN_INPUT_FORBIDDEN",
+            f"Prior run evidence cannot be used as {label} runtime input: {relpath}",
+        )
     path = workspace_relative_path(workspace_root, relpath, label=f"{label}_path")
     if not path.is_file():
         fail(f"MISSING_{label.upper()}", f"The pinned {label} is missing")

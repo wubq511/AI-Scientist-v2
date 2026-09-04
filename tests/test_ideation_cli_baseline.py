@@ -7,7 +7,7 @@ import sys
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ENTRY_SCRIPT = REPO_ROOT / "ai_scientist" / "perform_ideation_temp_free.py"
 BASELINE_HELP_SHA256 = (
-    "d21bf1442eb3d20c8c7eb4807d885ef8703091fac9c8928d39c57afded22853d"
+    "76c3c7766174d01f1a20c3db9fe9686b0e84e822ab2b2ecdd6322f1877080e68"
 )
 
 
