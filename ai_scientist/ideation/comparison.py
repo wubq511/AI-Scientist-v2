@@ -4,7 +4,7 @@ One deterministic, credential-free boundary that proves the governed
 cross-domain prompt comparison end to end on synthetic sealed evidence:
 four-case subset selection from the approved 12-case Canary, the frozen
 4-pair/8-run matrix, the frozen blind mapping and sanitized pair packets,
-the append-only spend ledger with the Plan Gate sub-cap arithmetic,
+the append-only spend ledger with the Plan Gate reapproval threshold,
 write-once pair verdicts behind a fail-closed reveal gate, and the
 deterministic Promotion reducer. Nothing here issues provider requests,
 reads credentials, or consumes real case content: every seam is pure over
@@ -27,7 +27,12 @@ import shlex
 import statistics
 from typing import Any, Mapping
 
-from .admission import DEFAULT_MAX_TOKENS, MAX_ATTEMPTS_PER_OPERATION
+from . import pricing
+from .admission import (
+    DEFAULT_MAX_TOKENS,
+    MAX_ATTEMPTS_PER_OPERATION,
+    WORST_CASE_INPUT_TOKENS_PER_ROUND,
+)
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
 from .contract import DEEPSEEK_MODEL_ID, _now
 from .errors import IdeationInputError, fail
@@ -117,18 +122,19 @@ BLIND_MAPPING_SCHEMA_VERSION = "comparison-blind-mapping-v1.0.0"
 COMPARISON_MATRIX_SCHEMA_VERSION = "comparison-run-matrix-v1.0.0"
 SELECTION_MANIFEST_SCHEMA_VERSION = "comparison-selection-manifest-v1.0.0"
 SELECTION_APPROVAL_SCHEMA_VERSION = "comparison-selection-approval-v1.0.0"
-SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.1.0"
+SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.2.0"
 VERDICT_SCHEMA_VERSION = "comparison-pair-verdict-v1.1.0"
 REDUCTION_SCHEMA_VERSION = "comparison-reduction-v1.0.0"
 RUN_RESULT_SCHEMA_VERSION = "comparison-run-result-v1.0.0"
 
-DEFAULT_PROMPT_COMPARISON_SUBCAP_CNY = Decimal("5.00")
+DEFAULT_PROMPT_COMPARISON_REAPPROVAL_THRESHOLD_CNY = Decimal("5.00")
 DEFAULT_COMPARISON_PACKAGE_DIR = (
     Path("artifacts")
     / "ideation-inputs"
     / "comparisons"
     / "002-cross-domain-ideation-prompt"
 )
+SLOT_RUNNER = "scripts/run-prompt-comparison-slot"
 
 VERDICT_ENUM: frozenset[str] = frozenset(
     {"a_better", "b_better", "tie", "incomparable"}
@@ -1477,50 +1483,76 @@ def build_comparison_commands(
     runs: tuple[ComparisonRun, ...],
     *,
     matrix_document: dict[str, Any],
+    package_dir: Path = DEFAULT_COMPARISON_PACKAGE_DIR,
+    plan_gate_reapproval_threshold_cny: Decimal = (
+        DEFAULT_PROMPT_COMPARISON_REAPPROVAL_THRESHOLD_CNY
+    ),
 ) -> tuple[str, ...]:
-    """Exact credential-free commands, one per planned run, in run order.
+    """Exact credential-free guarded commands, one per planned run.
 
-    Only production-parser arguments are used; the credential wrapper is
-    the project's `scripts/with-project-env` launcher (never an env
-    assignment, never a key, never an auto-`yes` pipe). The command text is
-    validated against the production parser contract.
+    The project credential wrapper launches the comparison slot guard. The
+    guard validates the mutable ledger, reserves the next run's peak-price
+    worst-case bound against the 30 CNY hard cap, enforces sequential slots,
+    and immediately execs the production `new-run` command. No credential,
+    automatic approval, or free-form provider control enters the command.
     """
-    runs_by_pair: dict[int, list[ComparisonRun]] = {}
-    for run in runs:
-        runs_by_pair.setdefault(run.pair_index, []).append(run)
     commands: list[str] = []
+    matrix_file_sha256 = sha256_bytes(canonical_json_bytes(matrix_document))
+    threshold = _quantize_cny(plan_gate_reapproval_threshold_cny)
     for run_index in range(1, len(runs) + 1):
-        run = next(r for r in runs if r.run_index == run_index)
-        matrix_run = _matrix_run_entry(matrix_document, run.run_index)
         parts = [
             "python",
             CREDENTIAL_WRAPPER,
             "--",
             "python",
-            ENTRY_SCRIPT,
-            "new-run",
-            "--case-id",
-            run.case_id,
-            "--workshop",
-            matrix_run["workshop"]["path"],
-            "--workshop-sha256",
-            matrix_run["workshop"]["sha256"],
-            "--corpus",
-            matrix_run["corpus"]["path"],
-            "--corpus-sha256",
-            matrix_run["corpus"]["sha256"],
-            "--max-num-generations",
-            str(run.max_num_generations),
-            "--num-reflections",
-            str(run.num_reflections),
-            "--prompt-profile",
-            run.profile_id,
+            SLOT_RUNNER,
+            "--package-dir",
+            str(package_dir),
+            "--matrix-sha256",
+            matrix_file_sha256,
+            "--reapproval-threshold-cny",
+            str(threshold),
+            "--run-index",
+            str(run_index),
         ]
         command = " ".join(shlex_quote(part) for part in parts)
         commands.append(command)
-    for command in commands:
-        _assert_command_contract(command)
+    for run_index, command in enumerate(commands, start=1):
+        _assert_command_contract(
+            command,
+            matrix_document=matrix_document,
+            expected_run_index=run_index,
+            expected_package_dir=package_dir,
+            expected_reapproval_threshold_cny=threshold,
+        )
     return tuple(commands)
+
+
+def _production_new_run_argv(matrix_run: dict[str, Any]) -> tuple[str, ...]:
+    """Build and parser-check the immutable production command for one slot."""
+    parts = (
+        "python",
+        ENTRY_SCRIPT,
+        "new-run",
+        "--case-id",
+        matrix_run["case_id"],
+        "--workshop",
+        matrix_run["workshop"]["path"],
+        "--workshop-sha256",
+        matrix_run["workshop"]["sha256"],
+        "--corpus",
+        matrix_run["corpus"]["path"],
+        "--corpus-sha256",
+        matrix_run["corpus"]["sha256"],
+        "--max-num-generations",
+        str(matrix_run["max_num_generations"]),
+        "--num-reflections",
+        str(matrix_run["num_reflections"]),
+        "--prompt-profile",
+        matrix_run["prompt_profile_id"],
+    )
+    _parse_production_new_run_argv(parts)
+    return parts
 
 
 def _matrix_run_entry(
@@ -1538,33 +1570,57 @@ def shlex_quote(part: str) -> str:
     return shlex.quote(part)
 
 
-def _assert_command_contract(command: str) -> None:
-    """Fail closed on any command shape the production parser rejects."""
+def _parse_production_new_run_argv(tokens: tuple[str, ...]) -> None:
+    """Fail closed unless argv is accepted by the production parser."""
     from ai_scientist.perform_ideation_temp_free import _build_parser
 
-    tokens = shlex.split(command)
-    # Strip "python <wrapper> -- python <entry>" prefix down to the entry
-    # module invocation the production parser understands.
-    if len(tokens) < 2 or tokens[0] != "python":
-        fail("COMMAND_SHAPE_INVALID", "The command must start with the python launcher")
-    if "--" in tokens:
-        dash_index = tokens.index("--")
-        tokens = tokens[dash_index + 1 :]
-    if tokens[:2] != ["python", ENTRY_SCRIPT]:
+    if tokens[:2] != ("python", ENTRY_SCRIPT):
         fail(
             "COMMAND_SHAPE_INVALID", "The command does not invoke the production entry"
         )
     parser = _build_parser()
     try:
-        parsed = parser.parse_args(tokens[2:])
+        parsed = parser.parse_args(list(tokens[2:]))
     except SystemExit:
         fail(
             "COMMAND_NOT_PARSER_SUPPORTED",
             "A frozen command carries arguments the production parser rejects",
-            command=command,
         )
     if parsed.entry != "new-run":
         fail("COMMAND_SHAPE_INVALID", "The command must be a new-run invocation")
+
+
+def _assert_command_contract(
+    command: str,
+    *,
+    matrix_document: dict[str, Any],
+    expected_run_index: int,
+    expected_package_dir: Path,
+    expected_reapproval_threshold_cny: Decimal,
+) -> None:
+    """Fail closed unless the outer guard and inner production argv agree."""
+    tokens = shlex.split(command)
+    expected_tokens = [
+        "python",
+        CREDENTIAL_WRAPPER,
+        "--",
+        "python",
+        SLOT_RUNNER,
+        "--package-dir",
+        str(expected_package_dir),
+        "--matrix-sha256",
+        sha256_bytes(canonical_json_bytes(matrix_document)),
+        "--reapproval-threshold-cny",
+        str(_quantize_cny(expected_reapproval_threshold_cny)),
+        "--run-index",
+        str(expected_run_index),
+    ]
+    if tokens != expected_tokens:
+        fail(
+            "COMMAND_SHAPE_INVALID",
+            "The frozen command must use the exact guarded slot runner shape",
+        )
+    _production_new_run_argv(_matrix_run_entry(matrix_document, expected_run_index))
     forbidden_tokens = (
         "--reasoning-effort",
         "--max-tokens",
@@ -1597,7 +1653,8 @@ def commands_document(commands: tuple[str, ...]) -> dict[str, Any]:
         "count": len(commands),
         "credential_wrapper": CREDENTIAL_WRAPPER,
         "entry_script": ENTRY_SCRIPT,
-        "schema_version": "comparison-commands-v1.0.0",
+        "schema_version": "comparison-commands-v1.2.0",
+        "slot_runner": SLOT_RUNNER,
     }
 
 
@@ -1629,7 +1686,7 @@ class LedgerEntry:
 def initialize_comparison_ledger(
     *,
     matrix_document: dict[str, Any],
-    plan_gate_subcap_cny: Decimal,
+    plan_gate_reapproval_threshold_cny: Decimal,
     historical_spend_cny: Decimal,
 ) -> dict[str, Any]:
     """Start the append-only ledger over the recorded historical balance.
@@ -1639,13 +1696,17 @@ def initialize_comparison_ledger(
     comparison actual spend starts at 0.00 CNY, and the total stage spend
     (historical + tracked) is kept current on every ingest.
     """
-    if not isinstance(plan_gate_subcap_cny, Decimal) or plan_gate_subcap_cny <= 0:
-        fail("INVALID_SUBCAP", "The Plan Gate sub-cap must be a positive decimal")
-    if plan_gate_subcap_cny > CANARY_HARD_CAP_CNY:
+    threshold = plan_gate_reapproval_threshold_cny
+    if not isinstance(threshold, Decimal) or threshold <= 0:
         fail(
-            "SUBCAP_EXCEEDS_CANARY_CAP",
-            "The Plan Gate sub-cap cannot exceed the 30.00 CNY Canary hard cap",
-            subcap=str(plan_gate_subcap_cny),
+            "INVALID_REAPPROVAL_THRESHOLD",
+            "The Plan Gate reapproval threshold must be a positive decimal",
+        )
+    if threshold > CANARY_HARD_CAP_CNY:
+        fail(
+            "REAPPROVAL_THRESHOLD_EXCEEDS_CANARY_CAP",
+            "The reapproval threshold cannot exceed the 30.00 CNY Canary hard cap",
+            threshold=str(threshold),
             canary_cap=str(CANARY_HARD_CAP_CNY),
         )
     if not isinstance(historical_spend_cny, Decimal) or historical_spend_cny < 0:
@@ -1660,7 +1721,7 @@ def initialize_comparison_ledger(
         "entries": [],
         "historical_spend_cny": str(historical),
         "matrix_sha256": matrix_sha256(matrix_document),
-        "plan_gate_subcap_cny": str(plan_gate_subcap_cny),
+        "plan_gate_reapproval_threshold_cny": str(threshold),
         "planned_runs_count": matrix_document["planned_runs_count"],
         "schema_version": SPEND_LEDGER_SCHEMA_VERSION,
         "status": "initialized",
@@ -1685,27 +1746,328 @@ def _ledger_entry_cost(entry: dict[str, Any]) -> Decimal:
     return _money(entry["actual_cost_cny"], label="ledger entry actual_cost_cny")
 
 
-def plan_gate_next_run_allowed(ledger: dict[str, Any]) -> bool:
-    """The frozen Plan Gate rule, evaluated exactly.
+def _validate_ledger_arithmetic(
+    ledger: dict[str, Any], *, matrix_document: dict[str, Any]
+) -> tuple[Decimal, Decimal]:
+    """Recompute every mutable money field and sequential slot identity."""
+    if ledger.get("schema_version") != SPEND_LEDGER_SCHEMA_VERSION:
+        fail("LEDGER_SCHEMA_DRIFT", "The comparison spend ledger schema drifted")
+    if ledger.get("matrix_sha256") != matrix_document.get("matrix_sha256"):
+        fail("MATRIX_PIN_DRIFT", "The spend ledger belongs to another matrix")
+    if matrix_document.get("matrix_sha256") != frozen_matrix_digest(matrix_document):
+        fail("MATRIX_PIN_DRIFT", "The frozen matrix digest no longer verifies")
+    if ledger.get("planned_runs_count") != matrix_document.get("planned_runs_count"):
+        fail("LEDGER_SCHEMA_DRIFT", "The ledger planned-run count drifted")
+    if ledger.get("canary_hard_cap_cny") != str(CANARY_HARD_CAP_CNY):
+        fail("LEDGER_SCHEMA_DRIFT", "The ledger Canary hard cap drifted")
+    entries = ledger.get("entries")
+    if not isinstance(entries, list):
+        fail("LEDGER_SCHEMA_DRIFT", "The ledger entries field must be an array")
+    expected_indexes = list(range(1, len(entries) + 1))
+    normalized_entries: list[dict[str, Any]] = []
+    for index, value in enumerate(entries):
+        normalized_entries.append(
+            closed_object(
+                value,
+                label=f"ledger.entries[{index}]",
+                keys={
+                    "actual_cost_cny",
+                    "case_id",
+                    "pair_index",
+                    "physical_attempt_count",
+                    "profile_id",
+                    "run_id",
+                    "run_index",
+                    "status",
+                    "worst_case_bound_cny",
+                },
+            )
+        )
+    observed_indexes = [entry.get("run_index") for entry in normalized_entries]
+    if observed_indexes != expected_indexes:
+        fail("LEDGER_SLOT_DRIFT", "Ledger entries must follow frozen run order")
+    if len({entry.get("run_id") for entry in normalized_entries}) != len(
+        normalized_entries
+    ):
+        fail("LEDGER_SLOT_DRIFT", "Ledger run ids must be unique")
+    for entry in normalized_entries:
+        matrix_run = _matrix_run_entry(matrix_document, entry["run_index"])
+        if (
+            entry.get("case_id") != matrix_run["case_id"]
+            or entry.get("pair_index") != matrix_run["pair_index"]
+            or entry.get("profile_id") != matrix_run["prompt_profile_id"]
+        ):
+            fail("LEDGER_SLOT_DRIFT", "A ledger entry drifted from its matrix slot")
+    historical = _money(
+        ledger.get("historical_spend_cny"), label="historical_spend_cny"
+    )
+    if historical != CANARY_STAGE_HISTORICAL_SPEND_CNY:
+        fail(
+            "LEDGER_OPENING_BALANCE_DRIFT",
+            "The historical Canary-stage opening balance drifted",
+        )
+    tracked = sum(
+        (_ledger_entry_cost(entry) for entry in normalized_entries), Decimal("0.00")
+    )
+    tracked = _quantize_cny(tracked)
+    total = _quantize_cny(historical + tracked)
+    if (
+        ledger_current_spend(ledger) != tracked
+        or ledger_total_stage_spend(ledger) != total
+    ):
+        fail("LEDGER_ARITHMETIC_DRIFT", "The spend ledger totals do not recompute")
+    threshold = _money(
+        ledger.get("plan_gate_reapproval_threshold_cny"),
+        label="plan_gate_reapproval_threshold_cny",
+    )
+    if threshold <= 0 or threshold > CANARY_HARD_CAP_CNY:
+        fail("LEDGER_SCHEMA_DRIFT", "The reapproval threshold is outside its bounds")
+    expected_status = (
+        "hard_cap_breached"
+        if total > CANARY_HARD_CAP_CNY
+        else (
+            "reapproval_required"
+            if total >= threshold
+            else "ingesting" if entries else "initialized"
+        )
+    )
+    if ledger.get("status") != expected_status:
+        fail("LEDGER_STATUS_DRIFT", "The ledger status disagrees with its totals")
+    if entries and ledger.get("ingested_runs_count") != len(entries):
+        fail("LEDGER_SCHEMA_DRIFT", "The ledger ingested-run count drifted")
+    return total, threshold
 
-    The Plan Gate is the matrix-level actual-spend guard: a next run is
-    admissible only while the total stage spend (historical Canary-stage
-    spend plus tracked comparison actual spend) is strictly below BOTH the
-    Plan Gate sub-cap and the 30.00 CNY Canary hard cap. Exactly-at-cap is
-    refused; one cent over is refused. The per-run worst-case bound
-    (pricing.worst_case_bound, 7.08 CNY for the frozen configuration)
-    belongs to the live admission approval seam (admission.py), not to
-    this gate; this gate never waives the per-run interactive cost
-    approval that preflight requires.
+
+def authorize_next_comparison_run(
+    ledger: dict[str, Any],
+    *,
+    matrix_document: dict[str, Any],
+    run_index: int,
+    next_run_worst_case_bound_cny: Decimal,
+) -> dict[str, Any]:
+    """Authorize one sequential slot before any irreversible provider request.
+
+    The 5 CNY Plan Gate control is an observed-spend reapproval threshold:
+    crossing it on an already individually approved run is recorded, then
+    blocks the next slot. The 30 CNY Canary cap is the true hard cap and
+    reserves the next run's peak-price worst-case bound before launch.
     """
-    subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
-    total = ledger_total_stage_spend(ledger)
-    return total < subcap and total < CANARY_HARD_CAP_CNY
+    total, threshold = _validate_ledger_arithmetic(
+        ledger, matrix_document=matrix_document
+    )
+    entries = ledger["entries"]
+    expected_run_index = len(entries) + 1
+    if run_index != expected_run_index:
+        fail(
+            "PREVIOUS_SLOT_NOT_INGESTED",
+            "Only the next sequential matrix slot may be launched",
+            expected_run_index=expected_run_index,
+            requested_run_index=run_index,
+        )
+    if run_index > matrix_document["planned_runs_count"]:
+        fail("MATRIX_COMPLETE", "Every frozen comparison run is already ingested")
+    if total > CANARY_HARD_CAP_CNY:
+        fail(
+            "CANARY_HARD_CAP_BREACHED",
+            "Recorded stage spend already exceeds the Canary hard cap",
+        )
+    if total >= threshold:
+        fail(
+            "PLAN_GATE_REAPPROVAL_REQUIRED",
+            "Observed stage spend reached the Plan Gate reapproval threshold",
+            current=str(total),
+            threshold=str(threshold),
+        )
+    bound = next_run_worst_case_bound_cny
+    if not isinstance(bound, Decimal) or bound <= 0:
+        fail("INVALID_BUDGET", "The next-run worst-case bound must be positive")
+    projected = _quantize_cny(total + bound)
+    if projected > CANARY_HARD_CAP_CNY:
+        fail(
+            "CANARY_HARD_CAP_RESERVATION_FAILED",
+            "The next run's worst-case bound does not fit the Canary hard cap",
+            current=str(total),
+            next_run_worst_case_bound_cny=str(bound),
+            projected_hard_ceiling_cny=str(projected),
+            canary_hard_cap_cny=str(CANARY_HARD_CAP_CNY),
+        )
+    return {
+        "canary_hard_cap_cny": str(CANARY_HARD_CAP_CNY),
+        "current_total_stage_spend_cny": str(total),
+        "matrix_sha256": matrix_document["matrix_sha256"],
+        "next_run_worst_case_bound_cny": str(_quantize_cny(bound)),
+        "plan_gate_reapproval_threshold_cny": str(threshold),
+        "projected_hard_ceiling_cny": str(projected),
+        "run_index": run_index,
+        "schema_version": "comparison-run-authorization-v1.0.0",
+    }
 
 
-def plan_gate_one_cent_over(ledger: dict[str, Any]) -> bool:
-    """True exactly when the current total spend is at or over a cap."""
-    return not plan_gate_next_run_allowed(ledger)
+def prepare_comparison_slot_launch(
+    workspace_root: Path,
+    *,
+    package_dir: Path,
+    expected_matrix_sha256: str,
+    expected_reapproval_threshold_cny: Decimal,
+    run_index: int,
+) -> dict[str, Any]:
+    """Verify one frozen slot and return the exact production argv to exec.
+
+    This function performs no network access and never reads credentials. The
+    caller must exec the returned argv immediately so the aggregate budget
+    decision and the production interactive admission remain one launch path.
+    """
+    if not isinstance(run_index, int) or isinstance(run_index, bool) or run_index < 1:
+        fail("INVALID_RUN_INDEX", "The comparison run index must be positive")
+    root = workspace_root.resolve()
+    resolved_package = (
+        package_dir.resolve()
+        if package_dir.is_absolute()
+        else (root / package_dir).resolve()
+    )
+    matrix_path = resolved_package / "run-matrix.json"
+    ledger_path = resolved_package / "spend-ledger.json"
+    if not matrix_path.is_file() or not ledger_path.is_file():
+        fail(
+            "COMPARISON_PACKAGE_INCOMPLETE",
+            "The comparison package lacks its matrix or spend ledger",
+        )
+    expected_matrix_digest = parse_sha256(
+        expected_matrix_sha256, label="expected_matrix_sha256"
+    )
+    matrix_bytes = matrix_path.read_bytes()
+    observed_matrix_digest = sha256_bytes(matrix_bytes)
+    if observed_matrix_digest != expected_matrix_digest:
+        fail(
+            "MATRIX_FILE_HASH_MISMATCH",
+            "The comparison matrix bytes do not match the frozen command",
+            expected=expected_matrix_digest,
+            actual=observed_matrix_digest,
+        )
+    matrix_document = parse_json_bytes(matrix_bytes, label="comparison run matrix")
+    ledger = parse_json_bytes(ledger_path.read_bytes(), label="comparison spend ledger")
+    if not isinstance(matrix_document, dict) or not isinstance(ledger, dict):
+        fail("INVALID_SCHEMA", "Comparison matrix and ledger must be objects")
+    if matrix_document.get("schema_version") != COMPARISON_MATRIX_SCHEMA_VERSION:
+        fail("MATRIX_PIN_DRIFT", "The comparison matrix schema drifted")
+    if (
+        not isinstance(expected_reapproval_threshold_cny, Decimal)
+        or expected_reapproval_threshold_cny <= 0
+        or _quantize_cny(expected_reapproval_threshold_cny)
+        != expected_reapproval_threshold_cny
+    ):
+        fail(
+            "INVALID_REAPPROVAL_THRESHOLD",
+            "The frozen reapproval threshold must be a positive CNY amount",
+        )
+    if ledger.get("plan_gate_reapproval_threshold_cny") != str(
+        expected_reapproval_threshold_cny
+    ):
+        fail(
+            "PLAN_GATE_CONTRACT_DRIFT",
+            "The ledger reapproval threshold differs from the frozen command",
+        )
+    assert_single_variable_matrix(matrix_document)
+    matrix_run = _matrix_run_entry(matrix_document, run_index)
+    if (
+        matrix_run.get("model_id") != DEEPSEEK_MODEL_ID
+        or matrix_run.get("reasoning_effort") != COMPARISON_REASONING_EFFORT
+        or matrix_run.get("max_tokens") != COMPARISON_MAX_TOKENS
+    ):
+        fail(
+            "COMPARISON_IDENTITY_MISMATCH",
+            "The frozen slot's model controls drifted",
+        )
+    generations = matrix_run.get("max_num_generations")
+    reflections = matrix_run.get("num_reflections")
+    if (
+        not isinstance(generations, int)
+        or isinstance(generations, bool)
+        or not isinstance(reflections, int)
+        or isinstance(reflections, bool)
+    ):
+        fail(
+            "COMPARISON_IDENTITY_MISMATCH",
+            "The frozen slot's run counts drifted",
+        )
+    model_rounds = generations * reflections
+    attempts = matrix_document.get("runtime_controls", {}).get(
+        "max_attempts_per_operation"
+    )
+    if (
+        model_rounds != COMPARISON_MAX_NUM_GENERATIONS * COMPARISON_NUM_REFLECTIONS
+        or attempts != MAX_ATTEMPTS_PER_OPERATION
+    ):
+        fail(
+            "COMPARISON_IDENTITY_MISMATCH",
+            "The frozen slot's run budget controls drifted",
+        )
+    price_table = pricing.load_price_table(root)
+    bound = pricing.worst_case_bound(
+        price_table,
+        input_tokens=model_rounds * WORST_CASE_INPUT_TOKENS_PER_ROUND,
+        output_tokens=model_rounds * matrix_run["max_tokens"],
+        attempts=attempts,
+    )
+    authorization = authorize_next_comparison_run(
+        ledger,
+        matrix_document=matrix_document,
+        run_index=run_index,
+        next_run_worst_case_bound_cny=bound.total_cny,
+    )
+    return {
+        "authorization": authorization,
+        "command_argv": _production_new_run_argv(matrix_run),
+        "matrix_file_sha256": observed_matrix_digest,
+        "package_dir": str(resolved_package),
+        "price_table_sha256": price_table.sha256,
+    }
+
+
+def reserve_comparison_slot(launch: dict[str, Any]) -> dict[str, Any]:
+    """Write one exclusive pre-exec reservation for a frozen matrix slot.
+
+    The reservation closes duplicate/concurrent launch races that an
+    append-after-run ledger cannot prevent. It is deliberately not released
+    automatically: a process failure leaves a visible fail-closed artifact
+    that must be reconciled against the Evidence Chain before any retry.
+    """
+    authorization = launch.get("authorization")
+    command_argv = launch.get("command_argv")
+    package_dir = launch.get("package_dir")
+    if (
+        not isinstance(authorization, dict)
+        or not isinstance(command_argv, tuple)
+        or not command_argv
+        or not isinstance(package_dir, str)
+    ):
+        fail("INVALID_SCHEMA", "The comparison launch plan is incomplete")
+    run_index = authorization.get("run_index")
+    if not isinstance(run_index, int) or isinstance(run_index, bool):
+        fail("INVALID_SCHEMA", "The comparison authorization lacks a run index")
+    reservations_dir = Path(package_dir) / "vault" / "run-reservations"
+    reservations_dir.mkdir(parents=True, exist_ok=True)
+    reservation_path = reservations_dir / f"run-{run_index:03d}.json"
+    document = {
+        "authorization": dict(authorization),
+        "command_argv_sha256": sha256_bytes(canonical_json_bytes(list(command_argv))),
+        "price_table_sha256": launch.get("price_table_sha256"),
+        "reserved_at": _now(),
+        "run_index": run_index,
+        "schema_version": "comparison-run-reservation-v1.0.0",
+    }
+    data = canonical_json_bytes(document)
+    digest = _write_bytes_once(
+        reservation_path,
+        data,
+        label=f"comparison slot {run_index} reservation",
+        exists_code="COMPARISON_SLOT_ALREADY_RESERVED",
+    )
+    return {
+        "document": document,
+        "path": str(reservation_path),
+        "sha256": digest,
+    }
 
 
 def ingest_run_actual_cost(
@@ -1713,9 +2075,27 @@ def ingest_run_actual_cost(
     *,
     entry: LedgerEntry,
 ) -> dict[str, Any]:
-    """Append one per-run actual-cost record; the ledger is append-only."""
+    """Append actual cost even when it crosses a governance threshold.
+
+    Accounting evidence is never discarded merely because spend crossed a
+    limit. The returned status blocks future launches; the hard cap itself
+    is enforced by `authorize_next_comparison_run` before provider work.
+    """
     if ledger.get("status") not in ("initialized", "ingesting"):
         fail("LEDGER_CLOSED", "The ledger is not accepting run ingests")
+    if (
+        not isinstance(entry.actual_cost_cny, Decimal)
+        or entry.actual_cost_cny < 0
+        or not isinstance(entry.worst_case_bound_cny, Decimal)
+        or entry.worst_case_bound_cny <= 0
+    ):
+        fail("INVALID_BUDGET", "Ledger costs must be valid non-negative decimals")
+    if (
+        not isinstance(entry.physical_attempt_count, int)
+        or isinstance(entry.physical_attempt_count, bool)
+        or entry.physical_attempt_count < 0
+    ):
+        fail("INVALID_SCHEMA", "Physical attempt count must be non-negative")
     parse_case_id(entry.case_id)
     for run in ledger["entries"]:
         if run["run_id"] == entry.run_id:
@@ -1730,30 +2110,20 @@ def ingest_run_actual_cost(
                 "The ledger already carries this planned run slot",
                 run_index=entry.run_index,
             )
-    subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
+    if entry.run_index != len(ledger.get("entries", [])) + 1:
+        fail("LEDGER_SLOT_DRIFT", "Run costs must be ingested in frozen slot order")
+    threshold = _money(
+        ledger["plan_gate_reapproval_threshold_cny"],
+        label="plan_gate_reapproval_threshold_cny",
+    )
     tracked = ledger_current_spend(ledger)
     total = ledger_total_stage_spend(ledger)
     new_tracked = _quantize_cny(tracked + entry.actual_cost_cny)
     new_total = _quantize_cny(total + entry.actual_cost_cny)
-    if new_total > subcap:
-        fail(
-            "SUBCAP_EXCEEDED",
-            "The matrix-level Plan Gate actual-spend authorization is exhausted; "
-            "halt before recording further runs",
-            current=str(total),
-            run_cost=str(entry.actual_cost_cny),
-            subcap=str(subcap),
-        )
-    if new_total > CANARY_HARD_CAP_CNY:
-        fail(
-            "BUDGET_EXCEEDED",
-            "Ingesting this run would exceed the 30.00 CNY Canary hard cap",
-            current=str(total),
-            run_cost=str(entry.actual_cost_cny),
-        )
     record = {
         "actual_cost_cny": str(_quantize_cny(entry.actual_cost_cny)),
         "case_id": entry.case_id,
+        "pair_index": entry.pair_index,
         "physical_attempt_count": entry.physical_attempt_count,
         "profile_id": entry.profile_id,
         "run_id": entry.run_id,
@@ -1766,7 +2136,12 @@ def ingest_run_actual_cost(
     updated["comparison_actual_spend_cny"] = str(new_tracked)
     updated["total_stage_spend_cny"] = str(new_total)
     updated["ingested_runs_count"] = len(updated["entries"])
-    updated["status"] = "ingesting"
+    if new_total > CANARY_HARD_CAP_CNY:
+        updated["status"] = "hard_cap_breached"
+    elif new_total >= threshold:
+        updated["status"] = "reapproval_required"
+    else:
+        updated["status"] = "ingesting"
     return updated
 
 
@@ -1777,22 +2152,25 @@ def plan_gate_approval_document(
 ) -> dict[str, Any]:
     """Record the Plan Gate approval of the comparison matrix.
 
-    The approval authorizes the whole governed matrix inside the sub-cap;
-    it is explicitly NOT a per-run approval: each run's preflight still
-    requires Robert's interactive `yes` (spec user story 47).
+    The approval sets a matrix reapproval threshold and a separate hard cap;
+    it is explicitly NOT a per-run approval. Each run's production preflight
+    still requires Robert's interactive `yes` (spec user story 47).
     """
     approved_by = nonempty_string(approved_by, label="approved_by")
-    subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
+    threshold = _money(
+        ledger["plan_gate_reapproval_threshold_cny"],
+        label="plan_gate_reapproval_threshold_cny",
+    )
     historical = _money(ledger["historical_spend_cny"], label="historical_spend_cny")
     document = {
         "approved_by": approved_by,
         "canary_hard_cap_cny": str(CANARY_HARD_CAP_CNY),
         "comparison_actual_spend_cny": str(ledger_current_spend(ledger)),
         "historical_spend_cny": str(historical),
-        "plan_gate_subcap_cny": str(subcap),
+        "plan_gate_reapproval_threshold_cny": str(threshold),
         "planned_runs_count": ledger["planned_runs_count"],
-        "schema_version": "comparison-plan-gate-approval-v1.0.0",
-        "scope": "matrix_level_only_not_per_run",
+        "schema_version": "comparison-plan-gate-approval-v1.1.0",
+        "scope": "matrix_reapproval_threshold_not_per_run",
         "total_stage_spend_cny": str(ledger_total_stage_spend(ledger)),
     }
     return document
@@ -1800,7 +2178,7 @@ def plan_gate_approval_document(
 
 def plan_gate_does_not_waive_per_run_approval(approval: dict[str, Any]) -> bool:
     """Machine check: the recorded approval carries the no-waive scope."""
-    return approval.get("scope") == "matrix_level_only_not_per_run"
+    return approval.get("scope") == "matrix_reapproval_threshold_not_per_run"
 
 
 # ==========================================================================
@@ -2609,22 +2987,23 @@ def reduce_prompt_comparison(
     if not (cost_ok and latency_ok):
         decision = "reject"
 
-    # Gate 9: the frozen spend bounds (sub-cap, then the 30 CNY cap). The
-    # deliberate asymmetry: the consultation gate (plan_gate_next_run_allowed)
-    # is strictly preventive (`<`; exactly-at-cap refuses the next run),
-    # while the reducer is verdictive — a post-hoc reduction at exactly the
-    # sub-cap is compliant — so this gate uses non-strict `<=` on both the
-    # sub-cap and the cap, over the total stage spend (historical
-    # Canary-stage spend + tracked comparison actual spend).
-    total_spend = ledger_total_stage_spend(ledger)
-    subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
-    budget_ok = total_spend <= subcap and total_spend <= CANARY_HARD_CAP_CNY
+    # Gate 9: the 30 CNY hard cap. The 5 CNY control is a pre-next-run
+    # reapproval threshold, not a post-hoc quality rejection threshold: an
+    # individually approved run may cross it before the ledger can know its
+    # actual cost. The reducer records whether that happened, while only a
+    # true hard-cap breach rejects the comparison.
+    total_spend, threshold = _validate_ledger_arithmetic(
+        ledger,
+        matrix_document=matrix_document,
+    )
+    budget_ok = total_spend <= CANARY_HARD_CAP_CNY
     gates["budget"] = {
         "comparison_actual_spend_cny": str(_quantize_cny(ledger_current_spend(ledger))),
         "historical_spend_cny": str(
             _money(ledger["historical_spend_cny"], label="historical_spend_cny")
         ),
-        "plan_gate_subcap_cny": str(subcap),
+        "plan_gate_reapproval_threshold_cny": str(threshold),
+        "reapproval_threshold_reached": total_spend >= threshold,
         "total_stage_spend_cny": str(_quantize_cny(total_spend)),
         "pass": budget_ok,
     }
@@ -2690,7 +3069,9 @@ def _reduction_document(
 def freeze_prompt_comparison_package(
     workspace_root: Path,
     *,
-    plan_gate_subcap_cny: Decimal = DEFAULT_PROMPT_COMPARISON_SUBCAP_CNY,
+    plan_gate_reapproval_threshold_cny: Decimal = (
+        DEFAULT_PROMPT_COMPARISON_REAPPROVAL_THRESHOLD_CNY
+    ),
     target_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Materialize the full deterministic 4-pair comparison package to disk.
@@ -2701,9 +3082,9 @@ def freeze_prompt_comparison_package(
     3. Builds selection manifest and selection approval artifacts.
     4. Builds 4-pair / 8-run frozen matrix (2/2 order balance, self-pinning).
     5. Builds frozen blind mapping (2/2 A/B balance).
-    6. Builds exact credential-free CLI commands.
+    6. Builds exact credential-free guarded slot commands.
     7. Initializes the spend ledger over the recorded 0.14 CNY historical
-       Canary-stage opening balance, with the Plan Gate sub-cap.
+       Canary-stage opening balance, with the Plan Gate reapproval threshold.
     8. Materializes artifacts to target_dir with idempotent byte-identical safety.
     9. Sets up ComparisonVault for results, pair packets, verdicts, reveal, and reducer.
     """
@@ -2740,12 +3121,20 @@ def freeze_prompt_comparison_package(
         mappings, selection_manifest=selection_manifest
     )
 
-    commands = build_comparison_commands(runs, matrix_document=matrix_document)
+    command_package_dir = (
+        target_dir if target_dir is not None else DEFAULT_COMPARISON_PACKAGE_DIR
+    )
+    commands = build_comparison_commands(
+        runs,
+        matrix_document=matrix_document,
+        package_dir=command_package_dir,
+        plan_gate_reapproval_threshold_cny=plan_gate_reapproval_threshold_cny,
+    )
     commands_text = "\n".join(commands) + "\n"
 
     ledger = initialize_comparison_ledger(
         matrix_document=matrix_document,
-        plan_gate_subcap_cny=plan_gate_subcap_cny,
+        plan_gate_reapproval_threshold_cny=plan_gate_reapproval_threshold_cny,
         historical_spend_cny=CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
 
@@ -2800,6 +3189,6 @@ def freeze_prompt_comparison_package(
         "commands": commands,
         "first_command": commands[0],
         "frozen_matrix_digest": matrix_document["matrix_sha256"],
-        "plan_gate_subcap_cny": str(plan_gate_subcap_cny),
+        "plan_gate_reapproval_threshold_cny": str(plan_gate_reapproval_threshold_cny),
         "selected_cases": tuple(c.case_id for c in selected),
     }

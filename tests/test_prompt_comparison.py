@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -589,13 +591,28 @@ def test_commands_parse_with_production_parser_and_stay_credential_free() -> Non
     runs, _pairs, document, _manifest = _matrix(_selected())
     commands = build_comparison_commands(runs, matrix_document=document)
     assert len(commands) == 8
+    matrix_file_sha256 = sha256_bytes(canonical_json_bytes(document))
     parser = _build_parser()
-    for command in commands:
+    for run_index, command in enumerate(commands, start=1):
         assert "scripts/with-project-env" in command
         tokens = shlex.split(command)
-        dash_index = tokens.index("--")
-        payload = tokens[dash_index + 1 :]
-        parsed = parser.parse_args(payload[2:])
+        assert tokens == [
+            "python",
+            "scripts/with-project-env",
+            "--",
+            "python",
+            "scripts/run-prompt-comparison-slot",
+            "--package-dir",
+            str(cmp_mod.DEFAULT_COMPARISON_PACKAGE_DIR),
+            "--matrix-sha256",
+            matrix_file_sha256,
+            "--reapproval-threshold-cny",
+            "5.00",
+            "--run-index",
+            str(run_index),
+        ]
+        inner = cmp_mod._production_new_run_argv(document["runs"][run_index - 1])
+        parsed = parser.parse_args(list(inner[2:]))
         assert parsed.entry == "new-run"
         assert parsed.prompt_profile in (
             cmp_mod.BASELINE_PROFILE_ID,
@@ -614,29 +631,26 @@ def test_commands_parse_with_production_parser_and_stay_credential_free() -> Non
             assert forbidden not in command
 
 
-def test_commands_reject_unsupported_provider_arguments() -> None:
+def test_commands_reject_direct_or_augmented_runner_shapes() -> None:
     from ai_scientist.ideation.comparison import _assert_command_contract
 
-    base = (
-        "python scripts/with-project-env -- python "
-        "ai_scientist/perform_ideation_temp_free.py new-run "
-        "--case-id case-0123456789abcdef0123456789abcdef "
-        "--workshop artifacts/w.md --workshop-sha256 "
-        + "2" * 64
-        + " --corpus artifacts/c.json --corpus-sha256 "
-        + "1" * 64
-        + " --max-num-generations 1 --num-reflections 3 "
-        "--prompt-profile ml-baseline-v1"
+    runs, _pairs, document, _manifest = _matrix(_selected())
+    base = cmp_mod.build_comparison_commands(runs, matrix_document=document)[0]
+    kwargs = {
+        "matrix_document": document,
+        "expected_run_index": 1,
+        "expected_package_dir": cmp_mod.DEFAULT_COMPARISON_PACKAGE_DIR,
+        "expected_reapproval_threshold_cny": Decimal("5.00"),
+    }
+    _assert_command_contract(base, **kwargs)
+    with pytest.raises(Exception, match="COMMAND_SHAPE_INVALID"):
+        _assert_command_contract(base + " --reasoning-effort max", **kwargs)
+    direct = " ".join(
+        shlex.quote(part)
+        for part in cmp_mod._production_new_run_argv(document["runs"][0])
     )
-    _assert_command_contract(base)  # accepted
-    with pytest.raises(Exception, match="COMMAND_NOT_PARSER_SUPPORTED"):
-        _assert_command_contract(base + " --reasoning-effort max")
-    with pytest.raises(Exception, match="COMMAND_NOT_PARSER_SUPPORTED"):
-        _assert_command_contract(base + " --max-tokens 32768")
-    with pytest.raises(Exception, match="COMMAND_FORBIDDEN_ARGUMENT"):
-        _assert_command_contract(
-            base.replace("scripts/with-project-env", "DEEPSEEK_API_KEY=sk-xxx python")
-        )
+    with pytest.raises(Exception, match="COMMAND_SHAPE_INVALID"):
+        _assert_command_contract(direct, **kwargs)
 
 
 # ==========================================================================
@@ -650,7 +664,7 @@ def _ledger():
 
     return cmp_mod.initialize_comparison_ledger(
         matrix_document=document,
-        plan_gate_subcap_cny=D("4.00"),
+        plan_gate_reapproval_threshold_cny=D("4.00"),
         historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
 
@@ -658,11 +672,13 @@ def _ledger():
 def _entry(run_index: int, cost: str, run_id: str) -> cmp_mod.LedgerEntry:
     from decimal import Decimal as D
 
+    _runs, _pairs, document, _manifest = _matrix(_selected())
+    matrix_run = next(run for run in document["runs"] if run["run_index"] == run_index)
     return cmp_mod.LedgerEntry(
         run_index=run_index,
-        pair_index=1,
-        case_id=_selected()[0].case_id,
-        profile_id=cmp_mod.BASELINE_PROFILE_ID,
+        pair_index=matrix_run["pair_index"],
+        case_id=matrix_run["case_id"],
+        profile_id=matrix_run["prompt_profile_id"],
         run_id=run_id,
         status="success",
         actual_cost_cny=D(cost),
@@ -706,7 +722,7 @@ def test_ledger_rejects_negative_historical_spend() -> None:
     with pytest.raises(Exception, match="INVALID_HISTORICAL_SPEND"):
         cmp_mod.initialize_comparison_ledger(
             matrix_document=document,
-            plan_gate_subcap_cny=D("4.00"),
+            plan_gate_reapproval_threshold_cny=D("4.00"),
             historical_spend_cny=D("-0.01"),
         )
 
@@ -718,7 +734,7 @@ def test_ledger_ingests_failed_suspended_resumed_and_retried_runs() -> None:
         entry = _entry(index, "0.10", f"r{index}")
         entry = cmp_mod.LedgerEntry(
             run_index=index,
-            pair_index=1,
+            pair_index=entry.pair_index,
             case_id=entry.case_id,
             profile_id=entry.profile_id,
             run_id=entry.run_id,
@@ -734,37 +750,41 @@ def test_ledger_ingests_failed_suspended_resumed_and_retried_runs() -> None:
     assert attempts == [1, 1, 2, 1]
 
 
-def test_plan_gate_is_strict_total_stage_guard() -> None:
+def test_plan_gate_threshold_is_checked_before_the_next_run() -> None:
     from decimal import Decimal as D
 
-    # subcap 4.00, opening historical 0.14. The gate is a matrix-level
-    # actual-spend guard with no per-run worst-case-bound parameter: it
-    # authorizes while total stage spend is strictly below both caps.
+    # Threshold 4.00, opening historical 0.14. Actual spend may reach the
+    # threshold, but the next irreversible provider run must then stop.
+    _runs, _pairs, document, _manifest = _matrix(_selected())
     ledger = _ledger()
     ledger = cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(1, "3.85", "r1"))
     assert cmp_mod.ledger_total_stage_spend(ledger) == D("3.99")
-    assert cmp_mod.plan_gate_next_run_allowed(ledger)
-    assert not cmp_mod.plan_gate_one_cent_over(ledger)
-    # Total reaches exactly the sub-cap: strictly refused (exactly-at-cap
-    # is refused, one cent over is refused).
+    cmp_mod.authorize_next_comparison_run(
+        ledger,
+        matrix_document=document,
+        run_index=2,
+        next_run_worst_case_bound_cny=D("0.01"),
+    )
     ledger = cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(2, "0.01", "r2"))
     assert cmp_mod.ledger_total_stage_spend(ledger) == D("4.00")
-    assert not cmp_mod.plan_gate_next_run_allowed(ledger)
-    assert cmp_mod.plan_gate_one_cent_over(ledger)
-    # One more cent pushes the total over the sub-cap, which now fails
-    # closed at ingest (SUBCAP_EXCEEDED) before any further run is recorded.
-    with pytest.raises(Exception, match="SUBCAP_EXCEEDED"):
-        cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(3, "0.01", "r3"))
+    assert ledger["status"] == "reapproval_required"
+    with pytest.raises(Exception, match="PLAN_GATE_REAPPROVAL_REQUIRED"):
+        cmp_mod.authorize_next_comparison_run(
+            ledger,
+            matrix_document=document,
+            run_index=3,
+            next_run_worst_case_bound_cny=D("0.01"),
+        )
 
 
-def test_plan_gate_subcap_cannot_exceed_canary_cap() -> None:
+def test_plan_gate_reapproval_threshold_cannot_exceed_canary_cap() -> None:
     from decimal import Decimal as D
 
     _runs, _pairs, document, _manifest = _matrix(_selected())
-    with pytest.raises(Exception, match="SUBCAP_EXCEEDS_CANARY_CAP"):
+    with pytest.raises(Exception, match="REAPPROVAL_THRESHOLD_EXCEEDS_CANARY_CAP"):
         cmp_mod.initialize_comparison_ledger(
             matrix_document=document,
-            plan_gate_subcap_cny=D("30.01"),
+            plan_gate_reapproval_threshold_cny=D("30.01"),
             historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
         )
 
@@ -774,23 +794,19 @@ def test_plan_gate_is_not_a_per_run_approval() -> None:
         ledger=_ledger(), approved_by="Robert"
     )
     assert cmp_mod.plan_gate_does_not_waive_per_run_approval(approval)
-    assert approval["scope"] == "matrix_level_only_not_per_run"
+    assert approval["scope"] == "matrix_reapproval_threshold_not_per_run"
+    assert approval["plan_gate_reapproval_threshold_cny"] == "4.00"
     assert approval["historical_spend_cny"] == "0.14"
     assert approval["comparison_actual_spend_cny"] == "0.00"
     assert approval["total_stage_spend_cny"] == "0.14"
 
 
-def test_ledger_subcap_refusal_halts_before_any_30_cny_cap() -> None:
-    from decimal import Decimal as D
-
-    # The sub-cap (4.00) is enforced at ingest and precedes the 30.00 CNY
-    # hard cap, so a run that would exceed the sub-cap fails closed with
-    # SUBCAP_EXCEEDED before recording. (BUDGET_EXCEEDED stays as the
-    # defensive cap check but is unreachable: subcap <= 30.00, so any
-    # total over 30.00 already exceeds the sub-cap.)
+def test_ledger_records_a_hard_cap_breach_instead_of_hiding_actual_spend() -> None:
     ledger = _ledger()
-    with pytest.raises(Exception, match="SUBCAP_EXCEEDED"):
-        cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(1, "30.01", "r1"))
+    breached = cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(1, "30.01", "r1"))
+    assert breached["comparison_actual_spend_cny"] == "30.01"
+    assert breached["total_stage_spend_cny"] == "30.15"
+    assert breached["status"] == "hard_cap_breached"
 
 
 # ==========================================================================
@@ -1003,7 +1019,7 @@ def _reducer_env():
     }
     ledger = cmp_mod.initialize_comparison_ledger(
         matrix_document=document,
-        plan_gate_subcap_cny=Decimal("4.00"),
+        plan_gate_reapproval_threshold_cny=Decimal("4.00"),
         historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
     return selected, reveal_document, manifest, document, ledger
@@ -1556,7 +1572,7 @@ def ingested_env(
 
     ledger = initialize_comparison_ledger(
         matrix_document=document,
-        plan_gate_subcap_cny=CANARY_HARD_CAP_CNY,
+        plan_gate_reapproval_threshold_cny=CANARY_HARD_CAP_CNY,
         historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
     metrics_by_run: dict[str, cmp_mod.RunMetrics] = {}
@@ -1887,12 +1903,12 @@ def test_freeze_prompt_comparison_package_reproducibility_and_drift(
     pkg_dir = tmp_path / "comparison-pkg"
     result = freeze_prompt_comparison_package(
         REPO_ROOT,
-        plan_gate_subcap_cny=Decimal("5.00"),
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
         target_dir=pkg_dir,
     )
     assert len(result["selected_cases"]) == 4
     assert len(result["commands"]) == 8
-    assert result["plan_gate_subcap_cny"] == "5.00"
+    assert result["plan_gate_reapproval_threshold_cny"] == "5.00"
 
     expected_files = [
         "selection-manifest.json",
@@ -1912,7 +1928,7 @@ def test_freeze_prompt_comparison_package_reproducibility_and_drift(
     # Idempotent re-run produces identical package
     result2 = freeze_prompt_comparison_package(
         REPO_ROOT,
-        plan_gate_subcap_cny=Decimal("5.00"),
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
         target_dir=pkg_dir,
     )
     assert result["artifacts"] == result2["artifacts"]
@@ -1923,7 +1939,7 @@ def test_freeze_prompt_comparison_package_reproducibility_and_drift(
     with pytest.raises(IdeationInputError) as exc_info:
         freeze_prompt_comparison_package(
             REPO_ROOT,
-            plan_gate_subcap_cny=Decimal("5.00"),
+            plan_gate_reapproval_threshold_cny=Decimal("5.00"),
             target_dir=pkg_dir,
         )
     assert exc_info.value.code == "PACKAGE_DRIFT"
@@ -1935,26 +1951,37 @@ def test_freeze_prompt_comparison_commands_parser_contract(
     pkg_dir = tmp_path / "comparison-pkg"
     result = freeze_prompt_comparison_package(
         REPO_ROOT,
-        plan_gate_subcap_cny=Decimal("5.00"),
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
         target_dir=pkg_dir,
     )
     commands = result["commands"]
     assert len(commands) == 8
 
-    parser = _build_parser()
     profile_counts: dict[str, int] = {}
-    for cmd in commands:
+    matrix_document = json.loads((pkg_dir / "run-matrix.json").read_text())
+    matrix_file_sha256 = sha256_bytes((pkg_dir / "run-matrix.json").read_bytes())
+    parser = _build_parser()
+    for run_index, cmd in enumerate(commands, start=1):
         parts = shlex.split(cmd)
-        # Expected: python scripts/with-project-env -- python ai_scientist/perform_ideation_temp_free.py new-run ...
-        assert parts[0] == "python"
-        assert parts[1] == "scripts/with-project-env"
-        assert parts[2] == "--"
-        assert parts[3] == "python"
-        assert parts[4] == "ai_scientist/perform_ideation_temp_free.py"
-        assert parts[5] == "new-run"
+        assert parts == [
+            "python",
+            "scripts/with-project-env",
+            "--",
+            "python",
+            "scripts/run-prompt-comparison-slot",
+            "--package-dir",
+            str(pkg_dir),
+            "--matrix-sha256",
+            matrix_file_sha256,
+            "--reapproval-threshold-cny",
+            "5.00",
+            "--run-index",
+            str(run_index),
+        ]
 
-        # Production CLI parser checks
-        args = parser.parse_args(parts[5:])
+        # The guard reconstructs and parser-checks this immutable inner argv.
+        inner = cmp_mod._production_new_run_argv(matrix_document["runs"][run_index - 1])
+        args = parser.parse_args(list(inner[2:]))
         profile_counts[args.prompt_profile] = (
             profile_counts.get(args.prompt_profile, 0) + 1
         )
@@ -1969,3 +1996,228 @@ def test_freeze_prompt_comparison_commands_parser_contract(
         assert "--key" not in cmd
 
     assert profile_counts == {"ml-baseline-v1": 4, "cross-domain-v1": 4}
+
+
+def test_reapproval_threshold_records_crossing_and_blocks_the_next_slot() -> None:
+    """The 5 CNY control is a reapproval threshold, not a false hard cap."""
+    _runs, _pairs, document, _manifest = _matrix(_selected())
+    ledger = cmp_mod.initialize_comparison_ledger(
+        matrix_document=document,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
+    )
+    crossed = cmp_mod.ingest_run_actual_cost(
+        ledger,
+        entry=_entry(1, "4.87", "threshold-crossing-run"),
+    )
+    assert crossed["total_stage_spend_cny"] == "5.01"
+    assert crossed["status"] == "reapproval_required"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.authorize_next_comparison_run(
+            crossed,
+            matrix_document=document,
+            run_index=2,
+            next_run_worst_case_bound_cny=Decimal("7.08"),
+        )
+    assert exc_info.value.code == "PLAN_GATE_REAPPROVAL_REQUIRED"
+
+
+def _slot_prepare_kwargs(pkg_dir: Path, run_index: int) -> dict[str, object]:
+    return {
+        "package_dir": pkg_dir,
+        "expected_matrix_sha256": sha256_bytes(
+            (pkg_dir / "run-matrix.json").read_bytes()
+        ),
+        "expected_reapproval_threshold_cny": Decimal("5.00"),
+        "run_index": run_index,
+    }
+
+
+def _slot_runner_argv(pkg_dir: Path, run_index: int) -> list[str]:
+    kwargs = _slot_prepare_kwargs(pkg_dir, run_index)
+    return [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "run-prompt-comparison-slot"),
+        "--package-dir",
+        str(pkg_dir),
+        "--matrix-sha256",
+        str(kwargs["expected_matrix_sha256"]),
+        "--reapproval-threshold-cny",
+        "5.00",
+        "--run-index",
+        str(run_index),
+    ]
+
+
+def test_hard_cap_reservation_accepts_exact_bound_and_refuses_one_cent_over() -> None:
+    """Irreversible provider spend is guarded before the next run starts."""
+    _runs, _pairs, document, _manifest = _matrix(_selected())
+    ledger = cmp_mod.initialize_comparison_ledger(
+        matrix_document=document,
+        plan_gate_reapproval_threshold_cny=Decimal("30.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
+    )
+    exact = cmp_mod.ingest_run_actual_cost(
+        ledger,
+        entry=_entry(1, "22.78", "exact-hard-cap-reservation"),
+    )
+    authorization = cmp_mod.authorize_next_comparison_run(
+        exact,
+        matrix_document=document,
+        run_index=2,
+        next_run_worst_case_bound_cny=Decimal("7.08"),
+    )
+    assert authorization["projected_hard_ceiling_cny"] == "30.00"
+
+    one_cent_over = dict(exact)
+    one_cent_over["comparison_actual_spend_cny"] = "22.79"
+    one_cent_over["total_stage_spend_cny"] = "22.93"
+    one_cent_over["entries"] = [dict(exact["entries"][0])]
+    one_cent_over["entries"][0]["actual_cost_cny"] = "22.79"
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.authorize_next_comparison_run(
+            one_cent_over,
+            matrix_document=document,
+            run_index=2,
+            next_run_worst_case_bound_cny=Decimal("7.08"),
+        )
+    assert exc_info.value.code == "CANARY_HARD_CAP_RESERVATION_FAILED"
+
+
+def test_slot_runner_prepares_only_the_next_frozen_production_command(
+    tmp_path: Path,
+) -> None:
+    """The wrapper closes the gap between aggregate preflight and exec."""
+    pkg_dir = tmp_path / "comparison-pkg"
+    result = freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    first_command = shlex.split(result["commands"][0])
+    assert first_command[:5] == [
+        "python",
+        "scripts/with-project-env",
+        "--",
+        "python",
+        "scripts/run-prompt-comparison-slot",
+    ]
+    assert first_command[-2:] == ["--run-index", "1"]
+
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        REPO_ROOT,
+        **_slot_prepare_kwargs(pkg_dir, 1),
+    )
+    assert launch["authorization"]["next_run_worst_case_bound_cny"] == "7.08"
+    parsed = _build_parser().parse_args(list(launch["command_argv"])[2:])
+    assert parsed.entry == "new-run"
+    assert parsed.prompt_profile == cmp_mod.BASELINE_PROFILE_ID
+
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.prepare_comparison_slot_launch(
+            REPO_ROOT,
+            **_slot_prepare_kwargs(pkg_dir, 2),
+        )
+    assert exc_info.value.code == "PREVIOUS_SLOT_NOT_INGESTED"
+
+    runner = REPO_ROOT / "scripts" / "run-prompt-comparison-slot"
+    assert runner.is_file()
+    assert runner.stat().st_mode & 0o111
+
+
+def test_slot_runner_rejects_external_matrix_and_budget_contract_drift(
+    tmp_path: Path,
+) -> None:
+    pkg_dir = tmp_path / "comparison-pkg"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    kwargs = _slot_prepare_kwargs(pkg_dir, 1)
+
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.prepare_comparison_slot_launch(
+            REPO_ROOT,
+            **{**kwargs, "expected_matrix_sha256": "0" * 64},
+        )
+    assert exc_info.value.code == "MATRIX_FILE_HASH_MISMATCH"
+
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.prepare_comparison_slot_launch(
+            REPO_ROOT,
+            **{**kwargs, "expected_reapproval_threshold_cny": Decimal("4.99")},
+        )
+    assert exc_info.value.code == "PLAN_GATE_CONTRACT_DRIFT"
+
+    ledger_path = pkg_dir / "spend-ledger.json"
+    ledger = json.loads(ledger_path.read_text())
+    ledger["historical_spend_cny"] = "0.13"
+    ledger["total_stage_spend_cny"] = "0.13"
+    ledger_path.write_bytes(canonical_json_bytes(ledger))
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.prepare_comparison_slot_launch(REPO_ROOT, **kwargs)
+    assert exc_info.value.code == "LEDGER_OPENING_BALANCE_DRIFT"
+
+
+def test_slot_runner_cli_rejects_out_of_order_without_exec_or_network(
+    tmp_path: Path,
+) -> None:
+    pkg_dir = tmp_path / "comparison-pkg"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    completed = subprocess.run(
+        _slot_runner_argv(pkg_dir, 2),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2
+    error = json.loads(completed.stderr)
+    assert error == {
+        "code": "PREVIOUS_SLOT_NOT_INGESTED",
+        "message": "Only the next sequential matrix slot may be launched",
+        "status": "comparison_preflight_rejected",
+    }
+    assert completed.stdout == b""
+
+
+def test_slot_reservation_is_write_once_and_blocks_duplicate_launches(
+    tmp_path: Path,
+) -> None:
+    pkg_dir = tmp_path / "comparison-pkg"
+    freeze_prompt_comparison_package(
+        REPO_ROOT,
+        plan_gate_reapproval_threshold_cny=Decimal("5.00"),
+        target_dir=pkg_dir,
+    )
+    launch = cmp_mod.prepare_comparison_slot_launch(
+        REPO_ROOT,
+        **_slot_prepare_kwargs(pkg_dir, 1),
+    )
+    reservation = cmp_mod.reserve_comparison_slot(launch)
+    reservation_path = Path(reservation["path"])
+    assert reservation_path.is_file()
+    assert reservation_path.stat().st_mode & 0o777 == 0o600
+    document = json.loads(reservation_path.read_text())
+    assert document["authorization"]["run_index"] == 1
+    assert document["authorization"]["next_run_worst_case_bound_cny"] == "7.08"
+    assert document["command_argv_sha256"] == sha256_bytes(
+        canonical_json_bytes(list(launch["command_argv"]))
+    )
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.reserve_comparison_slot(launch)
+    assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
+
+    completed = subprocess.run(
+        _slot_runner_argv(pkg_dir, 1),
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 2
+    assert json.loads(completed.stderr)["code"] == "COMPARISON_SLOT_ALREADY_RESERVED"
+    assert completed.stdout == b""
