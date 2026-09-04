@@ -1,6 +1,6 @@
 # Canary 与扩量 Gate 契约
 
-版本 v1.0 · 2026-08-30 · 来源 ticket [Define canaries and scale gates](../wayfinder/ideation-pipeline/tickets/028-define-canaries-and-scale-gates.md)（两轮 grilling 由 Robert 批准）。
+版本 v1.1 · 2026-09-04 · 来源 ticket [Compare DeepSeek reasoning effort and completion limits](../wayfinder/ideation-pipeline/tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md) 与规范 [DeepSeek Reasoning Effort Canary 比较规格](deepseek-reasoning-effort-canary-spec.md)（由 Robert 于 2026-09-04 批准算术修正与选择语义；首版 v1.0 于 2026-08-30 经 ticket 028 批准）。
 
 本契约定义从「零真实调用」到「终波」的执行阶段、Canary 集的选择规则、成本与质量预算、失败处理，以及打开扩量 gate 的全部条件。修订规则同 027 验证矩阵：任何修订 = 新版本号 + Robert 批准。
 
@@ -10,13 +10,26 @@
 2. **canary**：12 个 case，承载首跑验证与 035/036 比较实验（共享同一 Canary 集）。
 3. **终波**：规模不在本契约锁死，由扩量 gate 按面试叙事需要与 canary 实测成本决定（预期量级 ~50）。**面试任务不要求全量 237**；系统对 237 的支持与预处理验证义务由 009 独立成立，不以模型跑全量为前提。
 
-## Canary 集选择规则
+## Canary 集选择规则 (v1.1)
 
-- 规模 12 个 case；8 个 cluster 全覆盖，Health & Medicine、Genetics & Molecular Biology、Neuroscience & Cognitive Sciences 各 2 个，其余 cluster 各 1 个；其中含 1 个 `strategy=2` target。
-- reference 数覆盖 min / median / max 档。
-- 刻意纳入 2–3 个已知边缘案例（占少数）：含不可恢复 reference abstract 的 target 1 个、仅 3 条 reference 的 target 1 个。
-- 流程：按上述规则确定性筛选候选池，Robert 从候选中点定最终 12 个。
-- 名单本体为私有 manifest（含真实 `paperId`，gitignored）；repo 只提交本规则、分层摘要与名单 SHA-256。
+- 规模 12 个 case：
+  - **基础 11 个 slot (8 clusters 全覆盖)**：Health & Medicine、Genetics & Molecular Biology、Neuroscience & Cognitive Sciences 重点领域各 2 个，其余 5 个 cluster（Environmental Sciences, Materials Science, Public Health & Policy, Social & Behavioral Sciences, Technology & Engineering）各 1 个；
+  - **第 12 个 slot (Constraint-Driven Edge Slot)**：独立边缘槽位，可来自任意 cluster，专门用于补足基础 11 个未覆盖的硬性 edge requirement；若全部硬性 requirement 已覆盖，则选择第二个已知 edge case。
+- **硬性边缘与分层要求 (全量 12 cases 需共同满足)**：
+  - eligible reference 数覆盖 min / median / max 档（基于锁定候选池重算，当前 IdeaBench 数据集快照为 3、8、36；新鲜候选池快照为 3、7、32）；
+  - 至少 1 个 case 为仅 3 条 reference 的 target（最小合法语料边缘）；
+  - 至少 1 个 case 含不可恢复 reference abstract（按获批语料政策标记为 `not_published`，真实边缘）；
+  - 至少 1 个 `strategy=2` target。
+- **边缘槽位选取与 Tie-Break 规则**：
+  - 满足基础 11 个 cluster 配额后，第 12 个 slot 优先分配给候选池中最稀缺的未满足硬性 requirement（以符合条件的 eligible 候选数衡量）；
+  - 若稀缺度并列，按固定优先级仲裁：`exactly-three references` → `unavailable reference abstract` → `maximum reference count` → `median reference count`，最后以确定性 canonical candidate hash 决胜；
+  - 若基础 11 个已覆盖全部硬性要求，该 slot 取候选数最少 cluster 中按 canonical hash 排序的第一名边缘案例。
+- **新鲜度与排除边界**：
+  - 严格排除已完成的 smoke case (`case-229e495f82a24cff9e6082aa058955b9`) 以及 formal local-ranking 占用的全部 24 个 targets（development 6、holdout 6、operational 12）；
+  - 绝不因准备方便而复用 `lr-op-*` 批次；若新鲜候选集无法满足所有硬性约束，选集 fail-closed 并停止，不得静默放宽。
+- **流程与门禁**：
+  - 仅依据批准的 routing metadata、reference 数与 prior-use 状态确定性筛选候选池；
+  - 名单本体为私有 manifest（含真实 `paperId`，gitignored），由 Robert 审查不泄露内容的候选摘要后点定并冻结；repo 只提交本规则、分层摘要与名单 SHA-256。
 
 ## 成本预算
 
