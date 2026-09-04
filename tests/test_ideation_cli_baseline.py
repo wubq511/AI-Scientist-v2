@@ -14,7 +14,6 @@ BASELINE_HELP_SHA256 = (
 def test_ideation_cli_help_matches_compatible_baseline() -> None:
     environment = os.environ.copy()
     environment["COLUMNS"] = "80"
-    environment["S2_API_KEY"] = "baseline-smoke"
 
     completed = subprocess.run(
         [sys.executable, str(ENTRY_SCRIPT), "--help"],

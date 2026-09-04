@@ -16,7 +16,13 @@ from typing import Any, TextIO
 
 from . import pricing
 from .canonical import parse_json_bytes, sha256_bytes, workspace_relative_path
-from .contract import _now
+from .contract import (
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL_ID,
+    DEFAULT_REASONING_EFFORT,
+    MAX_ATTEMPTS_PER_OPERATION,
+    _now,
+)
 from .errors import IdeationInputError, fail
 from .retrieval import bind_corpus
 from .run_store import (
@@ -28,13 +34,9 @@ from .run_store import (
 from .schema import case_id as parse_case_id
 from .schema import positive_integer, sha256 as parse_sha256
 
-DEEPSEEK_MODEL_ID = "deepseek-v4-pro"
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # Canary-open parameters (tickets 035/036) exposed as pinned defaults; the
 # admission records them so a Run Specification stays immutable.
-DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_MAX_TOKENS = 32768
-MAX_ATTEMPTS_PER_OPERATION = 2
 # Declared worst-case input tokens per model round. The workshop file,
 # prompts, and history sizes are bounded artifacts; this constant is the
 # pinned policy value recorded in the admission document.

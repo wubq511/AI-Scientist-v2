@@ -90,6 +90,15 @@ URL_PATTERN = re.compile(r"https?://|www\.", re.IGNORECASE)
 DOI_PATTERN = re.compile(r"\b10\.\d{4,9}/[-._;()/:a-z0-9]+", re.IGNORECASE)
 PAPER_ID_PATTERN = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
 
+# DeepSeek provider identity and pinned execution defaults (tickets 022/031).
+# Single source of truth for both the admission Run Specification pin and the
+# adapter enforcement; the Canary-open parameters (035/036) ship as pinned
+# defaults so an admitted run stays immutable.
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_MODEL_ID = "deepseek-v4-pro"
+DEFAULT_REASONING_EFFORT = "high"
+MAX_ATTEMPTS_PER_OPERATION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class SourceSnapshot:

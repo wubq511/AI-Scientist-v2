@@ -1,4 +1,4 @@
-"""Ideation Run Controller (tickets 07, 08, 09, 023, 024, 025, 026, 038).
+"""Ideation Run Controller (tickets 07, 08, 09, 10, 023, 024, 025, 026, 038).
 
 Drives the approved generation/reflection loop for an admitted Ideation Run:
 executes model inference rounds via DeepSeek adapter, invokes Scoped Literature
@@ -7,7 +7,9 @@ seven-field structure, Declared Grounding, and within-run duplicates in the
 approved fixed priority), commits accepted ideas atomically before advancing to
 the next generation, seals terminal outcomes -- success or explicit failed --
 with a canonical seal.json, and suspends without a seal on environment-class
-failures.
+failures. The resume path (ticket 10) re-verifies the chain and admission pins,
+rebuilds control state from canonical events/artifacts under a new writer
+epoch, and continues a suspended run to its terminal seal.
 """
 
 from __future__ import annotations

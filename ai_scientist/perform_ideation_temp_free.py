@@ -135,7 +135,6 @@ def _run_new_run(
     store: Any = None,
     execute: bool | None = None,
 ) -> int:
-    import os
     from ai_scientist.ideation.admission import NewRunRequest, admit_new_run
     from ai_scientist.ideation.canonical import canonical_json_bytes
     from ai_scientist.ideation.deepseek import ModelRoundError
@@ -151,8 +150,11 @@ def _run_new_run(
         max_num_generations=args.max_num_generations,
         num_reflections=args.num_reflections,
     )
+    # The bare CLI admits without executing (024: no paid-work control surface);
+    # execution happens only through an injected adapter -- the tested seam.
+    # Wiring a real provider transport is a Canary-stage decision.
     if execute is None:
-        execute = adapter is not None or os.environ.get("IDEATION_EXECUTE") == "1"
+        execute = adapter is not None
 
     command = [
         "python",

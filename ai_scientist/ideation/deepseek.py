@@ -18,24 +18,26 @@ import time
 from typing import Any, Callable, Protocol, Sequence
 
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
-from .contract import _now
+from .contract import (
+    DEEPSEEK_BASE_URL,
+    DEEPSEEK_MODEL_ID,
+    DEFAULT_REASONING_EFFORT,
+    MAX_ATTEMPTS_PER_OPERATION,
+    _now,
+)
 from .errors import fail
 from .pricing import CostBreakdown, PriceTable, attempt_cost
 from .run_store import RunStore
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_MODEL_ID = "deepseek-v4-pro"
 DEEPSEEK_ADAPTER_SCHEMA_VERSION = "deepseek-adapter-v1.0.0"
 
 ALLOWED_REASONING_EFFORTS = frozenset({"low", "high", "max"})
-DEFAULT_REASONING_EFFORT = "high"
 
 ALLOWED_OUTPUT_MODES = frozenset({"text", "json_object"})
 DEFAULT_OUTPUT_MODE = "text"
 
 ALLOWED_ROLES = frozenset({"system", "user", "assistant"})
 
-MAX_ATTEMPTS_PER_OPERATION = 2
 CONNECT_TIMEOUT_SECONDS = 10.0
 WALL_CLOCK_DEADLINE_SECONDS = 3600.0  # 60 minutes per attempt
 MAX_RETRY_AFTER_SECONDS = 60.0
