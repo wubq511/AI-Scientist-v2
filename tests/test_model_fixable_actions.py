@@ -29,6 +29,7 @@ from ai_scientist.ideation.canonical import (
 )
 from ai_scientist.ideation.controller import (
     ACTION_OUTCOME_SCHEMA_VERSION,
+    FINAL_ROUND_CORRECTION_MARKER,
     MODEL_FIXABLE_ERROR_CODES,
     MODEL_VISIBLE_ACTIONS,
     IdeationController,
@@ -38,11 +39,13 @@ from ai_scientist.ideation.controller import (
 )
 from ai_scientist.ideation.deepseek import (
     DeepSeekAdapter,
+    ModelRoundError,
     StubTransport,
     TransportResponse,
 )
 from ai_scientist.ideation.errors import IdeationInputError
 from ai_scientist.ideation.pricing import load_price_table
+from ai_scientist.ideation.resume import resume_run
 from ai_scientist.ideation.run_store import RunStore
 from ai_scientist.perform_ideation_temp_free import run_new_run
 
@@ -283,6 +286,15 @@ def _commit_all(workspace: Path) -> None:
     )
 
 
+def _stub_response(content: str, message_id: str = "msg_001") -> TransportResponse:
+    return TransportResponse(
+        200,
+        {"content-type": "application/json"},
+        _make_response_bytes(content, message_id),
+        30.0,
+    )
+
+
 def _make_response_bytes(content: str, message_id: str = "msg_001") -> bytes:
     doc = {
         "id": message_id,
@@ -487,6 +499,18 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
             ),
             30.0,
         ),
+        # Round 4 is the final round: its search violates the convergence
+        # contract and receives one corrective re-ask, which searches again
+        # (still not converging; the generation ends budget-exhausted).
+        TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            _make_response_bytes(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "final refinement"}',
+                "r4c",
+            ),
+            30.0,
+        ),
     ]
 
     transport = StubTransport(stub_responses)
@@ -519,7 +543,7 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
     action_outcome_events = [
         e for e in events if e.get("event_type") == "action_outcome"
     ]
-    assert len(action_outcome_events) == 5
+    assert len(action_outcome_events) == 6
 
     # Verify rounds 0 to 3 produced model_fixable_error with minimal feedback
     expected_error_codes = [
@@ -545,9 +569,15 @@ def test_vm_contract_025_01_model_fixable_errors_unified_feedback(
         assert artifact_path.is_file()
         assert artifact_path.read_text(encoding="utf-8") == fb
 
-    # Verify round 4 was tool_result
-    assert action_outcome_events[4]["payload"]["outcome"] == "tool_result"
-    assert action_outcome_events[4]["payload"]["action"] == "SearchLiterature"
+    # Round 4 is the final round: the search is recorded as the closed
+    # final_round_correction outcome and the corrective re-ask follows.
+    assert action_outcome_events[4]["payload"]["outcome"] == "final_round_correction"
+    assert (
+        action_outcome_events[4]["payload"]["error_code"]
+        == "FINAL_ROUND_FINALIZE_REQUIRED"
+    )
+    assert action_outcome_events[5]["payload"]["outcome"] == "tool_result"
+    assert action_outcome_events[5]["payload"]["action"] == "SearchLiterature"
 
 
 # ==============================================================================
@@ -681,6 +711,11 @@ def test_vm_integration_02_model_fixable_recovery_script(
 
     # Verify chain integrity
     RunStore(workspace).verify_chain(result["run_id"])
+
+    # Happy-path byte guarantee: convergent runs never see corrective bytes.
+    for sent_request in transport.sent_requests:
+        for message in sent_request["messages"]:
+            assert FINAL_ROUND_CORRECTION_MARKER not in message["content"]
 
 
 # ==============================================================================
@@ -887,6 +922,17 @@ def test_cross_generation_declared_grounding_isolation(
             ),
             30.0,
         ),
+        # Gen 1 Round 1 is the final round: the fixable gate rejection
+        # receives the corrective re-ask, which repeats the same rejection.
+        TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            _make_response_bytes(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(idea_1)}, "grounding": ["{paper_gen0}"]}}',
+                "g1_r1c",
+            ),
+            30.0,
+        ),
     ]
 
     transport = StubTransport(stub_responses)
@@ -921,3 +967,474 @@ def test_cross_generation_declared_grounding_isolation(
     assert fb_path.is_file()
     fb_text = fb_path.read_text(encoding="utf-8")
     assert "GATE_REJECTED" in fb_text
+
+
+# ==============================================================================
+# Final-round convergence (Proposal 002 remediation, Layer 1)
+# ==============================================================================
+
+
+def _model_attempt_events(
+    events: list[dict[str, Any]],
+) -> dict[int, list[dict[str, Any]]]:
+    """provider_attempt.finished events grouped by model operation_seq."""
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for event in events:
+        if event.get("event_type") != "provider_attempt.finished":
+            continue
+        if event.get("operation", {}).get("operation_kind") != "model_inference":
+            continue
+        grouped.setdefault(event["operation"]["operation_seq"], []).append(event)
+    return grouped
+
+
+def _final_round_model_op(events: list[dict[str, Any]], num_reflections: int) -> int:
+    """The model operation of the final reflection round."""
+    candidates = {
+        event["operation"]["operation_seq"]
+        for event in events
+        if event.get("event_type") == "provider_attempt.finished"
+        and event.get("operation", {}).get("operation_kind") == "model_inference"
+        and event.get("pipeline_position", {}).get("reflection_index")
+        == num_reflections - 1
+    }
+    assert len(candidates) == 1, candidates
+    return candidates.pop()
+
+
+def _last_user_content(request_payload: dict[str, Any]) -> str:
+    contents = [
+        message["content"]
+        for message in request_payload["messages"]
+        if message["role"] == "user"
+    ]
+    assert contents
+    return contents[-1]
+
+
+def test_final_round_search_triggers_correction_and_finalizes(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Final-round SearchLiterature gets one corrective attempt-2 and finalizes."""
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    corpus_data = json.loads((workspace / corpus_rel).read_text(encoding="utf-8"))
+    paper_id = corpus_data["records"][0]["paper_id"]
+    valid_idea = {
+        "Name": "final_round_converged",
+        "Title": "Final Round Converged Proposal",
+        "Short Hypothesis": "The controller forces convergence on the last round.",
+        "Related Work": "Related work discussion.",
+        "Abstract": "Proposal abstract text.",
+        "Experiments": ["Experiment 1"],
+        "Risk Factors and Limitations": ["Limitation 1"],
+    }
+    transport = StubTransport(
+        [
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "attention"}', "r0"
+            ),
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "sparsity"}', "r1"
+            ),
+            # Final round: the model searches again (the slot-1 failure shape).
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "routing"}', "r2"
+            ),
+            # Corrective attempt-2: the model finalizes.
+            _stub_response(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(valid_idea)}, "grounding": ["{paper_id}"]}}',
+                "r2c",
+            ),
+        ]
+    )
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=transport
+    )
+    request = NewRunRequest(
+        case_id=CASE_ID,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=3,
+    )
+    result = run_new_run(workspace, request, adapter=adapter, execute=True)
+    assert result["status"] == "sealed"
+    assert result["terminal_outcome"] == "success"
+    assert result["idea_count"] == 1
+
+    # Exactly one corrective call: the corrective request carries the forced
+    # finalize instruction plus the specific feedback, and no earlier request
+    # carries corrective bytes.
+    assert len(transport.sent_requests) == 4
+    corrective_content = _last_user_content(transport.sent_requests[3])
+    assert FINAL_ROUND_CORRECTION_MARKER in corrective_content
+    assert "Error [FINAL_ROUND_FINALIZE_REQUIRED]" in corrective_content
+    assert "FinalizeIdea" in corrective_content
+    for earlier_request in transport.sent_requests[:3]:
+        for message in earlier_request["messages"]:
+            assert FINAL_ROUND_CORRECTION_MARKER not in message["content"]
+
+    run_root = workspace / "artifacts/ideation-runs" / result["run_id"]
+    events = [
+        parse_json_bytes(p.read_bytes(), label=p.name)
+        for p in sorted((run_root / "events").glob("*.json"))
+    ]
+    action_outcomes = [e for e in events if e["event_type"] == "action_outcome"]
+    assert [e["payload"]["outcome"] for e in action_outcomes] == [
+        "tool_result",
+        "tool_result",
+        "final_round_correction",
+        "finalize_accepted",
+    ]
+    correction = action_outcomes[2]
+    assert correction["payload"]["error_code"] == "FINAL_ROUND_FINALIZE_REQUIRED"
+    assert correction["payload"]["action"] == "SearchLiterature"
+
+    # The corrective re-ask reused the final round's operation as attempt 2.
+    final_op = _final_round_model_op(events, num_reflections=3)
+    attempts = _model_attempt_events(events)[final_op]
+    assert [e["operation"]["attempt_seq"] for e in attempts] == [1, 2]
+    corrective_request_path = (
+        run_root / f"artifacts/operations/{final_op:06d}/attempts/000002/request.json"
+    )
+    assert corrective_request_path.is_file()
+
+
+def test_final_round_correction_that_still_violates_budget_exhausts(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A corrective response that still violates ends the generation budget-exhausted."""
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    transport = StubTransport(
+        [
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "attention"}', "r0"
+            ),
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "sparsity"}', "r1"
+            ),
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "routing"}', "r2"
+            ),
+            # Corrective attempt-2: the model searches yet again.
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "moles"}', "r2c"
+            ),
+        ]
+    )
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=transport
+    )
+    request = NewRunRequest(
+        case_id=CASE_ID,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=3,
+    )
+    result = run_new_run(workspace, request, adapter=adapter, execute=True)
+    assert result["status"] == "sealed"
+    assert result["terminal_outcome"] == "success"
+    assert result["idea_count"] == 0
+
+    run_root = workspace / "artifacts/ideation-runs" / result["run_id"]
+    seal = parse_json_bytes((run_root / "seal.json").read_bytes(), label="seal.json")
+    assert seal["terminal_summary"]["disposition_counts"] == {
+        "finalized": 0,
+        "budget_exhausted": 1,
+    }
+    events = [
+        parse_json_bytes(p.read_bytes(), label=p.name)
+        for p in sorted((run_root / "events").glob("*.json"))
+    ]
+    action_outcomes = [e for e in events if e["event_type"] == "action_outcome"]
+    assert [e["payload"]["outcome"] for e in action_outcomes] == [
+        "tool_result",
+        "tool_result",
+        "final_round_correction",
+        "tool_result",
+    ]
+
+    # No third physical attempt: the final round's operation used exactly two.
+    assert len(transport.sent_requests) == 4
+    final_op = _final_round_model_op(events, num_reflections=3)
+    attempts = _model_attempt_events(events)[final_op]
+    assert [e["operation"]["attempt_seq"] for e in attempts] == [1, 2]
+
+
+def test_final_round_no_third_call_after_transport_retry(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A transport retry that consumed attempt 2 leaves no room for correction."""
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    transient = TransportResponse(
+        500,
+        {"content-type": "application/json"},
+        canonical_json_bytes({"error": "boom"}),
+        30.0,
+    )
+    transport = StubTransport(
+        [
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "attention"}', "r0"
+            ),
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "sparsity"}', "r1"
+            ),
+            # Final round, attempt 1 fails transiently; the in-call retry
+            # (attempt 2) answers with another search.
+            transient,
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "routing"}', "r2"
+            ),
+        ]
+    )
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=transport
+    )
+    request = NewRunRequest(
+        case_id=CASE_ID,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=3,
+    )
+    result = run_new_run(workspace, request, adapter=adapter, execute=True)
+    assert result["status"] == "sealed"
+    assert result["terminal_outcome"] == "success"
+    assert result["idea_count"] == 0
+
+    # No third call: the violation is recorded but the corrective attempt
+    # cannot fit the approved two-attempt bound. The occupied attempt-2
+    # budget leaves no correction to record: the violation stays a plain
+    # model_fixable_error and the run budget-exhausts.
+    assert len(transport.sent_requests) == 4
+    run_root = workspace / "artifacts/ideation-runs" / result["run_id"]
+    events = [
+        parse_json_bytes(p.read_bytes(), label=p.name)
+        for p in sorted((run_root / "events").glob("*.json"))
+    ]
+    action_outcomes = [e for e in events if e["event_type"] == "action_outcome"]
+    assert [e["payload"]["outcome"] for e in action_outcomes] == [
+        "tool_result",
+        "tool_result",
+        "model_fixable_error",
+    ]
+    assert (
+        action_outcomes[2]["payload"]["error_code"] == "FINAL_ROUND_FINALIZE_REQUIRED"
+    )
+    final_op = _final_round_model_op(events, num_reflections=3)
+    attempts = _model_attempt_events(events)[final_op]
+    assert [e["operation"]["attempt_seq"] for e in attempts] == [1, 2]
+
+
+def test_final_round_fixable_gate_rejection_receives_correction(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Final-round UNRETRIEVED_PAPER feedback rides the corrective attempt-2."""
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    corpus_data = json.loads((workspace / corpus_rel).read_text(encoding="utf-8"))
+    paper_id = corpus_data["records"][0]["paper_id"]
+    valid_idea = {
+        "Name": "gate_then_fixed",
+        "Title": "Gate Then Fixed Proposal",
+        "Short Hypothesis": "The corrective attempt carries the gate feedback.",
+        "Related Work": "Related work discussion.",
+        "Abstract": "Proposal abstract text.",
+        "Experiments": ["Experiment 1"],
+        "Risk Factors and Limitations": ["Limitation 1"],
+    }
+    transport = StubTransport(
+        [
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "attention"}', "r0"
+            ),
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "sparsity"}', "r1"
+            ),
+            # Final round: finalize with a hallucinated grounding paper.
+            _stub_response(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(valid_idea)}, "grounding": ["hallucinated_paper"]}}',
+                "r2",
+            ),
+            # Corrective attempt-2: the model fixes the grounding.
+            _stub_response(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(valid_idea)}, "grounding": ["{paper_id}"]}}',
+                "r2c",
+            ),
+        ]
+    )
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=transport
+    )
+    request = NewRunRequest(
+        case_id=CASE_ID,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=3,
+    )
+    result = run_new_run(workspace, request, adapter=adapter, execute=True)
+    assert result["status"] == "sealed"
+    assert result["terminal_outcome"] == "success"
+    assert result["idea_count"] == 1
+
+    assert len(transport.sent_requests) == 4
+    corrective_content = _last_user_content(transport.sent_requests[3])
+    assert FINAL_ROUND_CORRECTION_MARKER in corrective_content
+    assert "Error [UNRETRIEVED_PAPER]" in corrective_content
+    assert "hallucinated_paper" in corrective_content
+
+    run_root = workspace / "artifacts/ideation-runs" / result["run_id"]
+    events = [
+        parse_json_bytes(p.read_bytes(), label=p.name)
+        for p in sorted((run_root / "events").glob("*.json"))
+    ]
+    action_outcomes = [e for e in events if e["event_type"] == "action_outcome"]
+    assert [e["payload"]["outcome"] for e in action_outcomes] == [
+        "tool_result",
+        "tool_result",
+        "final_round_correction",
+        "finalize_accepted",
+    ]
+    assert action_outcomes[2]["payload"]["error_code"] == "UNRETRIEVED_PAPER"
+    final_op = _final_round_model_op(events, num_reflections=3)
+    attempts = _model_attempt_events(events)[final_op]
+    assert [e["operation"]["attempt_seq"] for e in attempts] == [1, 2]
+
+
+def test_corrective_reask_rebuilds_byte_identical_request_on_resume(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """Suspend on the corrective attempt; the resumed re-ask is byte-identical."""
+    workspace = _workspace(tmp_path)
+    corpus_rel, corpus_sha = _approved_corpus(workspace)
+    workshop_rel, workshop_sha = _approved_workshop(workspace)
+    _commit_all(workspace)
+
+    corpus_data = json.loads((workspace / corpus_rel).read_text(encoding="utf-8"))
+    paper_id = corpus_data["records"][0]["paper_id"]
+    valid_idea = {
+        "Name": "resumed_correction",
+        "Title": "Resumed Correction Proposal",
+        "Short Hypothesis": "The corrective ask survives a suspension.",
+        "Related Work": "Related work discussion.",
+        "Abstract": "Proposal abstract text.",
+        "Experiments": ["Experiment 1"],
+        "Risk Factors and Limitations": ["Limitation 1"],
+    }
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
+    approval_input = io.StringIO("yes\n")
+    monkeypatch.setattr("sys.stdin", approval_input)
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+
+    request = NewRunRequest(
+        case_id=CASE_ID,
+        workshop=workshop_rel,
+        workshop_sha256=workshop_sha,
+        corpus=corpus_rel,
+        corpus_sha256=corpus_sha,
+        max_num_generations=1,
+        num_reflections=3,
+    )
+    admitted = run_new_run(workspace, request, execute=False)
+    assert admitted["status"] == "admitted"
+    run_id = admitted["run_id"]
+
+    suspend_transport = StubTransport(
+        [
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "attention"}', "r0"
+            ),
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "sparsity"}', "r1"
+            ),
+            _stub_response(
+                'ACTION: SearchLiterature\nARGUMENTS: {"query": "routing"}', "r2"
+            ),
+            # Corrective attempt-2 hits an ambiguous transport timeout: the
+            # run suspends with the correction outcome already committed.
+            TimeoutError("fixture transport timeout"),
+        ]
+    )
+    suspend_adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=suspend_transport
+    )
+    with pytest.raises(ModelRoundError):
+        IdeationController(workspace, run_id, adapter=suspend_adapter).run()
+
+    run_root = workspace / "artifacts/ideation-runs" / run_id
+    events = [
+        parse_json_bytes(p.read_bytes(), label=p.name)
+        for p in sorted((run_root / "events").glob("*.json"))
+    ]
+    final_op = _final_round_model_op(events, num_reflections=3)
+    suspended_request_bytes = (
+        run_root / f"artifacts/operations/{final_op:06d}/attempts/000002/request.json"
+    ).read_bytes()
+    assert FINAL_ROUND_CORRECTION_MARKER.encode("utf-8") in suspended_request_bytes
+
+    # Resume: the rebuilt corrective request must be byte-identical.
+    monkeypatch.setattr("sys.stdin", io.StringIO("yes\n"))
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True)
+    resume_transport = StubTransport(
+        [
+            _stub_response(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(valid_idea)}, "grounding": ["{paper_id}"]}}',
+                "r2c-resumed",
+            )
+        ]
+    )
+    resume_adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=resume_transport
+    )
+    resumed = resume_run(workspace, run_id, adapter=resume_adapter)
+    assert resumed["status"] == "sealed"
+    assert resumed["terminal_outcome"] == "success"
+    assert resumed["idea_count"] == 1
+    assert len(resume_transport.sent_requests) == 1
+    resumed_request_bytes = (
+        run_root / f"artifacts/operations/{final_op:06d}/attempts/000003/request.json"
+    ).read_bytes()
+    assert resumed_request_bytes == suspended_request_bytes

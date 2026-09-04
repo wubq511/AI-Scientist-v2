@@ -973,13 +973,17 @@ class DeepSeekAdapter:
         pipeline_position: dict[str, Any] | None = None,
         writer_epoch: int = 1,
         initial_attempt_seq: int = 1,
+        max_attempts: int = MAX_ATTEMPTS_PER_OPERATION,
     ) -> ModelRoundResult:
         """Execute a model round with bounded retry, Provider Attempts, and evidence chain persistence.
 
         `initial_attempt_seq` is 1 for a fresh operation; a resume re-executes
         an in-flight operation under the same `op_seq` with the next physical
         attempt coordinate (contract 025: attempt 3+ only ever comes from a
-        resume). Each call keeps its own <=2 attempt budget (ticket 022).
+        resume). Each call keeps its own bounded attempt budget (ticket 022),
+        capped by `max_attempts`; the final-round corrective re-ask passes 1
+        to disable the in-call transport retry so the approved per-operation
+        attempt bound is never exceeded.
         """
         # Audit Release Gate: Ensure execution has admitted run audit context
         if self.store is None or self.run_id is None:
@@ -1002,6 +1006,17 @@ class DeepSeekAdapter:
             fail(
                 "INVALID_COORDINATE",
                 f"initial_attempt_seq must be a positive integer, got {initial_attempt_seq}",
+            )
+
+        if (
+            not isinstance(max_attempts, int)
+            or isinstance(max_attempts, bool)
+            or max_attempts < 1
+            or max_attempts > MAX_ATTEMPTS_PER_OPERATION
+        ):
+            fail(
+                "INVALID_COORDINATE",
+                f"max_attempts must be an integer in [1, {MAX_ATTEMPTS_PER_OPERATION}], got {max_attempts}",
             )
 
         if (
@@ -1059,7 +1074,7 @@ class DeepSeekAdapter:
         attempts_executed = 0
         last_failure: ModelRoundFailure | None = None
 
-        for attempt_offset in range(MAX_ATTEMPTS_PER_OPERATION):
+        for attempt_offset in range(max_attempts):
             attempt_seq = initial_attempt_seq + attempt_offset
             attempts_executed += 1
             attempt_started_at = _now()
@@ -1259,7 +1274,7 @@ class DeepSeekAdapter:
 
                 # Decide whether to retry within this call's budget (022)
                 if (
-                    attempts_executed < MAX_ATTEMPTS_PER_OPERATION
+                    attempts_executed < max_attempts
                     and last_failure.error_code in RETRYABLE_FAILURE_CODES
                     and retry_disposition != "retry_after_exceeded"
                 ):

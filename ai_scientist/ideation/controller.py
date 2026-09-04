@@ -64,6 +64,38 @@ IDEA_SIDECAR_SCHEMA_VERSION = "idea-sidecar-v1.0.0"
 ACTION_OUTCOME_SCHEMA_VERSION = "action-outcome-v1.0.0"
 WORKSHOP_RENDERING_VERSION = "raw_markdown_v1"
 
+# Final-round convergence (Proposal 002 remediation, Layer 1): the last
+# reflection round of a generation must end with FinalizeIdea. The controller
+# records a closed correction outcome for the violating response and re-asks
+# once on the same operation as attempt 2. The suffix below is controller-
+# owned (never a Prompt Profile template), so the profile registry stays
+# byte-frozen and both comparison arms receive the identical corrective bytes.
+FINAL_ROUND_CORRECTION_OUTCOME = "final_round_correction"
+FINAL_ROUND_FINALIZE_REQUIRED_CODE = "FINAL_ROUND_FINALIZE_REQUIRED"
+FINAL_ROUND_CORRECTION_MARKER = "[CONTROLLER CORRECTION]"
+
+
+def _final_round_correction_suffix(feedback_text: str) -> str:
+    """Deterministic corrective suffix appended to the final round's prompt.
+
+    Rebuilt from the event chain's correction feedback on resume, so the
+    re-ask request is byte-identical to the live one.
+    """
+    return (
+        f"\n\n{FINAL_ROUND_CORRECTION_MARKER} This was the final reflection "
+        "round; there is no next round. Your last response did not finalize "
+        f"an idea. Feedback: {feedback_text}\n"
+        "You must now respond with exactly:\n\n"
+        "ACTION:\nFinalizeIdea\n\n"
+        "ARGUMENTS:\n"
+        '{"idea": { ...the seven-field IDEA JSON... }, '
+        '"grounding": ["paper_id", ...]}\n\n'
+        "Declare grounding only with paper_ids retrieved in this generation. "
+        "This is the last attempt: a response that is not a valid FinalizeIdea "
+        "ends the run."
+    )
+
+
 MODEL_FIXABLE_ERROR_CODES: frozenset[str] = frozenset(
     {
         "PARSE_ERROR",
@@ -476,12 +508,18 @@ class PendingResponse:
     `retrieval_op_seq`/`retrieval_attempt_seq` carry the coordinates of an
     orphaned retrieval request when the interruption happened mid-retrieval
     (the retrieval is re-executed under the same operation_seq).
+
+    `corrective_dispatch` marks a committed final-round corrective response:
+    its dispatch records the corrective attempt's outcome (never a new
+    correction) at `response_attempt_seq`.
     """
 
     response_text: str
     model_op_seq: int
     retrieval_op_seq: int | None
     retrieval_attempt_seq: int
+    corrective_dispatch: bool = False
+    response_attempt_seq: int = 1
 
 
 @dataclass(frozen=True)
@@ -499,6 +537,7 @@ class RoundResume:
     start_round: int
     state: _GenerationState
     pending: PendingResponse | PendingReexecute | None
+    final_round_correction: str | None = None
 
 
 @dataclass(frozen=True)
@@ -979,8 +1018,16 @@ class IdeationController:
         error_message: str,
         operation_seq: int,
         pipeline_pos: dict[str, Any],
+        outcome: str = "model_fixable_error",
+        attempt_seq: int = 1,
     ) -> str:
-        """Record model-fixable error feedback, write artifact, and append action_outcome event."""
+        """Record model-fixable error feedback, write artifact, and append action_outcome event.
+
+        `outcome` is the closed action_outcome value; the final-round
+        correction records `final_round_correction` instead of the default.
+        `attempt_seq` coordinates the feedback artifact with the provider
+        attempt that produced the dispatched response.
+        """
         feedback_text = (
             f"Error [{error_code}]: {error_message}"
             if error_code not in error_message
@@ -990,7 +1037,7 @@ class IdeationController:
         rel_path, byte_length, sha = self.store.write_operation_artifact(
             self.run_id,
             operation_seq,
-            1,
+            attempt_seq,
             "feedback.txt",
             feedback_bytes,
             label="model-fixable error feedback",
@@ -1012,7 +1059,7 @@ class IdeationController:
                     "action": action or "unknown",
                     "error_code": error_code,
                     "feedback": feedback_text,
-                    "outcome": "model_fixable_error",
+                    "outcome": outcome,
                     "schema_version": ACTION_OUTCOME_SCHEMA_VERSION,
                 },
                 "pipeline_position": pipeline_pos,
@@ -1125,13 +1172,104 @@ class IdeationController:
         generation_retrieval_op_seqs = state.retrieval_op_seqs
         generation_finalized = state.finalized
 
-        for ref_round in range(start_round, self.num_reflections):
+        final_round_correction: tuple[int, str, str] | None = None
+
+        def _record_fixable_error(
+            *,
+            action: str | None,
+            error_code: str,
+            error_message: str,
+            operation_seq: int,
+            pipeline_pos: dict[str, Any],
+        ) -> str:
+            """Record a model-fixable outcome and arm the final-round correction.
+
+            On the final reflection round the outcome is the closed
+            `final_round_correction` value and arms exactly one corrective
+            re-ask on the round's model operation. A corrective dispatch
+            itself records a plain `model_fixable_error` at the corrective
+            attempt's coordinates and never re-arms.
+            """
+            nonlocal final_round_correction
+            is_final_round = ref_round == self.num_reflections - 1
+            # The correction fires only on a final round whose call consumed
+            # exactly one physical attempt; a transport retry already
+            # occupying attempt 2 leaves no room for the corrective ask, so
+            # the outcome stays a plain model_fixable_error.
+            correction_armed = (
+                is_final_round and not corrective_dispatch and corrective_attempt == 1
+            )
+            feedback = self._record_model_fixable_error(
+                action=action,
+                error_code=error_code,
+                error_message=error_message,
+                operation_seq=operation_seq,
+                pipeline_pos=pipeline_pos,
+                outcome=(
+                    FINAL_ROUND_CORRECTION_OUTCOME
+                    if correction_armed
+                    else "model_fixable_error"
+                ),
+                attempt_seq=corrective_attempt if corrective_dispatch else 1,
+            )
+            if correction_armed:
+                final_round_correction = (model_op_seq, feedback, prompt_text)
+            return feedback
+
+        def _report_model_result(round_result: ModelRoundResult) -> None:
+            dur_sec = getattr(round_result, "duration_ms", 0.0) / 1000.0
+            cost_str = (
+                getattr(round_result.cost, "total_cny", "0.00")
+                if getattr(round_result, "cost", None) is not None
+                else "0.00"
+            )
+            tokens = (
+                getattr(round_result.usage, "total_tokens", 0)
+                if getattr(round_result, "usage", None) is not None
+                else 0
+            )
+            reasoning_tokens = (
+                getattr(round_result.usage, "reasoning_tokens", 0)
+                if getattr(round_result, "usage", None) is not None
+                else 0
+            )
+            reasoning_hint = (
+                f" (含思考 {reasoning_tokens} tokens)" if reasoning_tokens else ""
+            )
+            self._report(
+                f"  ✨ [Model] 推理完成 (耗时 {dur_sec:.1f}s | 消耗 {tokens} tokens{reasoning_hint} | 费用 {cost_str} CNY)"
+            )
+
+        for ref_round in range(start_round, self.num_reflections + 1):
+            # One extra iteration dispatches the armed final-round correction;
+            # its committed coordinates stay on the final round.
+            correction_active = ref_round == self.num_reflections
+            if correction_active and final_round_correction is None:
+                break
+            dispatch_round = (
+                self.num_reflections - 1 if correction_active else ref_round
+            )
+            pending = (
+                round_resume.pending
+                if round_resume is not None and ref_round == start_round
+                else None
+            )
+            # A corrective dispatch (the extra iteration, a resumed corrective
+            # re-ask, or a committed corrective response) records at the
+            # corrective attempt's coordinates and never arms a new correction.
+            corrective_dispatch = correction_active or (
+                ref_round == self.num_reflections - 1
+                and ref_round == start_round
+                and round_resume is not None
+                and round_resume.final_round_correction is not None
+            )
+            corrective_attempt = 1
             pipeline_pos = {
                 "generation_index": gen_idx,
                 "idea_index": (
                     len(self.accepted_ideas) if generation_finalized else None
                 ),
-                "reflection_index": ref_round,
+                "reflection_index": dispatch_round,
             }
 
             if ref_round == 0:
@@ -1147,19 +1285,69 @@ class IdeationController:
                     last_tool_results=last_tool_results,
                     num_reflections=self.num_reflections,
                 )
-
-            pending = (
-                round_resume.pending
-                if round_resume is not None and ref_round == start_round
-                else None
-            )
+            if (
+                ref_round == self.num_reflections - 1
+                and ref_round == start_round
+                and round_resume is not None
+                and round_resume.final_round_correction is not None
+            ):
+                # The resumed final-round call IS the corrective re-ask:
+                # restore its exact request bytes from the chain feedback.
+                prompt_text = prompt_text + _final_round_correction_suffix(
+                    round_resume.final_round_correction
+                )
 
             retrieval_reuse: tuple[int, int] | None = None
-            if isinstance(pending, PendingResponse):
+            if correction_active:
+                # Final-round correction: re-ask once on the same operation as
+                # attempt 2 with the deterministic finalize instruction plus
+                # the specific feedback. The corrective call disables the
+                # in-call transport retry, so the operation never exceeds its
+                # approved two-attempt bound.
+                assert final_round_correction is not None
+                correction_op_seq, _correction_feedback, correction_prompt = (
+                    final_round_correction
+                )
+                corrected_prompt = correction_prompt + _final_round_correction_suffix(
+                    _correction_feedback
+                )
+                messages = [DeepSeekMessage(role="system", content=system_prompt)]
+                for hist in msg_history[:-2]:
+                    messages.append(
+                        DeepSeekMessage(role=hist["role"], content=hist["content"])
+                    )
+                messages.append(DeepSeekMessage(role="user", content=corrected_prompt))
+
+                req = DeepSeekRequest(
+                    max_tokens=self.admission["model"]["max_tokens"],
+                    messages=tuple(messages),
+                    output_mode="text",
+                    reasoning_effort=self.admission["model"]["reasoning_effort"],
+                    user_id=f"run-{self.run_id[:8]}",
+                )
+                self._report(
+                    "  🧠 [Model] 末轮强制收敛： corrective re-ask (FinalizeIdea required)..."
+                )
+                model_op_seq = correction_op_seq
+                round_result = self.adapter.execute_round(
+                    req,
+                    model_op_seq,
+                    pipeline_position=pipeline_pos,
+                    writer_epoch=self.writer_epoch,
+                    initial_attempt_seq=2,
+                    max_attempts=1,
+                )
+                _report_model_result(round_result)
+                response_text = round_result.visible_content
+                corrective_attempt = round_result.attempt_seq
+                msg_history.append({"role": "user", "content": corrected_prompt})
+                msg_history.append({"role": "assistant", "content": response_text})
+            elif isinstance(pending, PendingResponse):
                 # The response is already committed and the round's messages
                 # are already in the rebuilt history; skip the model call.
                 model_op_seq = pending.model_op_seq
                 response_text = pending.response_text
+                corrective_attempt = pending.response_attempt_seq
                 if pending.retrieval_op_seq is not None:
                     retrieval_reuse = (
                         pending.retrieval_op_seq,
@@ -1212,30 +1400,10 @@ class IdeationController:
                         writer_epoch=self.writer_epoch,
                     )
 
-                dur_sec = getattr(round_result, "duration_ms", 0.0) / 1000.0
-                cost_str = (
-                    getattr(round_result.cost, "total_cny", "0.00")
-                    if getattr(round_result, "cost", None) is not None
-                    else "0.00"
-                )
-                tokens = (
-                    getattr(round_result.usage, "total_tokens", 0)
-                    if getattr(round_result, "usage", None) is not None
-                    else 0
-                )
-                reasoning_tokens = (
-                    getattr(round_result.usage, "reasoning_tokens", 0)
-                    if getattr(round_result, "usage", None) is not None
-                    else 0
-                )
-                reasoning_hint = (
-                    f" (含思考 {reasoning_tokens} tokens)" if reasoning_tokens else ""
-                )
-                self._report(
-                    f"  ✨ [Model] 推理完成 (耗时 {dur_sec:.1f}s | 消耗 {tokens} tokens{reasoning_hint} | 费用 {cost_str} CNY)"
-                )
+                _report_model_result(round_result)
 
                 response_text = round_result.visible_content
+                corrective_attempt = round_result.attempt_seq
                 msg_history.append({"role": "user", "content": prompt_text})
                 msg_history.append({"role": "assistant", "content": response_text})
 
@@ -1263,7 +1431,7 @@ class IdeationController:
                 action, arguments = parse_action_and_arguments(response_text)
             except IdeationInputError as exc:
                 if exc.code in MODEL_FIXABLE_ERROR_CODES:
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="unknown",
                         error_code=exc.code,
                         error_message=exc.message or str(exc),
@@ -1274,7 +1442,7 @@ class IdeationController:
                 raise
 
             if action not in MODEL_VISIBLE_ACTIONS:
-                last_tool_results = self._record_model_fixable_error(
+                last_tool_results = _record_fixable_error(
                     action=action,
                     error_code="UNKNOWN_ACTION",
                     error_message=f"Action '{action}' is not model-visible. Allowed actions are 'SearchLiterature' and 'FinalizeIdea'.",
@@ -1284,6 +1452,23 @@ class IdeationController:
                 continue
 
             if action == "SearchLiterature":
+                if ref_round == self.num_reflections - 1 and not corrective_dispatch:
+                    # Final-round convergence: literature search is no longer
+                    # available on the last round; the corrective re-ask (one
+                    # extra attempt on this operation) must finalize instead.
+                    last_tool_results = _record_fixable_error(
+                        action="SearchLiterature",
+                        error_code=FINAL_ROUND_FINALIZE_REQUIRED_CODE,
+                        error_message=(
+                            "The final reflection round must end with ACTION: "
+                            "FinalizeIdea. Literature search is no longer "
+                            "available; finalize your idea now using the "
+                            "literature already retrieved in this generation."
+                        ),
+                        operation_seq=model_op_seq,
+                        pipeline_pos=pipeline_pos,
+                    )
+                    continue
                 if retrieval_reuse is not None:
                     # Resume replay: the retrieval request was committed but
                     # produced no retrieval event; re-execute under the same
@@ -1300,7 +1485,7 @@ class IdeationController:
                     )
                 except IdeationInputError as exc:
                     if exc.code in MODEL_FIXABLE_ERROR_CODES:
-                        last_tool_results = self._record_model_fixable_error(
+                        last_tool_results = _record_fixable_error(
                             action="SearchLiterature",
                             error_code=exc.code,
                             error_message=exc.message or str(exc),
@@ -1341,7 +1526,7 @@ class IdeationController:
             elif action == "FinalizeIdea":
                 # Check closed two-key arguments structure (Ticket 038)
                 if not isinstance(arguments, dict):
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="FinalizeIdea",
                         error_code="INVALID_ARGUMENTS_JSON",
                         error_message="FinalizeIdea arguments must be a JSON object",
@@ -1352,7 +1537,7 @@ class IdeationController:
 
                 extra_args = set(arguments.keys()) - {"idea", "grounding"}
                 if extra_args:
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="FinalizeIdea",
                         error_code="INVALID_IDEA_STRUCTURE",
                         error_message=f"FinalizeIdea arguments contain unknown fields: {sorted(extra_args)}. Allowed fields are exactly 'idea' and 'grounding'",
@@ -1362,7 +1547,7 @@ class IdeationController:
                     continue
 
                 if "idea" not in arguments:
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="FinalizeIdea",
                         error_code="INVALID_IDEA_STRUCTURE",
                         error_message="FinalizeIdea arguments missing required 'idea' field",
@@ -1372,7 +1557,7 @@ class IdeationController:
                     continue
 
                 if "grounding" not in arguments:
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="FinalizeIdea",
                         error_code="INVALID_GROUNDING",
                         error_message="FinalizeIdea arguments missing required 'grounding' field",
@@ -1386,7 +1571,7 @@ class IdeationController:
                     validated_idea = validate_idea_structure(arguments.get("idea"))
                 except IdeationInputError as exc:
                     if exc.code in MODEL_FIXABLE_ERROR_CODES:
-                        last_tool_results = self._record_model_fixable_error(
+                        last_tool_results = _record_fixable_error(
                             action="FinalizeIdea",
                             error_code=exc.code,
                             error_message=exc.message or str(exc),
@@ -1398,7 +1583,7 @@ class IdeationController:
 
                 # Grounding Gate check: Must have obtained >= 1 non-empty retrieval result in this generation
                 if not generation_retrieved_paper_ids:
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="FinalizeIdea",
                         error_code="GATE_REJECTED",
                         error_message="Cannot finalize idea without at least one non-empty literature search in this generation. Use SearchLiterature first.",
@@ -1414,7 +1599,7 @@ class IdeationController:
                     )
                 except IdeationInputError as exc:
                     if exc.code in MODEL_FIXABLE_ERROR_CODES:
-                        last_tool_results = self._record_model_fixable_error(
+                        last_tool_results = _record_fixable_error(
                             action="FinalizeIdea",
                             error_code=exc.code,
                             error_message=exc.message or str(exc),
@@ -1429,7 +1614,7 @@ class IdeationController:
                     prev["Name"] == validated_idea["Name"]
                     for prev in self.accepted_ideas
                 ):
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="FinalizeIdea",
                         error_code="DUPLICATE_IDEA_NAME",
                         error_message=f"An idea named '{validated_idea['Name']}' was already accepted in this run. Propose an interestingly new proposal.",
@@ -1443,7 +1628,7 @@ class IdeationController:
                     == validated_idea["Title"].strip().lower()
                     for prev in self.accepted_ideas
                 ):
-                    last_tool_results = self._record_model_fixable_error(
+                    last_tool_results = _record_fixable_error(
                         action="FinalizeIdea",
                         error_code="DUPLICATE_IDEA",
                         error_message=f"Idea title '{validated_idea['Title']}' is a near-duplicate of an already accepted proposal in this run. Propose an interestingly new proposal.",
@@ -1457,7 +1642,7 @@ class IdeationController:
                 idea_pos = {
                     "generation_index": gen_idx,
                     "idea_index": idea_idx,
-                    "reflection_index": ref_round,
+                    "reflection_index": dispatch_round,
                 }
 
                 finalize_op_seq = self._next_op_seq()
@@ -1491,7 +1676,7 @@ class IdeationController:
                     "grounding_sha256": grounding_sha,
                     "idea_index": idea_idx,
                     "idea_sha256": idea_sha,
-                    "reflection_index": ref_round,
+                    "reflection_index": dispatch_round,
                     "retrieval_operation_seqs": list(generation_retrieval_op_seqs),
                     "run_id": self.run_id,
                     "schema_version": IDEA_SIDECAR_SCHEMA_VERSION,
@@ -1727,21 +1912,32 @@ def rebuild_resume_plan(
         elif event_type == "terminal":
             terminal_events.append(event)
 
-    # Per-operation ordering invariants.
+    # Per-operation ordering invariants. The one legal post-final attempt is
+    # the final-round corrective re-ask (Proposal 002 remediation): after a
+    # committed operation.finished, exactly one continuation attempt may run
+    # on the same operation. The continuation is cross-checked against the
+    # round's final_round_correction outcome below.
     op_final: dict[int, dict[str, Any]] = {}
+    corrected_model_ops: set[int] = set()
     for op_seq, op_events in model_ops.items():
         last_attempt_seq = 0
         final: dict[str, Any] | None = None
+        corrected = False
         for event in op_events:
             if event["event_type"] == "provider_attempt.finished":
                 if final is not None:
-                    fail("RUN_CORRUPT", "Attempt event after the operation final state")
+                    if corrected:
+                        fail(
+                            "RUN_CORRUPT",
+                            "Attempt event after the operation final state",
+                        )
+                    corrected = True
                 attempt_seq = event["operation"].get("attempt_seq")
                 if not isinstance(attempt_seq, int) or attempt_seq <= last_attempt_seq:
                     fail("RUN_CORRUPT", "Attempt sequence is not strictly increasing")
                 last_attempt_seq = attempt_seq
                 continue
-            if final is not None:
+            if final is not None and not corrected:
                 fail("RUN_CORRUPT", "Operation carries more than one final state")
             if event["event_type"] == "operation.failed":
                 if event["payload"].get("disposition") not in ("suspend", "terminal"):
@@ -1752,8 +1948,16 @@ def rebuild_resume_plan(
                 # writer epoch may re-execute it. Only terminal closes by failure.
                 if event["payload"]["disposition"] == "terminal":
                     final = event
+                elif final is not None:
+                    # A suspend on the corrective continuation reopens the
+                    # operation for a resume re-execute of the re-ask.
+                    final = None
             else:
+                if final is not None:
+                    corrected = True
                 final = event
+        if corrected:
+            corrected_model_ops.add(op_seq)
         # A suspend-only tail leaves the operation open; the last suspend
         # failure still anchors the next attempt coordinate.
         if final is None:
@@ -1767,6 +1971,22 @@ def rebuild_resume_plan(
                 final = suspends[-1]
         if final is not None:
             op_final[op_seq] = final
+
+    for op_seq in corrected_model_ops:
+        pos = model_ops[op_seq][0].get("pipeline_position") or {}
+        correction_outcomes = outcomes_by_round.get(
+            (pos.get("generation_index"), pos.get("reflection_index")), []
+        )
+        if (
+            not correction_outcomes
+            or correction_outcomes[0]["payload"].get("outcome")
+            != FINAL_ROUND_CORRECTION_OUTCOME
+        ):
+            fail(
+                "RUN_CORRUPT",
+                "A post-final corrective attempt lacks its final-round "
+                "correction outcome",
+            )
 
     # -- Accepted ideas (needed even for seal-only completions) -------------
     accepted_ideas: list[dict[str, Any]] = []
@@ -1936,13 +2156,17 @@ def rebuild_resume_plan(
     archive_string = "\n\n".join(idea_str_archive)
     bookkeeping: list[dict[str, Any]] = []
 
-    outcomes_g: dict[int, dict[str, Any]] = {}
+    outcomes_g: dict[int, list[dict[str, Any]]] = {}
     for (outcome_gen, outcome_round), round_outcomes in outcomes_by_round.items():
         if outcome_gen != gen_idx:
             continue
-        if len(round_outcomes) > 1:
+        if len(round_outcomes) > 2 or (
+            len(round_outcomes) == 2
+            and round_outcomes[0]["payload"].get("outcome")
+            != FINAL_ROUND_CORRECTION_OUTCOME
+        ):
             fail("RUN_CORRUPT", "Multiple action_outcome events in one round")
-        outcomes_g[outcome_round] = round_outcomes[0]
+        outcomes_g[outcome_round] = list(round_outcomes)
 
     model_op_round: dict[int, int] = {}
     for op_seq in model_ops:
@@ -1982,8 +2206,8 @@ def rebuild_resume_plan(
                 continue
             if event_seq <= final["event_seq"]:
                 continue
-            outcome_event = outcomes_g.get(round_idx)
-            if outcome_event is not None and event_seq >= outcome_event["event_seq"]:
+            outcome_events = outcomes_g.get(round_idx)
+            if outcome_events and event_seq >= outcome_events[-1]["event_seq"]:
                 continue
             if assigned_round is not None:
                 fail("RUN_CORRUPT", "Retrieval event matches multiple rounds")
@@ -2080,6 +2304,62 @@ def rebuild_resume_plan(
             fail("RUN_CORRUPT", "Provider failure artifact lacks its message")
         return message
 
+    def _recovered_finished_event(op_seq: int) -> dict[str, Any]:
+        """Rebuild the operation.finished commit whose recording was cut.
+
+        The cut hit between the last successful provider_attempt.finished and
+        its operation.finished; the recovered event replays the attempt's own
+        evidence under the current writer epoch.
+        """
+        attempts = [
+            event
+            for event in model_ops[op_seq]
+            if event["event_type"] == "provider_attempt.finished"
+        ]
+        last_attempt = attempts[-1]
+        resp_ref = next(
+            (
+                ref
+                for ref in last_attempt.get("artifact_refs", [])
+                if ref.get("role") == "provider_response"
+            ),
+            None,
+        )
+        if resp_ref is None:
+            fail(
+                "RUN_CORRUPT",
+                "Successful attempt lacks its provider_response reference",
+            )
+        last_suspend_seq = max(
+            (
+                event["event_seq"]
+                for event in model_ops[op_seq]
+                if event["event_type"] == "operation.failed"
+            ),
+            default=0,
+        )
+        segment_attempts = [
+            event for event in attempts if event["event_seq"] > last_suspend_seq
+        ]
+        return {
+            "artifact_refs": [resp_ref],
+            "event_type": "operation.finished",
+            "operation": {
+                "attempt_seq": last_attempt["operation"]["attempt_seq"],
+                "operation_kind": "model_inference",
+                "operation_seq": op_seq,
+            },
+            "payload": {
+                "cost_cny": last_attempt["payload"].get("cost_cny"),
+                "model": last_attempt["payload"].get("model"),
+                "response_id": last_attempt["payload"].get("response_id"),
+                "status": "success",
+                "total_attempts": len(segment_attempts),
+            },
+            "pipeline_position": last_attempt.get("pipeline_position"),
+            "writer_epoch": writer_epoch,
+        }
+
     def _close_generation(
         idea_pos: dict[str, Any] | None,
         idea_index: int | None,
@@ -2145,14 +2425,200 @@ def rebuild_resume_plan(
     pending: PendingResponse | PendingReexecute | None = None
 
     for ref_round in range(num_reflections):
-        outcome_event = outcomes_g.get(ref_round)
+        round_outcomes = outcomes_g.get(ref_round)
         op_seq = model_op_round.get(ref_round)
         retrieval_event = retrieval_by_round.get(ref_round)
         finalize_event = finalize_round.get(ref_round)
 
-        if outcome_event is not None:
-            # Fully committed round: replay into the rebuilt state.
-            outcome = outcome_event["payload"].get("outcome")
+        if round_outcomes:
+            first_outcome = round_outcomes[0]["payload"].get("outcome")
+            if first_outcome == FINAL_ROUND_CORRECTION_OUTCOME:
+                if ref_round != num_reflections - 1:
+                    fail(
+                        "RUN_CORRUPT", "Final-round correction outside the final round"
+                    )
+                if op_seq is None:
+                    fail("RUN_CORRUPT", "Action outcome without its model operation")
+                _no_later_round_events(ref_round)
+                if len(round_outcomes) == 1:
+                    # The final-round correction is committed but its
+                    # corrective attempt is not resolved: the round is the
+                    # interrupted round and the re-ask resumes from here.
+                    final = op_final.get(op_seq)
+                    if not isinstance(
+                        round_outcomes[0]["payload"].get("feedback"), str
+                    ):
+                        fail("RUN_CORRUPT", "The correction outcome lacks its feedback")
+                    correction_feedback = round_outcomes[0]["payload"]["feedback"]
+                    attempts = [
+                        event
+                        for event in model_ops[op_seq]
+                        if event["event_type"] == "provider_attempt.finished"
+                    ]
+                    attempt_seqs = [
+                        event["operation"]["attempt_seq"] for event in attempts
+                    ]
+                    orphan_attempts = [a for a, _ in orphan_by_op.get(op_seq, [])]
+                    corrective_finished = (
+                        final is not None
+                        and final["event_type"] == "operation.finished"
+                        and final["operation"]["attempt_seq"] >= 2
+                    )
+                    if final is not None and final["event_type"] == "operation.failed":
+                        if final["payload"]["disposition"] == "terminal":
+                            return _plan(
+                                start_generation=gen_idx,
+                                round_resume=None,
+                                terminal=SealFailedCompletion(
+                                    reason_code=final["payload"]["error_code"],
+                                    reason_message=_failure_message_from_chain(final),
+                                ),
+                                bookkeeping=bookkeeping,
+                                remaining=0,
+                            )
+                        # The corrective attempt suspended: re-execute the
+                        # re-ask under the same operation at the next attempt.
+                        pending = PendingReexecute(
+                            op_seq=op_seq,
+                            next_attempt_seq=max(attempt_seqs + orphan_attempts) + 1,
+                        )
+                    elif corrective_finished:
+                        # The corrective response is committed; its dispatch
+                        # was cut. Re-dispatch it without a new model call.
+                        first_finished = next(
+                            (
+                                event
+                                for event in model_ops[op_seq]
+                                if event["event_type"] == "operation.finished"
+                                and event["operation"]["attempt_seq"] == 1
+                            ),
+                            None,
+                        )
+                        if first_finished is None:
+                            fail(
+                                "RUN_CORRUPT",
+                                "Correction round lacks its original response",
+                            )
+                        state.msg_history[-1] = {
+                            "role": "assistant",
+                            "content": _committed_response(first_finished),
+                        }
+                        pending = PendingResponse(
+                            response_text=_committed_response(final),
+                            model_op_seq=op_seq,
+                            retrieval_op_seq=None,
+                            retrieval_attempt_seq=1,
+                            corrective_dispatch=True,
+                            response_attempt_seq=final["operation"]["attempt_seq"],
+                        )
+                    elif final is None and attempt_seqs and attempt_seqs[-1] >= 2:
+                        # The cut hit inside the corrective attempt's recording
+                        # sequence; recover or re-execute exactly like an open
+                        # operation.
+                        last_attempt = attempts[-1]
+                        if last_attempt["payload"].get("outcome") == "success":
+                            recovered = _recovered_finished_event(op_seq)
+                            bookkeeping.append(
+                                {"kind": "append_event", "event": recovered}
+                            )
+                            pending = PendingResponse(
+                                response_text=_committed_response(recovered),
+                                model_op_seq=op_seq,
+                                retrieval_op_seq=None,
+                                retrieval_attempt_seq=1,
+                                corrective_dispatch=True,
+                                response_attempt_seq=last_attempt["operation"][
+                                    "attempt_seq"
+                                ],
+                            )
+                        elif last_attempt["payload"].get("disposition") == "terminal":
+                            error_code = last_attempt["payload"]["error_code"]
+                            bookkeeping.append(
+                                {
+                                    "kind": "append_event",
+                                    "event": {
+                                        "event_type": "operation.failed",
+                                        "operation": {
+                                            "attempt_seq": last_attempt["operation"][
+                                                "attempt_seq"
+                                            ],
+                                            "operation_kind": "model_inference",
+                                            "operation_seq": op_seq,
+                                        },
+                                        "payload": {
+                                            "disposition": "terminal",
+                                            "error_code": error_code,
+                                            "status": "failed",
+                                            "total_attempts": last_attempt["operation"][
+                                                "attempt_seq"
+                                            ],
+                                        },
+                                        "pipeline_position": last_attempt.get(
+                                            "pipeline_position"
+                                        ),
+                                        "writer_epoch": writer_epoch,
+                                    },
+                                }
+                            )
+                            return _plan(
+                                start_generation=gen_idx,
+                                round_resume=None,
+                                terminal=SealFailedCompletion(
+                                    reason_code=error_code,
+                                    reason_message=_failure_message_from_chain(
+                                        last_attempt
+                                    ),
+                                ),
+                                bookkeeping=bookkeeping,
+                                remaining=0,
+                            )
+                        else:
+                            pending = PendingReexecute(
+                                op_seq=op_seq,
+                                next_attempt_seq=max(attempt_seqs + orphan_attempts)
+                                + 1,
+                            )
+                    else:
+                        # E1: the corrective attempt has not started. An
+                        # orphaned corrective request burns its coordinate.
+                        pending = PendingReexecute(
+                            op_seq=op_seq,
+                            next_attempt_seq=max([1] + orphan_attempts) + 1,
+                        )
+                    start_round = ref_round
+                    if isinstance(pending, PendingResponse):
+                        state.msg_history.append(
+                            {
+                                "role": "user",
+                                "content": _round_prompt(ref_round)
+                                + _final_round_correction_suffix(correction_feedback),
+                            }
+                        )
+                        state.msg_history.append(
+                            {
+                                "role": "assistant",
+                                "content": pending.response_text,
+                            }
+                        )
+                    remaining = (num_reflections - ref_round) + (
+                        max_generations - gen_idx - 1
+                    ) * num_reflections
+                    if isinstance(pending, PendingResponse):
+                        # The committed corrective response only needs its
+                        # local dispatch replayed, not a new provider attempt.
+                        remaining -= 1
+                    return _plan(
+                        start_generation=gen_idx,
+                        round_resume=RoundResume(
+                            start_round=ref_round,
+                            state=state,
+                            pending=pending,
+                            final_round_correction=correction_feedback,
+                        ),
+                        terminal=None,
+                        bookkeeping=bookkeeping,
+                        remaining=remaining,
+                    )
             if op_seq is None:
                 fail("RUN_CORRUPT", "Action outcome without its model operation")
             final = op_final.get(op_seq)
@@ -2163,53 +2629,85 @@ def rebuild_resume_plan(
                 {"role": "user", "content": _round_prompt(ref_round)}
             )
             state.msg_history.append({"role": "assistant", "content": response_text})
-            if outcome == "tool_result":
-                if (
-                    retrieval_event is None
-                    or retrieval_event["event_type"] != "operation.finished"
-                ):
+            if len(round_outcomes) == 2:
+                # Faithful reconstruction of the corrective re-ask pair: the
+                # original response, then the corrective response to the
+                # suffixed prompt.
+                finals = [
+                    event
+                    for event in model_ops[op_seq]
+                    if event["event_type"] == "operation.finished"
+                ]
+                if len(finals) < 2:
                     fail(
                         "RUN_CORRUPT",
-                        "tool_result outcome without its retrieval operation",
+                        "Correction round lacks its corrective response",
                     )
-                payload = _retrieval_payload(retrieval_event)
-                papers = payload.get("papers", [])
-                paper_ids = sorted(p["paper_id"] for p in papers)
-                expected_ids = sorted(outcome_event["payload"].get("paper_ids", []))
-                if paper_ids != expected_ids or len(papers) != outcome_event[
-                    "payload"
-                ].get("paper_count"):
-                    fail(
-                        "RUN_CORRUPT",
-                        "Retrieval payload does not match its action_outcome",
-                    )
-                state.retrieval_op_seqs.append(
-                    retrieval_event["operation"]["operation_seq"]
+                state.msg_history[-1] = {
+                    "role": "assistant",
+                    "content": _committed_response(finals[0]),
+                }
+                state.msg_history.append(
+                    {
+                        "role": "user",
+                        "content": _round_prompt(ref_round)
+                        + _final_round_correction_suffix(
+                            round_outcomes[0]["payload"]["feedback"]
+                        ),
+                    }
                 )
-                if papers:
-                    run_has_non_empty = True
-                    for paper in papers:
-                        state.retrieved_paper_ids.add(paper["paper_id"])
-                state.last_tool_results = format_retrieval_for_reflection(payload)
-            elif outcome == "model_fixable_error":
-                state.last_tool_results = outcome_event["payload"]["feedback"]
-            elif outcome == "finalize_accepted":
-                # The generation closed live with generation.finished; gen_idx
-                # is unfinished, so this outcome is only legal as the very last
-                # committed event (the cut hit before generation.finished).
-                if outcome_event is not execution_events[-1]:
-                    fail("RUN_CORRUPT", "Events follow a finalize_accepted outcome")
-                if finalize_event is None:
-                    fail(
-                        "RUN_CORRUPT",
-                        "finalize_accepted without its finalization operation",
-                    )
-                idea_pos = finalize_event["pipeline_position"]
-                return _close_generation(
-                    idea_pos, finalize_event["payload"]["idea_index"]
+                state.msg_history.append(
+                    {"role": "assistant", "content": response_text}
                 )
-            else:
-                fail("RUN_CORRUPT", f"Unknown action outcome: {outcome}")
+            for outcome_event in round_outcomes:
+                outcome = outcome_event["payload"].get("outcome")
+                if outcome == "tool_result":
+                    if (
+                        retrieval_event is None
+                        or retrieval_event["event_type"] != "operation.finished"
+                    ):
+                        fail(
+                            "RUN_CORRUPT",
+                            "tool_result outcome without its retrieval operation",
+                        )
+                    payload = _retrieval_payload(retrieval_event)
+                    papers = payload.get("papers", [])
+                    paper_ids = sorted(p["paper_id"] for p in papers)
+                    expected_ids = sorted(outcome_event["payload"].get("paper_ids", []))
+                    if paper_ids != expected_ids or len(papers) != outcome_event[
+                        "payload"
+                    ].get("paper_count"):
+                        fail(
+                            "RUN_CORRUPT",
+                            "Retrieval payload does not match its action_outcome",
+                        )
+                    state.retrieval_op_seqs.append(
+                        retrieval_event["operation"]["operation_seq"]
+                    )
+                    if papers:
+                        run_has_non_empty = True
+                        for paper in papers:
+                            state.retrieved_paper_ids.add(paper["paper_id"])
+                    state.last_tool_results = format_retrieval_for_reflection(payload)
+                elif outcome in ("model_fixable_error", FINAL_ROUND_CORRECTION_OUTCOME):
+                    state.last_tool_results = outcome_event["payload"]["feedback"]
+                elif outcome == "finalize_accepted":
+                    # The generation closed live with generation.finished; gen_idx
+                    # is unfinished, so this outcome is only legal as the very last
+                    # committed event (the cut hit before generation.finished).
+                    if outcome_event is not execution_events[-1]:
+                        fail("RUN_CORRUPT", "Events follow a finalize_accepted outcome")
+                    if finalize_event is None:
+                        fail(
+                            "RUN_CORRUPT",
+                            "finalize_accepted without its finalization operation",
+                        )
+                    idea_pos = finalize_event["pipeline_position"]
+                    return _close_generation(
+                        idea_pos, finalize_event["payload"]["idea_index"]
+                    )
+                else:
+                    fail("RUN_CORRUPT", f"Unknown action outcome: {outcome}")
             continue
 
         # No action_outcome: this is the interrupted round. Nothing may exist
@@ -2281,48 +2779,7 @@ def rebuild_resume_plan(
             if last_outcome == "success":
                 # Recover the operation.finished commit, then continue exactly
                 # like the committed-finished path below.
-                resp_ref = next(
-                    (
-                        ref
-                        for ref in last_attempt.get("artifact_refs", [])
-                        if ref.get("role") == "provider_response"
-                    ),
-                    None,
-                )
-                if resp_ref is None:
-                    fail(
-                        "RUN_CORRUPT",
-                        "Successful attempt lacks its provider_response reference",
-                    )
-                last_suspend_seq = max(
-                    (
-                        e["event_seq"]
-                        for e in model_ops[op_seq]
-                        if e["event_type"] == "operation.failed"
-                    ),
-                    default=0,
-                )
-                segment_attempts = [
-                    e for e in attempts if e["event_seq"] > last_suspend_seq
-                ]
-                recovered = {
-                    "artifact_refs": [resp_ref],
-                    "event_type": "operation.finished",
-                    "operation": {
-                        "attempt_seq": last_attempt["operation"]["attempt_seq"],
-                        "operation_kind": "model_inference",
-                        "operation_seq": op_seq,
-                    },
-                    "payload": {
-                        "cost_cny": last_attempt["payload"].get("cost_cny"),
-                        "model": last_attempt["payload"].get("model"),
-                        "response_id": last_attempt["payload"].get("response_id"),
-                        "status": "success",
-                        "total_attempts": len(segment_attempts),
-                    },
-                    "pipeline_position": last_attempt.get("pipeline_position"),
-                    "writer_epoch": writer_epoch,
-                }
+                recovered = _recovered_finished_event(op_seq)
                 bookkeeping.append({"kind": "append_event", "event": recovered})
                 final = recovered
             elif last_attempt["payload"].get("disposition") == "terminal":

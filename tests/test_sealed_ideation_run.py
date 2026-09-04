@@ -1080,6 +1080,17 @@ def test_adversarial_duplicate_idea_name_in_run_is_rejected(
             ),
             30.0,
         ),
+        # Gen 1 Round 1 is the final round: the duplicate-name rejection
+        # receives the corrective re-ask, which repeats the same duplicate.
+        TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            _make_response_bytes(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(same_idea)}, "grounding": ["{paper_id}"]}}',
+                "r4c",
+            ),
+            30.0,
+        ),
     ]
 
     transport = StubTransport(stub_responses)
@@ -1171,6 +1182,17 @@ def test_adversarial_finalize_without_prior_retrieval_is_rejected(
             _make_response_bytes(
                 f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(idea)}, "grounding": ["some_paper"]}}',
                 "r2",
+            ),
+            30.0,
+        ),
+        # Round 1 is the final round: the gate rejection receives the
+        # corrective re-ask, which repeats the same rejection.
+        TransportResponse(
+            200,
+            {"content-type": "application/json"},
+            _make_response_bytes(
+                f'ACTION: FinalizeIdea\nARGUMENTS: {{"idea": {json.dumps(idea)}, "grounding": ["some_paper"]}}',
+                "r2c",
             ),
             30.0,
         ),

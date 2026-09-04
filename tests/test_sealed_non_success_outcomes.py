@@ -808,6 +808,12 @@ def test_vm_integration_03_retrieval_backstop_seals_failed_run(
             f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(never_grounded, ["some_paper"])}',
             "r1",
         ),
+        # Round 1 is the final round: the gate rejection receives the
+        # corrective re-ask, which repeats the same rejection.
+        _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(never_grounded, ["some_paper"])}',
+            "r1c",
+        ),
     ]
     transport = StubTransport(stub_responses)
     adapter = DeepSeekAdapter(
@@ -862,6 +868,12 @@ def test_cli_seam_backstop_failure_seals_failed(
         _stub(
             f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(never_grounded, ["some_paper"])}',
             "c1",
+        ),
+        # Round 1 is the final round: the gate rejection receives the
+        # corrective re-ask, which repeats the same rejection.
+        _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(never_grounded, ["some_paper"])}',
+            "c1c",
         ),
     ]
     transport = StubTransport(stub_responses)
@@ -1185,6 +1197,12 @@ def test_vm_fault_04_fixable_adversarial_scripts_reach_budget_exhausted(
             f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(unfixable_model, ["hallucinated_paper_id"])}',
             "r2",
         ),
+        # Round 2 is the final round: the fixable rejection receives the
+        # corrective re-ask, which repeats the same grounding lie.
+        _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(unfixable_model, ["hallucinated_paper_id"])}',
+            "r2c",
+        ),
     ]
     transport = StubTransport(stub_responses)
     adapter = DeepSeekAdapter(
@@ -1219,6 +1237,7 @@ def test_vm_fault_04_fixable_adversarial_scripts_reach_budget_exhausted(
     assert [e["payload"]["outcome"] for e in action_outcomes] == [
         "tool_result",
         "model_fixable_error",
+        "final_round_correction",
         "model_fixable_error",
     ]
     assert action_outcomes[1]["payload"]["error_code"] == "UNKNOWN_ACTION"
@@ -1246,7 +1265,15 @@ def test_vm_fault_04_budget_exhausted_then_run_succeeds_after_prior_retrieval(
             'ACTION: SearchLiterature\nARGUMENTS: {"query": "migraine telemetry"}',
             "g0r1",
         ),
-        # Generations 1-5: model burns every budget on an unfixable grounding lie.
+        # Gen 0 Round 1 is the final round: the search violates the
+        # convergence contract and the corrective re-ask searches again.
+        _stub(
+            'ACTION: SearchLiterature\nARGUMENTS: {"query": "migraine telemetry"}',
+            "g0r1c",
+        ),
+        # Generations 1-5: model burns every budget on an unfixable grounding
+        # lie; each final-round rejection receives the corrective re-ask and
+        # repeats the same lie.
         _stub(
             'ACTION: SearchLiterature\nARGUMENTS: {"query": "migraine telemetry"}',
             "g1r0",
@@ -1254,6 +1281,10 @@ def test_vm_fault_04_budget_exhausted_then_run_succeeds_after_prior_retrieval(
         _stub(
             f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe", "Lie Probe Proposal"), ["hallucinated_paper_id"])}',
             "g1r1",
+        ),
+        _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe", "Lie Probe Proposal"), ["hallucinated_paper_id"])}',
+            "g1r1c",
         ),
         _stub(
             'ACTION: SearchLiterature\nARGUMENTS: {"query": "migraine telemetry"}',
@@ -1264,12 +1295,20 @@ def test_vm_fault_04_budget_exhausted_then_run_succeeds_after_prior_retrieval(
             "g2r1",
         ),
         _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe_two", "Lie Probe Two Proposal"), ["hallucinated_paper_id"])}',
+            "g2r1c",
+        ),
+        _stub(
             'ACTION: SearchLiterature\nARGUMENTS: {"query": "migraine telemetry"}',
             "g3r0",
         ),
         _stub(
             f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe_three", "Lie Probe Three Proposal"), ["hallucinated_paper_id"])}',
             "g3r1",
+        ),
+        _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe_three", "Lie Probe Three Proposal"), ["hallucinated_paper_id"])}',
+            "g3r1c",
         ),
         _stub(
             'ACTION: SearchLiterature\nARGUMENTS: {"query": "migraine telemetry"}',
@@ -1280,12 +1319,20 @@ def test_vm_fault_04_budget_exhausted_then_run_succeeds_after_prior_retrieval(
             "g4r1",
         ),
         _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe_four", "Lie Probe Four Proposal"), ["hallucinated_paper_id"])}',
+            "g4r1c",
+        ),
+        _stub(
             'ACTION: SearchLiterature\nARGUMENTS: {"query": "migraine telemetry"}',
             "g5r0",
         ),
         _stub(
             f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe_five", "Lie Probe Five Proposal"), ["hallucinated_paper_id"])}',
             "g5r1",
+        ),
+        _stub(
+            f'ACTION: FinalizeIdea\nARGUMENTS: {_finalize_arguments(_make_idea("lie_probe_five", "Lie Probe Five Proposal"), ["hallucinated_paper_id"])}',
+            "g5r1c",
         ),
     ]
     transport = StubTransport(stub_responses)
