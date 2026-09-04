@@ -11,8 +11,8 @@ Target identity or live-run artifacts.
 
 from __future__ import annotations
 
+import json
 import shlex
-import sys
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -52,12 +52,15 @@ OFFCLUSTER = "Environmental Sciences"
 OTHER_OFFCLUSTER = "Neuroscience & Cognitive Sciences"
 
 
-def _case(case_id: str, cluster: str, hash_hex: str) -> CanaryCase:
+def _case(case_id: str, cluster: str) -> CanaryCase:
+    """A synthetic Canary case whose canonical hash is the recomputed one,
+    so the selection seam's CANARY_HASH_FORGERY check accepts it."""
+    canonical = canonical_case_hash_for_canary_case(case_id)
     return CanaryCase(
         case_id=case_id,
         cluster=cluster,
-        canonical_hash=hash_hex,
-        target_row_sha256=hash_hex[:64].rjust(64, "0"),
+        canonical_hash=canonical,
+        target_row_sha256=sha256_bytes(f"row:{case_id}".encode()),
         source_row_snapshot_sha256="b" * 64,
     )
 
@@ -80,7 +83,7 @@ def _approved_twelve() -> tuple[CanaryCase, ...]:
     ]
     cases = []
     for index, cluster in enumerate(clusters):
-        cases.append(_case(f"case-{index:032x}", cluster, f"{index:064x}"))
+        cases.append(_case(f"case-{index:032x}", cluster))
     return tuple(cases)
 
 
@@ -216,11 +219,12 @@ def test_selection_rejects_duplicate_case_and_duplicate_target() -> None:
     # 12 distinct case ids but a repeated target row.
     cases = [case for case in approved if case.cluster != "Health & Medicine"]
     for index in range(3):
+        new_id = f"case-{index + 0x100:032x}"
         cases.append(
             CanaryCase(
-                case_id=f"case-{index + 0x100:032x}",
+                case_id=new_id,
                 cluster="Health & Medicine",
-                canonical_hash=f"{index + 0x100:064x}",
+                canonical_hash=canonical_case_hash_for_canary_case(new_id),
                 target_row_sha256=approved[1].target_row_sha256,
                 source_row_snapshot_sha256=approved[1].source_row_snapshot_sha256,
             )
@@ -249,15 +253,39 @@ def test_selection_rejects_missing_cluster() -> None:
         CanaryCase(
             case_id=f"case-{index:032x}",
             cluster=OFFCLUSTER,
-            canonical_hash=f"{index:064x}",
-            target_row_sha256=f"{index:064x}",
-            source_row_snapshot_sha256=f"{index:064x}",
+            canonical_hash=canonical_case_hash_for_canary_case(f"case-{index:032x}"),
+            target_row_sha256=sha256_bytes(f"row:miss-{index}".encode()),
+            source_row_snapshot_sha256=sha256_bytes(f"data:miss-{index}".encode()),
         )
         for index in range(12)
     ]
     with pytest.raises(Exception, match="MISSING_CLUSTER"):
         select_comparison_cases(
             tuple(replaced),
+            canary_selection_manifest_sha256=APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
+            target_source=_target_source(),
+        )
+
+
+def test_selection_rejects_forged_canonical_hash() -> None:
+    """F10: the selection seam recomputes each canonical hash and fails
+    closed on any supplied hash that does not match the pinned seed."""
+    approved = list(_approved_twelve())
+    target = next(case for case in approved if case.cluster == "Materials Science")
+    forged = CanaryCase(
+        case_id=target.case_id,
+        cluster=target.cluster,
+        canonical_hash="f" * 64,
+        target_row_sha256=target.target_row_sha256,
+        source_row_snapshot_sha256=target.source_row_snapshot_sha256,
+    )
+    cases = tuple(
+        forged if case.case_id == forged.case_id else case for case in approved
+    )
+    assert len(cases) == 12
+    with pytest.raises(Exception, match="CANARY_HASH_FORGERY"):
+        select_comparison_cases(
+            cases,
             canary_selection_manifest_sha256=APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
             target_source=_target_source(),
         )
@@ -294,7 +322,7 @@ def test_selection_does_not_read_target_contribution_fields(
     ).encode("utf-8")
     # The selection seam's input type carries no content fields by
     # construction: CanaryCase fields are identity-only.
-    case = _case("case-" + "a" * 32, APPROVED_CLUSTERS[0], "5" * 64)
+    case = _case("case-" + "a" * 32, APPROVED_CLUSTERS[0])
     case_fields = frozenset(
         {
             "case_id",
@@ -621,7 +649,9 @@ def _ledger():
     from decimal import Decimal as D
 
     return cmp_mod.initialize_comparison_ledger(
-        matrix_document=document, plan_gate_subcap_cny=D("4.00")
+        matrix_document=document,
+        plan_gate_subcap_cny=D("4.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
 
 
@@ -641,17 +671,27 @@ def _entry(run_index: int, cost: str, run_id: str) -> cmp_mod.LedgerEntry:
     )
 
 
-def test_ledger_starts_at_zero_and_is_append_only() -> None:
+def test_ledger_starts_at_zero_tracked_over_historical_opening() -> None:
     from decimal import Decimal as D
 
     ledger = _ledger()
-    assert ledger["current_actual_spend_cny"] == "0.00"
+    # Tracked comparison spend starts at 0.00; the total stage spend opens
+    # at the recorded 0.14 CNY historical Canary-stage balance.
+    assert ledger["comparison_actual_spend_cny"] == "0.00"
+    assert ledger["historical_spend_cny"] == "0.14"
+    assert ledger["total_stage_spend_cny"] == "0.14"
+    assert ledger["schema_version"] == cmp_mod.SPEND_LEDGER_SCHEMA_VERSION
     assert ledger["status"] == "initialized"
+    assert "current_actual_spend_cny" not in ledger
+    assert cmp_mod.ledger_current_spend(ledger) == D("0.00")
+    assert cmp_mod.ledger_total_stage_spend(ledger) == D("0.14")
     updated = cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(1, "0.14", "r1"))
-    assert updated["current_actual_spend_cny"] == "0.14"
+    assert updated["comparison_actual_spend_cny"] == "0.14"
+    assert updated["total_stage_spend_cny"] == "0.28"
     assert len(updated["entries"]) == 1
     twice = cmp_mod.ingest_run_actual_cost(updated, entry=_entry(2, "0.20", "r2"))
-    assert twice["current_actual_spend_cny"] == "0.34"
+    assert twice["comparison_actual_spend_cny"] == "0.34"
+    assert twice["total_stage_spend_cny"] == "0.48"
     # Duplicate run / slot ingests fail closed.
     with pytest.raises(Exception, match="LEDGER_DUPLICATE_RUN"):
         cmp_mod.ingest_run_actual_cost(twice, entry=_entry(3, "0.01", "r1"))
@@ -659,12 +699,23 @@ def test_ledger_starts_at_zero_and_is_append_only() -> None:
         cmp_mod.ingest_run_actual_cost(twice, entry=_entry(2, "0.01", "r3"))
 
 
+def test_ledger_rejects_negative_historical_spend() -> None:
+    from decimal import Decimal as D
+
+    _runs, _pairs, document, _manifest = _matrix(_selected())
+    with pytest.raises(Exception, match="INVALID_HISTORICAL_SPEND"):
+        cmp_mod.initialize_comparison_ledger(
+            matrix_document=document,
+            plan_gate_subcap_cny=D("4.00"),
+            historical_spend_cny=D("-0.01"),
+        )
+
+
 def test_ledger_ingests_failed_suspended_resumed_and_retried_runs() -> None:
     ledger = _ledger()
     statuses = ("failed", "suspended", "resume_success", "success")
     for index, status in enumerate(statuses, start=1):
         entry = _entry(index, "0.10", f"r{index}")
-        object.__setattr__(entry, "status", status)
         entry = cmp_mod.LedgerEntry(
             run_index=index,
             pair_index=1,
@@ -677,26 +728,33 @@ def test_ledger_ingests_failed_suspended_resumed_and_retried_runs() -> None:
             physical_attempt_count=2 if status == "resume_success" else 1,
         )
         ledger = cmp_mod.ingest_run_actual_cost(ledger, entry=entry)
-    assert ledger["current_actual_spend_cny"] == "0.40"
+    assert ledger["comparison_actual_spend_cny"] == "0.40"
+    assert ledger["total_stage_spend_cny"] == "0.54"
     attempts = [e["physical_attempt_count"] for e in ledger["entries"]]
     assert attempts == [1, 1, 2, 1]
 
 
-def test_plan_gate_accepts_exact_bound_and_refuses_one_cent_over() -> None:
+def test_plan_gate_is_strict_total_stage_guard() -> None:
     from decimal import Decimal as D
 
+    # subcap 4.00, opening historical 0.14. The gate is a matrix-level
+    # actual-spend guard with no per-run worst-case-bound parameter: it
+    # authorizes while total stage spend is strictly below both caps.
     ledger = _ledger()
-    # subcap 4.00; spend exactly 3.50 -> next bound 0.50 fits exactly.
-    ledger = cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(1, "3.50", "r1"))
-    assert cmp_mod.plan_gate_next_run_allowed(
-        ledger, next_run_worst_case_bound_cny=D("0.50")
-    )
-    assert not cmp_mod.plan_gate_one_cent_over(ledger, next_bound=D("0.50"))
-    # One cent over is refused.
-    assert not cmp_mod.plan_gate_next_run_allowed(
-        ledger, next_run_worst_case_bound_cny=D("0.51")
-    )
-    assert cmp_mod.plan_gate_one_cent_over(ledger, next_bound=D("0.51"))
+    ledger = cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(1, "3.85", "r1"))
+    assert cmp_mod.ledger_total_stage_spend(ledger) == D("3.99")
+    assert cmp_mod.plan_gate_next_run_allowed(ledger)
+    assert not cmp_mod.plan_gate_one_cent_over(ledger)
+    # Total reaches exactly the sub-cap: strictly refused (exactly-at-cap
+    # is refused, one cent over is refused).
+    ledger = cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(2, "0.01", "r2"))
+    assert cmp_mod.ledger_total_stage_spend(ledger) == D("4.00")
+    assert not cmp_mod.plan_gate_next_run_allowed(ledger)
+    assert cmp_mod.plan_gate_one_cent_over(ledger)
+    # One more cent pushes the total over the sub-cap, which now fails
+    # closed at ingest (SUBCAP_EXCEEDED) before any further run is recorded.
+    with pytest.raises(Exception, match="SUBCAP_EXCEEDED"):
+        cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(3, "0.01", "r3"))
 
 
 def test_plan_gate_subcap_cannot_exceed_canary_cap() -> None:
@@ -705,7 +763,9 @@ def test_plan_gate_subcap_cannot_exceed_canary_cap() -> None:
     _runs, _pairs, document, _manifest = _matrix(_selected())
     with pytest.raises(Exception, match="SUBCAP_EXCEEDS_CANARY_CAP"):
         cmp_mod.initialize_comparison_ledger(
-            matrix_document=document, plan_gate_subcap_cny=D("30.01")
+            matrix_document=document,
+            plan_gate_subcap_cny=D("30.01"),
+            historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
         )
 
 
@@ -715,113 +775,30 @@ def test_plan_gate_is_not_a_per_run_approval() -> None:
     )
     assert cmp_mod.plan_gate_does_not_waive_per_run_approval(approval)
     assert approval["scope"] == "matrix_level_only_not_per_run"
+    assert approval["historical_spend_cny"] == "0.14"
+    assert approval["comparison_actual_spend_cny"] == "0.00"
+    assert approval["total_stage_spend_cny"] == "0.14"
 
 
-def test_ledger_hard_cap_refusal() -> None:
+def test_ledger_subcap_refusal_halts_before_any_30_cny_cap() -> None:
     from decimal import Decimal as D
 
+    # The sub-cap (4.00) is enforced at ingest and precedes the 30.00 CNY
+    # hard cap, so a run that would exceed the sub-cap fails closed with
+    # SUBCAP_EXCEEDED before recording. (BUDGET_EXCEEDED stays as the
+    # defensive cap check but is unreachable: subcap <= 30.00, so any
+    # total over 30.00 already exceeds the sub-cap.)
     ledger = _ledger()
-    with pytest.raises(Exception, match="BUDGET_EXCEEDED"):
+    with pytest.raises(Exception, match="SUBCAP_EXCEEDED"):
         cmp_mod.ingest_run_actual_cost(ledger, entry=_entry(1, "30.01", "r1"))
 
 
 # ==========================================================================
 # Result ingestion: fail-closed against corrupt/drifted/cross-case evidence
+# (exercised through the synthetic sealed-run envelope below; no unit-level
+# ingestion fixtures are needed because every arm reaching ingestion must
+# be a genuine sealed Evidence Chain).
 # ==========================================================================
-
-
-def _ingest_args(
-    selected, run_index: int, pair_index: int, arm_position: int, profile_id: str
-):
-    case = selected[(run_index - 1) // 2]
-    return dict(
-        expected_run_index=run_index,
-        expected_arm_position=arm_position,
-        expected_pair_index=pair_index,
-        expected_case_id=case.case_id,
-        expected_profile_id=profile_id,
-    )
-
-
-def _make_sealed_run(
-    workspace: Path,
-    inputs: dict[str, str],
-    profile_id: str,
-    transport_responses: list[Any],
-    monkeypatch: pytest.MonkeyPatch,
-    helpers: Any,
-) -> str:
-    from ai_scientist.ideation.deepseek import DeepSeekAdapter
-    from ai_scientist.ideation.pricing import load_price_table
-
-    helpers._approve_cost(monkeypatch)
-    request = helpers.make_request(helpers, inputs, profile_id)
-    result = helpers.run_new_run(workspace, request, execute=False)
-    assert result["status"] == "admitted", result
-    run_id = result["run_id"]
-    adapter = DeepSeekAdapter(
-        price_table=load_price_table(workspace),
-        transport=_SequencedTransport(transport_responses),
-    )
-    from ai_scientist.ideation.controller import IdeationController
-
-    sealed = IdeationController(workspace, run_id, adapter=adapter).run()
-    assert sealed["status"] == "sealed", sealed
-    return run_id
-
-
-class _SequencedTransport:
-    """Stub transport serving a scripted list of responses."""
-
-    def __init__(self, responses: list[Any]) -> None:
-        self._responses = list(responses)
-        self.sent_requests: list[dict[str, Any]] = []
-
-    def send(self, request: dict[str, Any]) -> Any:
-        self.sent_requests.append(request)
-        response = self._responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-
-def _stub_response(content: str, duration_ms: float = 30.0) -> Any:
-    from ai_scientist.ideation.canonical import canonical_json_bytes as cjb
-    from ai_scientist.ideation.deepseek import TransportResponse
-
-    body = cjb(
-        {
-            "choices": [
-                {
-                    "finish_reason": "stop",
-                    "index": 0,
-                    "message": {
-                        "content": content,
-                        "reasoning_content": "Detailed reasoning...",
-                        "role": "assistant",
-                    },
-                }
-            ],
-            "created": 1725360000,
-            "id": "chatcmpl-comparison",
-            "model": "deepseek-v4-pro",
-            "object": "chat.completion",
-            "system_fingerprint": "fp_comparison",
-            "usage": {
-                "completion_tokens": 50,
-                "prompt_cache_hit_tokens": 80,
-                "prompt_cache_miss_tokens": 20,
-                "prompt_tokens": 100,
-                "total_tokens": 150,
-            },
-        }
-    )
-    return TransportResponse(
-        status_code=200,
-        headers={"content-type": "application/json"},
-        body=body,
-        duration_ms=duration_ms,
-    )
 
 
 # ==========================================================================
@@ -834,8 +811,8 @@ def _verdict(case_id: str, verdict: str = "a_better") -> cmp_mod.PairVerdict:
         case_id=case_id,
         verdict=verdict,
         overall_rationale="Arm A proposes a stronger validation plan.",
-        domain_method_fit={"arm_a": "improved", "arm_b": "unchanged"},
-        unjustified_ml_intrusion={"arm_a": "decreased", "arm_b": "unchanged"},
+        domain_method_fit="challenger_better",
+        unjustified_ml_intrusion="decreased",
         rubric_floor={"arm_a": "clean", "arm_b": "clean"},
         recorded_at="2026-09-04T08:00:00.000000Z",
     )
@@ -865,18 +842,57 @@ def test_verdict_closed_enums_fail_closed(tmp_path: Path) -> None:
     object.__setattr__(bad, "verdict", "a_wins")
     with pytest.raises(Exception, match="INVALID_VERDICT"):
         vault.record_verdict(bad, packet_sha256="5" * 64)
+    # F6: domain_method_fit is a pair-level scalar from a closed enum.
     bad_fit = _verdict(case_id)
-    object.__setattr__(
-        bad_fit, "domain_method_fit", {"arm_a": "better", "arm_b": "unchanged"}
-    )
+    object.__setattr__(bad_fit, "domain_method_fit", "better")
     with pytest.raises(Exception, match="INVALID_VERDICT"):
         vault.record_verdict(bad_fit, packet_sha256="5" * 64)
+    # The legacy per-arm dict shape is no longer a valid instrument.
+    old_fit = _verdict(case_id)
+    object.__setattr__(
+        old_fit, "domain_method_fit", {"arm_a": "improved", "arm_b": "unchanged"}
+    )
+    with pytest.raises(Exception, match="INVALID_VERDICT"):
+        vault.record_verdict(old_fit, packet_sha256="5" * 64)
+    bad_intrusion = _verdict(case_id)
+    object.__setattr__(bad_intrusion, "unjustified_ml_intrusion", "worse")
+    with pytest.raises(Exception, match="INVALID_VERDICT"):
+        vault.record_verdict(bad_intrusion, packet_sha256="5" * 64)
     bad_floor = _verdict(case_id)
     object.__setattr__(
         bad_floor, "rubric_floor", {"arm_a": "terrible", "arm_b": "clean"}
     )
     with pytest.raises(Exception, match="INVALID_VERDICT"):
         vault.record_verdict(bad_floor, packet_sha256="5" * 64)
+
+
+def test_verdict_pair_level_scalar_enums_accept_only_registered_values() -> None:
+    case_id = _selected()[0].case_id
+    for fit in ("challenger_better", "tie", "baseline_better", "incomparable"):
+        verdict = _verdict(case_id)
+        object.__setattr__(verdict, "domain_method_fit", fit)
+        document = cmp_mod.verdict_document(verdict, packet_sha256="5" * 64)
+        assert document["domain_method_fit"] == fit
+    for intrusion in ("increased", "unchanged", "decreased", "incomparable"):
+        verdict = _verdict(case_id)
+        object.__setattr__(verdict, "unjustified_ml_intrusion", intrusion)
+        document = cmp_mod.verdict_document(verdict, packet_sha256="5" * 64)
+        assert document["unjustified_ml_intrusion"] == intrusion
+    # The pre-F6 vocabulary is rejected on the pair-level scalars.
+    verdict = _verdict(case_id)
+    object.__setattr__(verdict, "domain_method_fit", "improved")
+    with pytest.raises(Exception, match="INVALID_VERDICT"):
+        cmp_mod.verdict_document(verdict, packet_sha256="5" * 64)
+    verdict = _verdict(case_id)
+    object.__setattr__(verdict, "domain_method_fit", "worse")
+    with pytest.raises(Exception, match="INVALID_VERDICT"):
+        cmp_mod.verdict_document(verdict, packet_sha256="5" * 64)
+    assert (
+        cmp_mod.verdict_document(_verdict(case_id), packet_sha256="5" * 64)[
+            "schema_version"
+        ]
+        == cmp_mod.VERDICT_SCHEMA_VERSION
+    )
 
 
 def test_reveal_fails_closed_until_all_verdicts_frozen(tmp_path: Path) -> None:
@@ -952,7 +968,6 @@ def _run_metrics(
     terminal_outcome: str = "success",
     finish_reasons: tuple[str, ...] = ("stop",),
     attempts: int = 1,
-    deterministic_pass: bool = True,
 ) -> cmp_mod.RunMetrics:
     from decimal import Decimal as D
 
@@ -969,7 +984,6 @@ def _run_metrics(
         end_to_end_latency_ms=D(latency_ms),
         actual_cost_cny=D(cost),
         idea_count=1,
-        deterministic_validation_passed=deterministic_pass,
     )
 
 
@@ -988,7 +1002,9 @@ def _reducer_env():
         "schema_version": "comparison-reveal-v1.0.0",
     }
     ledger = cmp_mod.initialize_comparison_ledger(
-        matrix_document=document, plan_gate_subcap_cny=Decimal("4.00")
+        matrix_document=document,
+        plan_gate_subcap_cny=Decimal("4.00"),
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
     return selected, reveal_document, manifest, document, ledger
 
@@ -1007,6 +1023,7 @@ def _facts(
     baseline_metrics: cmp_mod.RunMetrics | None = None,
     challenger_metrics: cmp_mod.RunMetrics | None = None,
     verdict_mutate=None,
+    packet_sha256: str = "5" * 64,
 ) -> tuple[cmp_mod.PairFacts, ...]:
     facts = []
     for pair_index, case in enumerate(selected, start=1):
@@ -1015,7 +1032,7 @@ def _facts(
         verdict = _verdict(case_id, verdict_value)
         if verdict_mutate is not None:
             verdict = verdict_mutate(case_id, verdict)
-        document = cmp_mod.verdict_document(verdict, packet_sha256="5" * 64)
+        document = cmp_mod.verdict_document(verdict, packet_sha256=packet_sha256)
         baseline = baseline_metrics or _run_metrics(cmp_mod.BASELINE_PROFILE_ID)
         challenger = challenger_metrics or _run_metrics(cmp_mod.CHALLENGER_PROFILE_ID)
         facts.append(
@@ -1026,6 +1043,7 @@ def _facts(
                 baseline_metrics=baseline,
                 challenger_metrics=challenger,
                 verdict=document,
+                packet_sha256=packet_sha256,
             )
         )
     return tuple(facts)
@@ -1126,21 +1144,20 @@ def test_reducer_incomplete_when_arm_metrics_missing() -> None:
         baseline_metrics=None,
         challenger_metrics=facts[0].challenger_metrics,
         verdict=facts[0].verdict,
+        packet_sha256=facts[0].packet_sha256,
     )
     reduction = _reduce(tuple(facts), ledger, mappings, document, manifest)
     assert reduction["decision"] == "incomplete"
 
 
-def _fit_mutate(arm: str, value: str):
+def _fit_mutate(value: str):
     def mutate(case_id: str, verdict: cmp_mod.PairVerdict) -> cmp_mod.PairVerdict:
-        updated = dict(verdict.domain_method_fit)
-        updated[arm] = value
         return cmp_mod.PairVerdict(
             case_id=verdict.case_id,
             verdict=verdict.verdict,
             overall_rationale=verdict.overall_rationale,
-            domain_method_fit=updated,
-            unjustified_ml_intrusion=dict(verdict.unjustified_ml_intrusion),
+            domain_method_fit=value,
+            unjustified_ml_intrusion=verdict.unjustified_ml_intrusion,
             rubric_floor=dict(verdict.rubric_floor),
             recorded_at=verdict.recorded_at,
         )
@@ -1151,14 +1168,9 @@ def _fit_mutate(arm: str, value: str):
 def test_reducer_rejects_domain_method_regression() -> None:
     selected, reveal_document, manifest, document, ledger = _reducer_env()
     mappings = _mappings_from(reveal_document)
-    # Regress the challenger arm on pair 1 (find the challenger letter).
-    case0 = selected[0]
-    challenger_letter = _challenger_letter(case0, mappings)
-    facts = _facts(
-        selected,
-        mappings,
-        verdict_mutate=_fit_mutate(challenger_letter, "worse"),
-    )
+    # Regress pair 1: the challenger arm's fit is strictly worse than the
+    # baseline arm's (pair-level "baseline_better").
+    facts = _facts(selected, mappings, verdict_mutate=_fit_mutate("baseline_better"))
     reduction = _reduce(facts, ledger, mappings, document, manifest)
     assert reduction["gates"]["domain_method_fit"]["regressed_pairs"] >= 1
     assert reduction["decision"] == "reject"
@@ -1167,22 +1179,17 @@ def test_reducer_rejects_domain_method_regression() -> None:
 def test_reducer_rejects_when_domain_method_fit_improves_fewer_than_two() -> None:
     selected, reveal_document, manifest, document, ledger = _reducer_env()
     mappings = _mappings_from(reveal_document)
-    # Only one pair improves; the rest unchanged.
+    # Only one pair improves (challenger_better); the rest tie.
     case0 = selected[0]
-    challenger_letter = _challenger_letter(case0, mappings)
-    baseline_letter = _baseline_letter(case0, mappings)
 
     def mutate(case_id: str, verdict: cmp_mod.PairVerdict) -> cmp_mod.PairVerdict:
-        if case_id == case0.case_id:
-            fit = {challenger_letter: "improved", baseline_letter: "unchanged"}
-        else:
-            fit = {"arm_a": "unchanged", "arm_b": "unchanged"}
+        fit = "challenger_better" if case_id == case0.case_id else "tie"
         return cmp_mod.PairVerdict(
             case_id=verdict.case_id,
             verdict=verdict.verdict,
             overall_rationale=verdict.overall_rationale,
             domain_method_fit=fit,
-            unjustified_ml_intrusion=dict(verdict.unjustified_ml_intrusion),
+            unjustified_ml_intrusion=verdict.unjustified_ml_intrusion,
             rubric_floor=dict(verdict.rubric_floor),
             recorded_at=verdict.recorded_at,
         )
@@ -1198,16 +1205,12 @@ def test_reducer_rejects_increased_ml_intrusion() -> None:
     mappings = _mappings_from(reveal_document)
 
     def mutate(case_id: str, verdict: cmp_mod.PairVerdict) -> cmp_mod.PairVerdict:
-        case = next(c for c in selected if c.case_id == case_id)
-        letter = _challenger_letter(case, mappings)
-        intrusion = dict(verdict.unjustified_ml_intrusion)
-        intrusion[letter] = "increased"
         return cmp_mod.PairVerdict(
             case_id=verdict.case_id,
             verdict=verdict.verdict,
             overall_rationale=verdict.overall_rationale,
-            domain_method_fit=dict(verdict.domain_method_fit),
-            unjustified_ml_intrusion=intrusion,
+            domain_method_fit=verdict.domain_method_fit,
+            unjustified_ml_intrusion="increased",
             rubric_floor=dict(verdict.rubric_floor),
             recorded_at=verdict.recorded_at,
         )
@@ -1233,8 +1236,8 @@ def test_reducer_rejects_rubric_floor_hit_on_either_arm() -> None:
             case_id=verdict.case_id,
             verdict=verdict.verdict,
             overall_rationale=verdict.overall_rationale,
-            domain_method_fit=dict(verdict.domain_method_fit),
-            unjustified_ml_intrusion=dict(verdict.unjustified_ml_intrusion),
+            domain_method_fit=verdict.domain_method_fit,
+            unjustified_ml_intrusion=verdict.unjustified_ml_intrusion,
             rubric_floor=floor,
             recorded_at=verdict.recorded_at,
         )
@@ -1245,14 +1248,28 @@ def test_reducer_rejects_rubric_floor_hit_on_either_arm() -> None:
     assert reduction["decision"] == "reject"
 
 
-def test_reducer_rejects_deterministic_regression() -> None:
+def test_reducer_records_deterministic_regression_enforced_at_ingestion() -> None:
+    # F5: the deterministic_regression gate is a recorded statement of the
+    # ingestion-enforced zero tolerance, not an always-True per-run flag.
     selected, reveal_document, manifest, document, ledger = _reducer_env()
     mappings = _mappings_from(reveal_document)
-    failing = _run_metrics(cmp_mod.CHALLENGER_PROFILE_ID, deterministic_pass=False)
-    facts = _facts(selected, mappings, challenger_metrics=failing)
+    verdicts = {
+        case.case_id: _letter_for(case, mappings, cmp_mod.CHALLENGER_PROFILE_ID)
+        for case in selected
+    }
+    facts = _facts(selected, mappings, verdict_by_case=verdicts)
     reduction = _reduce(facts, ledger, mappings, document, manifest)
-    assert reduction["gates"]["deterministic_regression"]["problems"]
-    assert reduction["decision"] == "reject"
+    gate = reduction["gates"]["deterministic_regression"]
+    assert gate["pass"] is True
+    assert gate["problems"] == []
+    assert gate["enforced_at"] == "result_ingestion"
+    assert gate["ingested_gates"] == [
+        "evidence_chain_seal",
+        "profile_and_input_pins",
+        "sanitized_export_identity",
+        "evaluation_coverage",
+    ]
+    assert reduction["decision"] == "promote"
 
 
 def test_reducer_rejects_challenger_only_truncation() -> None:
@@ -1342,18 +1359,10 @@ def test_reducer_incomplete_when_verdict_missing() -> None:
         baseline_metrics=facts[0].baseline_metrics,
         challenger_metrics=facts[0].challenger_metrics,
         verdict=None,
+        packet_sha256=facts[0].packet_sha256,
     )
     reduction = _reduce(tuple(facts), ledger, mappings, document, manifest)
     assert reduction["decision"] == "incomplete"
-
-
-def _challenger_letter(case, mappings) -> str:
-    mapping = cmp_mod._mapping_for_case(mappings, case.case_id)
-    return (
-        "arm_a"
-        if mapping.arm_a_profile_id == cmp_mod.CHALLENGER_PROFILE_ID
-        else "arm_b"
-    )
 
 
 def _baseline_letter(case, mappings) -> str:
@@ -1361,10 +1370,6 @@ def _baseline_letter(case, mappings) -> str:
     return (
         "arm_a" if mapping.arm_a_profile_id == cmp_mod.BASELINE_PROFILE_ID else "arm_b"
     )
-
-
-def _other_letter(letter: str) -> str:
-    return "arm_b" if letter == "arm_a" else "arm_a"
 
 
 def _letter_for(case, mappings, profile_id: str) -> str:
@@ -1397,30 +1402,74 @@ def synthetic_workspace(tmp_path_factory, helpers):
     return workspace, prepared
 
 
-def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def _synthetic_canary_identity(prepared, clusters) -> tuple[CanaryCase, ...]:
+    """A full synthetic 12-case approved-Canary identity.
+
+    The four prepared cases fill the four pre-registered comparison
+    clusters; eight filler cases (two per non-comparison Canary cluster)
+    complete the twelve-case identity. Because comparison clusters hold
+    only prepared cases, those win their clusters unconditionally. Every
+    canonical hash is the recomputed one, so the F10 forgery check passes.
+    """
+    synthetic_cases: list[CanaryCase] = []
+    for index, (case_id, inputs) in enumerate(prepared):
+        synthetic_cases.append(
+            CanaryCase(
+                case_id=case_id,
+                cluster=clusters[index],
+                canonical_hash=canonical_case_hash_for_canary_case(case_id),
+                target_row_sha256=inputs["corpus_sha256"],
+                source_row_snapshot_sha256=inputs["corpus_sha256"],
+            )
+        )
+    filler_clusters = sorted(cmp_mod.CANARY_CLUSTERS - set(clusters)) * 2
+    for index, cluster in enumerate(filler_clusters):
+        filler_id = f"case-{sha256_bytes(f'filler:{index}:{cluster}'.encode())[:32]}"
+        synthetic_cases.append(
+            CanaryCase(
+                case_id=filler_id,
+                cluster=cluster,
+                canonical_hash=canonical_case_hash_for_canary_case(filler_id),
+                target_row_sha256=sha256_bytes(
+                    f"filler-row:{index}:{cluster}".encode()
+                ),
+                source_row_snapshot_sha256=sha256_bytes(
+                    f"filler-dataset:{index}:{cluster}".encode()
+                ),
+            )
+        )
+    assert len(synthetic_cases) == 12
+    return tuple(synthetic_cases)
+
+
+@pytest.fixture(scope="module")
+def ingested_env(
+    tmp_path_factory: Any,
     helpers: Any,
     synthetic_workspace: tuple[Any, Any],
-) -> None:
+) -> dict[str, Any]:
+    """One full synthetic comparison envelope, prepared once per module.
+
+    Builds the 12-case identity, freezes matrix/mapping, seals all eight
+    runs against the real production lifecycle (admission -> controller ->
+    seal -> validate -> export -> evaluation), ingests them into metrics
+    and the spend ledger, and builds the pair packets from the ingested
+    sealed evidence (build_pair_packets_from_ingested, the only sanctioned
+    live packet builder). Tests share this envelope; verdicts, vaults, and
+    reveal documents stay per-test (write-once).
+    """
     from ai_scientist.ideation.comparison import (
         APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
         CANARY_HARD_CAP_CNY,
-        CanaryCase,
-        COMPARISON_CLUSTERS,
-        ComparisonVault,
-        PairFacts,
-        PairVerdict,
         TargetSourceSnapshot,
         build_blind_mapping,
         build_comparison_commands,
         build_frozen_matrix,
         build_matrix_document,
-        build_pair_packet,
+        build_pair_packets_from_ingested,
         build_selection_manifest,
         ingest_comparison_result,
         initialize_comparison_ledger,
-        reduce_prompt_comparison,
         select_comparison_cases,
     )
     from tests.comparison_synthetic import (
@@ -1429,75 +1478,34 @@ def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
     )
 
     workspace, prepared = synthetic_workspace
-    monkeypatch.chdir(workspace)
-
-    # A full synthetic 12-case approved-Canary identity: the four prepared
-    # cases fill the four pre-registered clusters; eight filler cases
-    # complete the twelve-case identity (the real Canary holds multiple
-    # cases per cluster; fillers are never selected because the prepared
-    # cases carry the lower canonical hashes).
     clusters = list(COMPARISON_CLUSTERS)
-    filler_clusters = sorted(cmp_mod.CANARY_CLUSTERS - set(clusters)) + clusters
-    synthetic_cases: list[CanaryCase] = []
-    for index, (case_id, inputs) in enumerate(prepared):
-        synthetic_cases.append(
-            CanaryCase(
-                case_id=case_id,
-                cluster=clusters[index],
-                canonical_hash=f"{index:062d}00",
-                target_row_sha256=inputs["corpus_sha256"],
-                source_row_snapshot_sha256=inputs["corpus_sha256"],
-            )
-        )
-    for index, cluster in enumerate(filler_clusters):
-        filler_id = f"case-{sha256_bytes(f'filler:{cluster}'.encode())[:32]}"
-        synthetic_cases.append(
-            CanaryCase(
-                case_id=filler_id,
-                cluster=cluster,
-                canonical_hash=f"ff{index:062d}",
-                target_row_sha256=f"ff{sha256_bytes(f'filler-row:{cluster}'.encode())[:62]}",
-                source_row_snapshot_sha256=sha256_bytes(
-                    f"filler-dataset:{cluster}".encode()
-                ),
-            )
-        )
-    assert len(synthetic_cases) == 12
-    # Prepared cases (hashes 0xx) win every pre-registered cluster over
-    # fillers (hashes ff…); assert that invariant explicitly.
+    synthetic_cases = _synthetic_canary_identity(prepared, clusters)
+    # The prepared cases are the only candidates in their clusters, so
+    # their rows are the per-cluster winners; ensure the identity really
+    # assigned each prepared case its intended cluster.
+    prepared_by_id = {case_id: inputs for case_id, inputs in prepared}
+    for case in synthetic_cases:
+        if case.case_id in prepared_by_id:
+            assert case.cluster == clusters[list(prepared_by_id).index(case.case_id)]
     selected_hashes = {
-        cluster: min(
-            c.target_row_sha256 for c in synthetic_cases if c.cluster == cluster
-        )
-        for cluster in COMPARISON_CLUSTERS
-    }
-    for cluster in clusters:
-        prepared_case = next(
-            c
-            for c in synthetic_cases
-            if c.case_id == prepared[clusters.index(cluster)][0]
-        )
-        assert selected_hashes[cluster] == prepared_case.target_row_sha256, cluster
-    winner_dataset = {
-        cluster: next(
-            c.source_row_snapshot_sha256
-            for c in synthetic_cases
-            if c.cluster == cluster and c.target_row_sha256 == selected_hashes[cluster]
-        )
-        for cluster in COMPARISON_CLUSTERS
+        clusters[index]: inputs["corpus_sha256"]
+        for index, (case_id, inputs) in enumerate(prepared)
     }
     snapshots = {
         cluster: TargetSourceSnapshot(
-            target_dataset_sha256=winner_dataset[cluster],
+            target_dataset_sha256=row_hash,
             target_row_sha256=row_hash,
         )
         for cluster, row_hash in selected_hashes.items()
     }
     selected = select_comparison_cases(
-        tuple(synthetic_cases),
+        synthetic_cases,
         canary_selection_manifest_sha256=APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
         target_source=snapshots,
     )
+    assert [case.case_id for case in selected] == [
+        case_id for case_id, _inputs in prepared
+    ]
     manifest = build_selection_manifest(
         selected,
         canary_selection_manifest_sha256=APPROVED_CANARY_SELECTION_MANIFEST_SHA256,
@@ -1524,32 +1532,38 @@ def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
     baseline_profile = cmp_mod.BASELINE_PROFILE_ID
     challenger_profile = cmp_mod.CHALLENGER_PROFILE_ID
     run_ids: dict[tuple[str, str], str] = {}
-    for run in runs:
-        key = (run.case_id, run.profile_id)
-        if key in run_ids:
-            continue
-        run_id = run_one_sealed_run(
-            workspace,
-            helpers,
-            monkeypatch,
-            case_id=run.case_id,
-            inputs=by_case[run.case_id],
-            profile_id=run.profile_id,
-            idea_name="synthetic_idea_"
-            + ("baseline" if run.profile_id == baseline_profile else "challenger"),
-            duration_ms=100.0,
-        )
-        run_ids[key] = run_id
-        finish_sealed_run_pipeline(workspace, helpers, run_id)
+    monkey = pytest.MonkeyPatch()
+    try:
+        for run in runs:
+            key = (run.case_id, run.profile_id)
+            if key in run_ids:
+                continue
+            run_id = run_one_sealed_run(
+                workspace,
+                helpers,
+                monkey,
+                case_id=run.case_id,
+                inputs=by_case[run.case_id],
+                profile_id=run.profile_id,
+                idea_name="synthetic_idea_"
+                + ("baseline" if run.profile_id == baseline_profile else "challenger"),
+                duration_ms=100.0,
+            )
+            run_ids[key] = run_id
+            finish_sealed_run_pipeline(workspace, helpers, run_id)
+    finally:
+        monkey.undo()
 
     ledger = initialize_comparison_ledger(
-        matrix_document=document, plan_gate_subcap_cny=CANARY_HARD_CAP_CNY
+        matrix_document=document,
+        plan_gate_subcap_cny=CANARY_HARD_CAP_CNY,
+        historical_spend_cny=cmp_mod.CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
-    metrics = {}
+    metrics_by_run: dict[str, cmp_mod.RunMetrics] = {}
     for run in runs:
         key = (run.case_id, run.profile_id)
         run_id = run_ids[key]
-        metrics[key] = ingest_comparison_result(
+        metrics = ingest_comparison_result(
             workspace,
             run_id,
             expected_run_index=run.run_index,
@@ -1559,6 +1573,7 @@ def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
             expected_profile_id=run.profile_id,
             matrix_document=document,
         )
+        metrics_by_run[run_id] = metrics
         ledger = cmp_mod.ingest_run_actual_cost(
             ledger,
             entry=cmp_mod.LedgerEntry(
@@ -1568,50 +1583,129 @@ def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
                 profile_id=run.profile_id,
                 run_id=run_id,
                 status="success",
-                actual_cost_cny=metrics[key].actual_cost_cny,
+                actual_cost_cny=metrics.actual_cost_cny,
                 worst_case_bound_cny=Decimal("0.50"),
-                physical_attempt_count=metrics[key].physical_attempt_count,
+                physical_attempt_count=metrics.physical_attempt_count,
             ),
         )
-    assert Decimal(ledger["current_actual_spend_cny"]) > 0
-
+    assert cmp_mod.ledger_current_spend(ledger) > 0
+    assert cmp_mod.ledger_total_stage_spend(ledger) > cmp_mod.ledger_current_spend(
+        ledger
+    )
     mappings = build_blind_mapping(pairs, selection_manifest=manifest)
-    vault = ComparisonVault(tmp_path / "comparison-e2e")
-    for pair in pairs:
-        packet = build_pair_packet(
-            pair.pair_index,
-            pair.case_id,
-            pair.cluster,
-            {"Name": "synthetic_idea_baseline", "Title": "Baseline synthetic"},
-            {"Name": "synthetic_idea_challenger", "Title": "Challenger synthetic"},
-            selection_manifest=manifest,
+    packets = build_pair_packets_from_ingested(
+        workspace,
+        matrix_document=document,
+        selection_manifest=manifest,
+        mappings=mappings,
+        metrics_by_run=metrics_by_run,
+    )
+    assert sorted(packets) == [1, 2, 3, 4]
+    return {
+        "workspace": workspace,
+        "manifest": manifest,
+        "document": document,
+        "runs": runs,
+        "pairs": pairs,
+        "mappings": mappings,
+        "ledger": ledger,
+        "metrics_by_run": metrics_by_run,
+        "run_ids": run_ids,
+        "packets": packets,
+        "selected": selected,
+        "baseline_profile": baseline_profile,
+        "challenger_profile": challenger_profile,
+    }
+
+
+def _synthetic_facts(
+    env: dict[str, Any],
+    vault: cmp_mod.ComparisonVault,
+    *,
+    packet_sha256: str | None = None,
+) -> tuple[cmp_mod.PairFacts, ...]:
+    """PairFacts over the ingested envelope with vault-bound verdicts."""
+    from ai_scientist.ideation.comparison import PairFacts
+
+    facts = []
+    for pair in env["pairs"]:
+        facts.append(
+            PairFacts(
+                pair_index=pair.pair_index,
+                case_id=pair.case_id,
+                cluster=pair.cluster,
+                baseline_metrics=env["metrics_by_run"][
+                    env["run_ids"][(pair.case_id, env["baseline_profile"])]
+                ],
+                challenger_metrics=env["metrics_by_run"][
+                    env["run_ids"][(pair.case_id, env["challenger_profile"])]
+                ],
+                verdict=vault.load_verdict(pair.case_id),
+                packet_sha256=(
+                    packet_sha256
+                    if packet_sha256 is not None
+                    else cmp_mod.pair_packet_sha256(env["packets"][pair.pair_index])
+                ),
+            )
         )
-        challenger_letter = _letter_for(pair, mappings, challenger_profile)
-        fit = {
-            "arm_a": "improved" if challenger_letter == "a_better" else "unchanged",
-            "arm_b": "improved" if challenger_letter == "b_better" else "unchanged",
-        }
+    return tuple(facts)
+
+
+def _synthetic_verdicts(
+    env: dict[str, Any],
+    vault: cmp_mod.ComparisonVault,
+    *,
+    packet_sha256: str | None = None,
+) -> None:
+    """Record a promote-sweep verdict per pair.
+
+    Each verdict binds to its own pair's packet hash unless an explicit
+    foreign hash is passed (for binding-failure tests).
+    """
+    from ai_scientist.ideation.comparison import PairVerdict
+
+    for pair in env["pairs"]:
+        challenger_letter = _letter_for(
+            pair, env["mappings"], env["challenger_profile"]
+        )
         verdict = PairVerdict(
             case_id=pair.case_id,
             verdict=challenger_letter,
             overall_rationale="Synthetic sweep for the challenger arm.",
-            domain_method_fit=fit,
-            unjustified_ml_intrusion={"arm_a": "decreased", "arm_b": "decreased"},
+            domain_method_fit="challenger_better",
+            unjustified_ml_intrusion="unchanged",
             rubric_floor={"arm_a": "clean", "arm_b": "clean"},
             recorded_at="2026-09-04T08:00:00.000000Z",
         )
-        vault.record_verdict(verdict, packet_sha256=cmp_mod.pair_packet_sha256(packet))
-    facts = [
-        PairFacts(
-            pair_index=pair.pair_index,
-            case_id=pair.case_id,
-            cluster=pair.cluster,
-            baseline_metrics=metrics[(pair.case_id, baseline_profile)],
-            challenger_metrics=metrics[(pair.case_id, challenger_profile)],
-            verdict=vault.load_verdict(pair.case_id),
+        bound = (
+            packet_sha256
+            if packet_sha256 is not None
+            else cmp_mod.pair_packet_sha256(env["packets"][pair.pair_index])
         )
-        for pair in pairs
-    ]
+        vault.record_verdict(verdict, packet_sha256=bound)
+
+
+def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
+    tmp_path: Path,
+    ingested_env: dict[str, Any],
+) -> None:
+    from ai_scientist.ideation.comparison import (
+        ComparisonVault,
+        reduce_prompt_comparison,
+    )
+
+    env = ingested_env
+    workspace = env["workspace"]
+    manifest = env["manifest"]
+    document = env["document"]
+    mappings = env["mappings"]
+    ledger = env["ledger"]
+    selected = env["selected"]
+
+    vault = ComparisonVault(tmp_path / "comparison-e2e")
+    _synthetic_verdicts(env, vault)
+    assert vault.verdicts_frozen(required_case_ids=tuple(c.case_id for c in selected))
+    facts = _synthetic_facts(env, vault)
     vault.reveal(
         mappings=mappings,
         selection_manifest=manifest,
@@ -1625,20 +1719,143 @@ def test_synthetic_sealed_runs_flow_through_ingestion_and_reduction(
         selection_manifest=manifest,
         matrix_document=document,
         reveal_document=reveal_document,
-        pair_facts=tuple(facts),
+        pair_facts=facts,
         ledger=ledger,
     )
     assert reduction["decision"] == "promote", reduction["gates"]
     assert reduction["gates"]["completeness"]["pass"] is True
     assert reduction["gates"]["budget"]["pass"] is True
+    assert reduction["gates"]["deterministic_regression"]["enforced_at"] == (
+        "result_ingestion"
+    )
+    # The packet arms bind exactly the sealed idea payloads.
+    packet_one = env["packets"][1]
+    mapping_one = cmp_mod._mapping_for_case(mappings, env["pairs"][0].case_id)
+    arm_a_run_id = env["run_ids"][
+        (env["pairs"][0].case_id, mapping_one.arm_a_profile_id)
+    ]
+    assert packet_one["arm_a"]["idea_sha256"] == cmp_mod.final_idea_sha256(
+        cmp_mod.load_sealed_final_idea(workspace, arm_a_run_id)
+    )
     again = reduce_prompt_comparison(
         selection_manifest=manifest,
         matrix_document=document,
         reveal_document=reveal_document,
-        pair_facts=tuple(facts),
+        pair_facts=facts,
         ledger=ledger,
     )
     assert canonical_json_bytes(reduction) == canonical_json_bytes(again)
+
+
+def test_packet_binding_detects_tampered_idea_payload(ingested_env) -> None:
+    """A hand-built packet whose idea payload drifts from the sealed run
+    is detected: its arm idea_sha256 no longer equals the sealed idea's."""
+    env = ingested_env
+    workspace = env["workspace"]
+    pair = env["pairs"][0]
+    correct = env["packets"][pair.pair_index]
+    mapping = cmp_mod._mapping_for_case(env["mappings"], pair.case_id)
+    if mapping.arm_a_profile_id == env["baseline_profile"]:
+        arm_a_run_id = env["run_ids"][(pair.case_id, env["baseline_profile"])]
+        arm_b_run_id = env["run_ids"][(pair.case_id, env["challenger_profile"])]
+    else:
+        arm_a_run_id = env["run_ids"][(pair.case_id, env["challenger_profile"])]
+        arm_b_run_id = env["run_ids"][(pair.case_id, env["baseline_profile"])]
+    sealed_arm_a = cmp_mod.load_sealed_final_idea(workspace, arm_a_run_id)
+    tampered = dict(sealed_arm_a)
+    tampered["Title"] = tampered["Title"] + " (tampered)"
+    hand_built = cmp_mod.build_pair_packet(
+        pair.pair_index,
+        pair.case_id,
+        pair.cluster,
+        tampered,
+        cmp_mod.load_sealed_final_idea(workspace, arm_b_run_id),
+        selection_manifest=env["manifest"],
+    )
+    assert hand_built["arm_a"]["idea_sha256"] != correct["arm_a"]["idea_sha256"]
+    assert correct["arm_a"]["idea_sha256"] == cmp_mod.final_idea_sha256(sealed_arm_a)
+    assert hand_built["arm_a"]["idea_sha256"] != cmp_mod.final_idea_sha256(sealed_arm_a)
+
+
+def test_reducer_rejects_verdict_bound_to_a_different_packet(
+    tmp_path: Path, ingested_env
+) -> None:
+    from ai_scientist.ideation.comparison import (
+        ComparisonVault,
+        reduce_prompt_comparison,
+    )
+
+    env = ingested_env
+    foreign_hash = "6" * 64
+    vault = ComparisonVault(tmp_path / "comparison-e2e-mismatch")
+    _synthetic_verdicts(env, vault, packet_sha256=foreign_hash)
+    facts = _synthetic_facts(env, vault)
+    reveal_document = {
+        "blind_mapping": cmp_mod.blind_mapping_document(
+            env["mappings"], selection_manifest=env["manifest"]
+        ),
+        "revealed_at": "2026-09-04T08:00:00.000000Z",
+        "schema_version": "comparison-reveal-v1.0.0",
+    }
+    with pytest.raises(Exception, match="VERDICT_PACKET_MISMATCH"):
+        reduce_prompt_comparison(
+            selection_manifest=env["manifest"],
+            matrix_document=env["document"],
+            reveal_document=reveal_document,
+            pair_facts=facts,
+            ledger=env["ledger"],
+        )
+
+
+def test_packet_binding_detects_arm_swap_relative_to_frozen_mapping(
+    ingested_env,
+) -> None:
+    """Building a packet with transposed A/B ideas changes every arm's
+    idea_sha256 relative to the correctly-built packet's arms."""
+    env = ingested_env
+    pair = env["pairs"][1]
+    correct = env["packets"][pair.pair_index]
+    transposed = cmp_mod.build_pair_packet(
+        pair.pair_index,
+        pair.case_id,
+        pair.cluster,
+        correct["arm_b"]["idea"],
+        correct["arm_a"]["idea"],
+        selection_manifest=env["manifest"],
+    )
+    assert transposed["arm_a"]["idea_sha256"] != correct["arm_a"]["idea_sha256"]
+    assert transposed["arm_b"]["idea_sha256"] != correct["arm_b"]["idea_sha256"]
+    assert transposed["arm_a"]["idea_sha256"] == correct["arm_b"]["idea_sha256"]
+    assert transposed["arm_b"]["idea_sha256"] == correct["arm_a"]["idea_sha256"]
+    # The correct builder assigned the arms per the frozen mapping: the
+    # arm_a idea is exactly the sealed idea of the mapped arm_a run.
+    mapping = cmp_mod._mapping_for_case(env["mappings"], pair.case_id)
+    mapped_run_id = env["run_ids"][(pair.case_id, mapping.arm_a_profile_id)]
+    assert correct["arm_a"]["idea"] == cmp_mod.load_sealed_final_idea(
+        env["workspace"], mapped_run_id
+    )
+
+
+def test_load_sealed_final_idea_fails_closed_on_tampered_artifact(
+    tmp_path: Path, ingested_env
+) -> None:
+    import shutil
+
+    env = ingested_env
+    run_id = env["run_ids"][(env["pairs"][0].case_id, env["baseline_profile"])]
+    copy = tmp_path / "workspace-copy"
+    shutil.copytree(env["workspace"], copy)
+    idea_path = (
+        copy / "artifacts/ideation-runs" / run_id / "artifacts/ideas/000000/idea.json"
+    )
+    idea = json.loads(idea_path.read_text(encoding="utf-8"))
+    del idea["Experiments"]
+    idea_path.write_bytes(
+        (json.dumps(idea, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    )
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.load_sealed_final_idea(copy, run_id)
+    assert exc_info.value.code == "RUN_CORRUPT"
 
 
 def test_load_approved_canary_cases_and_canonical_tie_break() -> None:

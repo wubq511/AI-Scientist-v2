@@ -25,7 +25,7 @@ from pathlib import Path
 import re
 import shlex
 import statistics
-from typing import Any
+from typing import Any, Mapping
 
 from .admission import DEFAULT_MAX_TOKENS, MAX_ATTEMPTS_PER_OPERATION
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
@@ -97,6 +97,11 @@ COMPARISON_REASONING_EFFORT = "high"
 CANARY_HARD_CAP_CNY = Decimal("30.00")
 LEDGER_INIT_SPEND_CNY = Decimal("0.00")
 MONEY_QUANTUM = Decimal("0.01")
+# Recorded live-smoke actual cost of the historical Canary stage (the
+# documented 0.14 CNY run in docs/research/live-smoke-execution-evidence.md,
+# Proposal 002). It is the ledger's immutable opening balance, so the
+# enforced 30.00 CNY cap corresponds to the documented 29.86 CNY remaining.
+CANARY_STAGE_HISTORICAL_SPEND_CNY = Decimal("0.14")
 
 # Operational Regression Budgets (Proposal 002 pre-registered criteria).
 COST_ENVELOPE_FACTOR = Decimal("2.0")
@@ -112,8 +117,8 @@ BLIND_MAPPING_SCHEMA_VERSION = "comparison-blind-mapping-v1.0.0"
 COMPARISON_MATRIX_SCHEMA_VERSION = "comparison-run-matrix-v1.0.0"
 SELECTION_MANIFEST_SCHEMA_VERSION = "comparison-selection-manifest-v1.0.0"
 SELECTION_APPROVAL_SCHEMA_VERSION = "comparison-selection-approval-v1.0.0"
-SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.0.0"
-VERDICT_SCHEMA_VERSION = "comparison-pair-verdict-v1.0.0"
+SPEND_LEDGER_SCHEMA_VERSION = "comparison-spend-ledger-v1.1.0"
+VERDICT_SCHEMA_VERSION = "comparison-pair-verdict-v1.1.0"
 REDUCTION_SCHEMA_VERSION = "comparison-reduction-v1.0.0"
 RUN_RESULT_SCHEMA_VERSION = "comparison-run-result-v1.0.0"
 
@@ -128,9 +133,16 @@ DEFAULT_COMPARISON_PACKAGE_DIR = (
 VERDICT_ENUM: frozenset[str] = frozenset(
     {"a_better", "b_better", "tie", "incomparable"}
 )
+# Pair-level domain-method-fit judgment: the challenger arm's domain-method
+# fit is strictly better than / equal to / strictly worse than the baseline
+# arm's, judged by Robert on the blinded packet (the reference frame is
+# always pair-relative, never an absolute per-arm scale).
 DOMAIN_METHOD_FIT_ENUM: frozenset[str] = frozenset(
-    {"improved", "unchanged", "worse", "incomparable"}
+    {"challenger_better", "tie", "baseline_better", "incomparable"}
 )
+# Pair-level unjustified-ML-intrusion judgment: the challenger arm's
+# unjustified ML intrusion relative to the baseline arm, judged on the
+# blinded packet (pre-registered zero-tolerance: it must not increase).
 ML_INTRUSION_ENUM: frozenset[str] = frozenset(
     {"increased", "unchanged", "decreased", "incomparable"}
 )
@@ -180,6 +192,22 @@ PAIR_PACKET_FORBIDDEN_KEYS: frozenset[str] = frozenset(
 )
 PAIR_PACKET_FORBIDDEN_IDENTITY_VALUES: frozenset[str] = frozenset(
     {BASELINE_PROFILE_ID, CHALLENGER_PROFILE_ID}
+)
+
+# The exact seven IDEA JSON fields a sealed run's finalized idea.json must
+# carry (mirrors controller.REQUIRED_IDEA_FIELDS and the profiles.py IDEA
+# JSON contract; a sealed payload is the post-validation 7-field dict, so
+# missing OR extra keys mean tampering and fail closed as RUN_CORRUPT).
+SEALED_IDEA_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {
+        "Abstract",
+        "Experiments",
+        "Name",
+        "Related Work",
+        "Risk Factors and Limitations",
+        "Short Hypothesis",
+        "Title",
+    }
 )
 
 _IDEA_INVENTORY_PATTERN = re.compile(r"artifacts/ideas/(\d{6})/idea\.json\Z")
@@ -238,7 +266,10 @@ def select_comparison_cases(
     exactly 12 cases over the eight Canary clusters (a forged subset fails
     closed), duplicates fail closed, every pre-registered cluster must be
     present, and each case's target row must match the current source
-    snapshot (row hash and dataset hash drift fail closed). The winner per
+    snapshot (row hash and dataset hash drift fail closed). Each case's
+    canonical hash is recomputed from its case id and must match the
+    supplied hash, so a forged canonical hash fails closed
+    (CANARY_HASH_FORGERY). The winner per
     cluster is the minimal canonical case hash; the canonical hash is a
     full digest, so ties cannot occur.
 
@@ -271,6 +302,15 @@ def select_comparison_cases(
     for case in canary_cases:
         parse_case_id(case.case_id)
         parse_sha256(case.canonical_hash, label=f"{case.case_id}.canonical_hash")
+        expected_hash = canonical_case_hash_for_canary_case(case.case_id)
+        if case.canonical_hash != expected_hash:
+            fail(
+                "CANARY_HASH_FORGERY",
+                "A comparison input case carries a forged canonical hash",
+                case_id=case.case_id,
+                provided=case.canonical_hash,
+                expected=expected_hash,
+            )
         parse_sha256(case.target_row_sha256, label=f"{case.case_id}.target_row_sha256")
         parse_sha256(
             case.source_row_snapshot_sha256,
@@ -764,14 +804,6 @@ def build_frozen_matrix(
         )
     seed = comparison_selection_seed(selection_manifest)
 
-    baseline_first: list[CanaryCase] = []
-    challenger_first: list[CanaryCase] = []
-    for case in selected_cases:
-        digest = _canonical_seed_hex("arm_order", f"{seed}|{case.case_id}")
-        (baseline_first if int(digest[0], 16) % 2 == 0 else challenger_first).append(
-            case
-        )
-
     baseline_first, challenger_first = _balanced_partition(
         list(selected_cases),
         digest_of=lambda case: _canonical_seed_hex(
@@ -1225,11 +1257,14 @@ def build_pair_packet(
     """Build the blinded Robert-facing packet for one pair.
 
     The packet contains only the case-identity and the two anonymized idea
-    payloads (A/B). The structure scan walks the serialized packet's keys
-    and non-idea values: any forbidden operational-metadata key, or a
-    profile identity value appearing anywhere outside the idea payloads,
-    fails closed. Model-generated idea text is never scanned — legitimate
-    English words in a proposal are not blinding leaks.
+    payloads (A/B); each arm also carries the SHA-256 of its canonical idea
+    bytes (`idea_sha256`, computed inside from the supplied payload), so a
+    packet arm can be audited against the sealed run it was built from.
+    The structure scan walks the serialized packet's keys and non-idea
+    values: any forbidden operational-metadata key, or a profile identity
+    value appearing anywhere outside the idea payloads, fails closed.
+    Model-generated idea text is never scanned — legitimate English words
+    in a proposal are not blinding leaks.
     """
     parse_case_id(case_id)
     if idea_a == idea_b:
@@ -1240,8 +1275,8 @@ def build_pair_packet(
         "matrix_seed_sha256": comparison_selection_seed(selection_manifest),
         "pair_index": pair_index,
         "schema_version": PAIR_PACKET_SCHEMA_VERSION,
-        "arm_a": {"idea": idea_a},
-        "arm_b": {"idea": idea_b},
+        "arm_a": {"idea": idea_a, "idea_sha256": final_idea_sha256(idea_a)},
+        "arm_b": {"idea": idea_b, "idea_sha256": final_idea_sha256(idea_b)},
     }
     _scan_packet_blinding(packet, idea_payloads=(idea_a, idea_b))
     return packet
@@ -1305,6 +1340,129 @@ def _scan_packet_blinding(
 
 def pair_packet_sha256(packet: dict[str, Any]) -> str:
     return sha256_bytes(canonical_json_bytes(packet))
+
+
+def load_sealed_final_idea(workspace_root: Path, run_id: str) -> dict[str, Any]:
+    """Load the sealed run's finalized idea payload from its own evidence.
+
+    The finalized idea lives at `artifacts/ideas/<idea_index:06d>/idea.json`
+    inside the run root. A comparison run finalizes exactly one idea, so a
+    run with zero or multiple finalized ideas is corrupt. The parsed
+    payload must carry exactly the seven IDEA JSON fields of the sealed
+    contract (controller.REQUIRED_IDEA_FIELDS / profiles.py IDEA JSON);
+    missing or extra keys mean the artifact was tampered and fail closed
+    as RUN_CORRUPT.
+    """
+    workspace = workspace_root.resolve(strict=True)
+    store = RunStore(workspace)
+    idea_rel_paths: list[str] = []
+    idea_dir = store.runs_root / run_id / "artifacts" / "ideas"
+    if idea_dir.is_dir():
+        for candidate in sorted(idea_dir.iterdir()):
+            idea_rel = f"artifacts/ideas/{candidate.name}/idea.json"
+            try:
+                store.read_artifact(run_id, idea_rel, label="finalized idea payload")
+            except IdeationInputError:
+                continue
+            idea_rel_paths.append(idea_rel)
+    if len(idea_rel_paths) != 1:
+        fail(
+            "RUN_CORRUPT",
+            "The sealed run must hold exactly one finalized idea",
+            run_id=run_id,
+            finalized_idea_count=len(idea_rel_paths),
+        )
+    idea_bytes = store.read_artifact(run_id, idea_rel_paths[0])
+    idea = parse_json_bytes(idea_bytes, label="idea.json")
+    if not isinstance(idea, dict):
+        fail("RUN_CORRUPT", "idea.json is not a JSON object")
+    if set(idea) != SEALED_IDEA_REQUIRED_FIELDS:
+        fail(
+            "RUN_CORRUPT",
+            "idea.json drifted from the seven-field IDEA JSON contract",
+            run_id=run_id,
+            missing=sorted(SEALED_IDEA_REQUIRED_FIELDS - set(idea)),
+            extra=sorted(set(idea) - SEALED_IDEA_REQUIRED_FIELDS),
+        )
+    return idea
+
+
+def final_idea_sha256(idea: dict[str, Any]) -> str:
+    """The canonical digest of one finalized idea payload."""
+    return sha256_bytes(canonical_json_bytes(idea))
+
+
+def build_pair_packets_from_ingested(
+    workspace_root: Path,
+    *,
+    matrix_document: dict[str, Any],
+    selection_manifest: dict[str, Any],
+    mappings: tuple[BlindPairMapping, ...],
+    metrics_by_run: Mapping[str, RunMetrics],
+) -> dict[int, dict[str, Any]]:
+    """Build every pair packet from the ingested sealed runs.
+
+    This is the ONLY sanctioned way to build live packets: for each pair
+    the two arms' RunMetrics are located through `metrics_by_run` by the
+    matrix entry's prompt profile id (missing either arm fails closed as
+    COMPARISON_IDENTITY_MISMATCH), both idea payloads are loaded from the
+    sealed runs' own idea.json artifacts, and the A/B assignment follows
+    the frozen blind mapping exactly (`_mapping_for_case`), so the packet
+    bytes bind the blinded structure to the sealed evidence at build time.
+    """
+    runs_by_pair: dict[int, list[dict[str, Any]]] = {}
+    for entry in matrix_document["runs"]:
+        runs_by_pair.setdefault(entry["pair_index"], []).append(entry)
+    by_pair_and_profile: dict[tuple[int, str], tuple[str, RunMetrics]] = {}
+    for run_id, metrics in metrics_by_run.items():
+        by_pair_and_profile[(metrics.pair_index, metrics.profile_id)] = (
+            run_id,
+            metrics,
+        )
+    packets: dict[int, dict[str, Any]] = {}
+    for pair_index, arm_runs in sorted(runs_by_pair.items()):
+        if len(arm_runs) != 2:
+            fail(
+                "COMPARISON_IDENTITY_MISMATCH",
+                "The matrix pair does not hold exactly two arms",
+                pair_index=pair_index,
+            )
+        case_ids = {entry["case_id"] for entry in arm_runs}
+        if len(case_ids) != 1:
+            fail(
+                "COMPARISON_IDENTITY_MISMATCH",
+                "The matrix pair arms disagree on the case id",
+                pair_index=pair_index,
+            )
+        case_id = next(iter(case_ids))
+        baseline = by_pair_and_profile.get((pair_index, BASELINE_PROFILE_ID))
+        challenger = by_pair_and_profile.get((pair_index, CHALLENGER_PROFILE_ID))
+        if baseline is None or challenger is None:
+            fail(
+                "COMPARISON_IDENTITY_MISMATCH",
+                "The pair lacks one of its ingested arm metrics",
+                pair_index=pair_index,
+                missing_baseline=baseline is None,
+                missing_challenger=challenger is None,
+            )
+        baseline_run_id, _baseline_metrics = baseline
+        challenger_run_id, _challenger_metrics = challenger
+        mapping = _mapping_for_case(mappings, case_id)
+        if mapping.arm_a_profile_id == BASELINE_PROFILE_ID:
+            idea_a = load_sealed_final_idea(workspace_root, baseline_run_id)
+            idea_b = load_sealed_final_idea(workspace_root, challenger_run_id)
+        else:
+            idea_a = load_sealed_final_idea(workspace_root, challenger_run_id)
+            idea_b = load_sealed_final_idea(workspace_root, baseline_run_id)
+        packets[pair_index] = build_pair_packet(
+            pair_index,
+            case_id,
+            mapping.cluster,
+            idea_a,
+            idea_b,
+            selection_manifest=selection_manifest,
+        )
+    return packets
 
 
 # ==========================================================================
@@ -1450,7 +1608,12 @@ def commands_document(commands: tuple[str, ...]) -> dict[str, Any]:
 
 @dataclass(frozen=True, slots=True)
 class LedgerEntry:
-    """One immutable per-run actual-cost ingest record."""
+    """One immutable per-run actual-cost ingest record.
+
+    `worst_case_bound_cny` is recorded as admission-approval audit
+    metadata only (the live per-run 7.08 CNY worst-case bound belongs to
+    the admission approval seam); it takes part in no ledger arithmetic.
+    """
 
     run_index: int
     pair_index: int
@@ -1467,8 +1630,15 @@ def initialize_comparison_ledger(
     *,
     matrix_document: dict[str, Any],
     plan_gate_subcap_cny: Decimal,
+    historical_spend_cny: Decimal,
 ) -> dict[str, Any]:
-    """Start the append-only ledger at 0.00 CNY with the frozen bounds."""
+    """Start the append-only ledger over the recorded historical balance.
+
+    The ledger's opening balance is the immutable historical Canary-stage
+    spend (the documented 0.14 CNY live smoke, Proposal 002); the tracked
+    comparison actual spend starts at 0.00 CNY, and the total stage spend
+    (historical + tracked) is kept current on every ingest.
+    """
     if not isinstance(plan_gate_subcap_cny, Decimal) or plan_gate_subcap_cny <= 0:
         fail("INVALID_SUBCAP", "The Plan Gate sub-cap must be a positive decimal")
     if plan_gate_subcap_cny > CANARY_HARD_CAP_CNY:
@@ -1478,52 +1648,64 @@ def initialize_comparison_ledger(
             subcap=str(plan_gate_subcap_cny),
             canary_cap=str(CANARY_HARD_CAP_CNY),
         )
+    if not isinstance(historical_spend_cny, Decimal) or historical_spend_cny < 0:
+        fail(
+            "INVALID_HISTORICAL_SPEND",
+            "The historical Canary-stage spend must be a non-negative decimal",
+        )
+    historical = _quantize_cny(historical_spend_cny)
     return {
         "canary_hard_cap_cny": str(CANARY_HARD_CAP_CNY),
-        "current_actual_spend_cny": str(LEDGER_INIT_SPEND_CNY),
+        "comparison_actual_spend_cny": str(LEDGER_INIT_SPEND_CNY),
         "entries": [],
+        "historical_spend_cny": str(historical),
         "matrix_sha256": matrix_sha256(matrix_document),
         "plan_gate_subcap_cny": str(plan_gate_subcap_cny),
         "planned_runs_count": matrix_document["planned_runs_count"],
         "schema_version": SPEND_LEDGER_SCHEMA_VERSION,
         "status": "initialized",
+        "total_stage_spend_cny": str(historical),
     }
 
 
 def ledger_current_spend(ledger: dict[str, Any]) -> Decimal:
+    """The tracked comparison actual spend (the sum of ingested entries)."""
     return _money(
-        ledger.get("current_actual_spend_cny"), label="current_actual_spend_cny"
+        ledger.get("comparison_actual_spend_cny"),
+        label="comparison_actual_spend_cny",
     )
+
+
+def ledger_total_stage_spend(ledger: dict[str, Any]) -> Decimal:
+    """The total stage spend: historical opening balance + tracked spend."""
+    return _money(ledger.get("total_stage_spend_cny"), label="total_stage_spend_cny")
 
 
 def _ledger_entry_cost(entry: dict[str, Any]) -> Decimal:
     return _money(entry["actual_cost_cny"], label="ledger entry actual_cost_cny")
 
 
-def plan_gate_next_run_allowed(
-    ledger: dict[str, Any],
-    *,
-    next_run_worst_case_bound_cny: Decimal,
-) -> bool:
+def plan_gate_next_run_allowed(ledger: dict[str, Any]) -> bool:
     """The frozen Plan Gate rule, evaluated exactly.
 
-    `cumulative_actual_spend + next_run_worst_case_bound <= subcap` and
-    `<= 30.00 CNY`. An exact bound to the cap is accepted; one cent over is
-    refused. The Plan Gate approval is the matrix-level authorization, not
-    a per-run approval: this gate never waives the per-run interactive
-    cost approval that preflight requires.
+    The Plan Gate is the matrix-level actual-spend guard: a next run is
+    admissible only while the total stage spend (historical Canary-stage
+    spend plus tracked comparison actual spend) is strictly below BOTH the
+    Plan Gate sub-cap and the 30.00 CNY Canary hard cap. Exactly-at-cap is
+    refused; one cent over is refused. The per-run worst-case bound
+    (pricing.worst_case_bound, 7.08 CNY for the frozen configuration)
+    belongs to the live admission approval seam (admission.py), not to
+    this gate; this gate never waives the per-run interactive cost
+    approval that preflight requires.
     """
     subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
-    spend = ledger_current_spend(ledger)
-    projected = spend + next_run_worst_case_bound_cny
-    return projected <= subcap and projected <= CANARY_HARD_CAP_CNY
+    total = ledger_total_stage_spend(ledger)
+    return total < subcap and total < CANARY_HARD_CAP_CNY
 
 
-def plan_gate_one_cent_over(ledger: dict[str, Any], *, next_bound: Decimal) -> bool:
-    """True exactly when the next run would exceed the cap by >= one cent."""
-    return not plan_gate_next_run_allowed(
-        ledger, next_run_worst_case_bound_cny=next_bound
-    )
+def plan_gate_one_cent_over(ledger: dict[str, Any]) -> bool:
+    """True exactly when the current total spend is at or over a cap."""
+    return not plan_gate_next_run_allowed(ledger)
 
 
 def ingest_run_actual_cost(
@@ -1548,13 +1730,25 @@ def ingest_run_actual_cost(
                 "The ledger already carries this planned run slot",
                 run_index=entry.run_index,
             )
-    spend = ledger_current_spend(ledger)
-    new_spend = _quantize_cny(spend + entry.actual_cost_cny)
-    if new_spend > CANARY_HARD_CAP_CNY:
+    subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
+    tracked = ledger_current_spend(ledger)
+    total = ledger_total_stage_spend(ledger)
+    new_tracked = _quantize_cny(tracked + entry.actual_cost_cny)
+    new_total = _quantize_cny(total + entry.actual_cost_cny)
+    if new_total > subcap:
+        fail(
+            "SUBCAP_EXCEEDED",
+            "The matrix-level Plan Gate actual-spend authorization is exhausted; "
+            "halt before recording further runs",
+            current=str(total),
+            run_cost=str(entry.actual_cost_cny),
+            subcap=str(subcap),
+        )
+    if new_total > CANARY_HARD_CAP_CNY:
         fail(
             "BUDGET_EXCEEDED",
             "Ingesting this run would exceed the 30.00 CNY Canary hard cap",
-            current=str(spend),
+            current=str(total),
             run_cost=str(entry.actual_cost_cny),
         )
     record = {
@@ -1569,7 +1763,8 @@ def ingest_run_actual_cost(
     }
     updated = dict(ledger)
     updated["entries"] = list(ledger["entries"]) + [record]
-    updated["current_actual_spend_cny"] = str(new_spend)
+    updated["comparison_actual_spend_cny"] = str(new_tracked)
+    updated["total_stage_spend_cny"] = str(new_total)
     updated["ingested_runs_count"] = len(updated["entries"])
     updated["status"] = "ingesting"
     return updated
@@ -1588,14 +1783,17 @@ def plan_gate_approval_document(
     """
     approved_by = nonempty_string(approved_by, label="approved_by")
     subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
+    historical = _money(ledger["historical_spend_cny"], label="historical_spend_cny")
     document = {
         "approved_by": approved_by,
         "canary_hard_cap_cny": str(CANARY_HARD_CAP_CNY),
-        "current_actual_spend_cny": str(ledger_current_spend(ledger)),
+        "comparison_actual_spend_cny": str(ledger_current_spend(ledger)),
+        "historical_spend_cny": str(historical),
         "plan_gate_subcap_cny": str(subcap),
         "planned_runs_count": ledger["planned_runs_count"],
         "schema_version": "comparison-plan-gate-approval-v1.0.0",
         "scope": "matrix_level_only_not_per_run",
+        "total_stage_spend_cny": str(ledger_total_stage_spend(ledger)),
     }
     return document
 
@@ -1626,7 +1824,6 @@ class RunMetrics:
     end_to_end_latency_ms: Decimal
     actual_cost_cny: Decimal
     idea_count: int
-    deterministic_validation_passed: bool
 
 
 def _read_run_documents(
@@ -1842,16 +2039,10 @@ def ingest_comparison_result(
     # 5. Derive run metrics from the sealed chain.
     derived = _sealed_run_metrics(store, run_id)
     seal = derived["seal"]
-    # Deterministic validation verdict: the gates this ingestion itself ran
-    # (chain, seal, export, coverage, identity pins) must all have passed to
-    # reach this point; the flag records that verdict for the reducer's
-    # zero-tolerance gate rather than asserting it unconditionally.
-    deterministic_pass = (
-        validation.get("status") == "valid"
-        and sanitized_profile.get("profile_id") == expected_profile_id
-        and sanitized.get("case_id") == expected_case_id
-        and coverage is True
-    )
+    # Every arm reaching the reducer passed all ingestion gates (chain,
+    # seal, export, coverage, identity pins) fail-closed above; the
+    # reducer's deterministic_regression gate records that structural
+    # enforcement point instead of an always-True per-run flag.
     return RunMetrics(
         run_id=run_id,
         run_index=expected_run_index,
@@ -1865,7 +2056,6 @@ def ingest_comparison_result(
         end_to_end_latency_ms=derived["end_to_end_latency_ms"],
         actual_cost_cny=derived["actual_cost_cny"],
         idea_count=_sealed_idea_count(seal),
-        deterministic_validation_passed=deterministic_pass,
     )
 
 
@@ -1910,19 +2100,32 @@ def _evaluation_coverage_for_run(workspace: Path, run_id: str) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class PairVerdict:
-    """Robert's write-once blinded verdict for one pair."""
+    """Robert's write-once blinded verdict for one pair.
+
+    `domain_method_fit` and `unjustified_ml_intrusion` are pair-level
+    scalars: the challenger arm judged relative to the baseline arm on the
+    blinded packet (never an absolute per-arm scale). `rubric_floor` stays
+    the per-blind-arm dict of the approved Idea Quality Rubric.
+    """
 
     case_id: str
     verdict: str
     overall_rationale: str
-    domain_method_fit: dict[str, str]
-    unjustified_ml_intrusion: dict[str, str]
+    domain_method_fit: str
+    unjustified_ml_intrusion: str
     rubric_floor: dict[str, str]
     recorded_at: str
 
 
 def verdict_document(verdict: PairVerdict, *, packet_sha256: str) -> dict[str, Any]:
-    """Serialize one verdict; closed enums, non-empty rationale."""
+    """Serialize one verdict; closed enums, non-empty rationale.
+
+    `domain_method_fit` and `unjustified_ml_intrusion` validate their
+    pair-level scalar strings against the closed enums (the reference
+    frame is the challenger arm relative to the baseline arm, judged on
+    the blinded packet); `rubric_floor` validates both blind arms against
+    the rubric vocabulary.
+    """
     if verdict.verdict not in VERDICT_ENUM:
         fail(
             "INVALID_VERDICT",
@@ -1931,48 +2134,46 @@ def verdict_document(verdict: PairVerdict, *, packet_sha256: str) -> dict[str, A
         )
     if not verdict.overall_rationale.strip():
         fail("INVALID_VERDICT", "The overall rationale must be a non-empty string")
-    for label, mapping in (
-        ("domain_method_fit", verdict.domain_method_fit),
-        ("unjustified_ml_intrusion", verdict.unjustified_ml_intrusion),
-        ("rubric_floor", verdict.rubric_floor),
+    if not isinstance(verdict.domain_method_fit, str) or (
+        verdict.domain_method_fit not in DOMAIN_METHOD_FIT_ENUM
     ):
-        if set(mapping) != {"arm_a", "arm_b"}:
+        fail(
+            "INVALID_VERDICT",
+            "domain_method_fit is not in the closed pair-level enum",
+            value=verdict.domain_method_fit,
+        )
+    if not isinstance(verdict.unjustified_ml_intrusion, str) or (
+        verdict.unjustified_ml_intrusion not in ML_INTRUSION_ENUM
+    ):
+        fail(
+            "INVALID_VERDICT",
+            "unjustified_ml_intrusion is not in the closed pair-level enum",
+            value=verdict.unjustified_ml_intrusion,
+        )
+    if set(verdict.rubric_floor) != {"arm_a", "arm_b"}:
+        fail(
+            "INVALID_VERDICT",
+            "rubric_floor must cover both blind arms",
+        )
+    for arm, value in verdict.rubric_floor.items():
+        if (
+            value != RUBRIC_FLOOR_CLEAN_VALUE
+            and value not in RUBRIC_FLOOR_PROBLEM_VALUES
+        ):
             fail(
                 "INVALID_VERDICT",
-                f"{label} must cover both blind arms",
+                "rubric_floor carries an unknown judgment",
+                value=value,
             )
-        enum = {
-            "domain_method_fit": DOMAIN_METHOD_FIT_ENUM,
-            "unjustified_ml_intrusion": ML_INTRUSION_ENUM,
-        }.get(label)
-        if enum is not None:
-            for arm, value in mapping.items():
-                if value not in enum:
-                    fail(
-                        "INVALID_VERDICT",
-                        f"{label}.{arm} is not in the closed enum",
-                        value=value,
-                    )
-        else:
-            for arm, value in mapping.items():
-                if (
-                    value != RUBRIC_FLOOR_CLEAN_VALUE
-                    and value not in RUBRIC_FLOOR_PROBLEM_VALUES
-                ):
-                    fail(
-                        "INVALID_VERDICT",
-                        "rubric_floor carries an unknown judgment",
-                        value=value,
-                    )
     document = {
         "case_id": verdict.case_id,
-        "domain_method_fit": dict(verdict.domain_method_fit),
+        "domain_method_fit": verdict.domain_method_fit,
         "overall_rationale": verdict.overall_rationale,
         "packet_sha256": packet_sha256,
         "recorded_at": verdict.recorded_at,
         "rubric_floor": dict(verdict.rubric_floor),
         "schema_version": VERDICT_SCHEMA_VERSION,
-        "unjustified_ml_intrusion": dict(verdict.unjustified_ml_intrusion),
+        "unjustified_ml_intrusion": verdict.unjustified_ml_intrusion,
         "verdict": verdict.verdict,
     }
     return document
@@ -2076,7 +2277,6 @@ class ComparisonVault:
             exists_code="ARTIFACT_EXISTS",
         )
         return document
-        return document
 
     def load_verdict(self, case_id: str) -> dict[str, Any]:
         path = self._verdict_path(case_id)
@@ -2109,7 +2309,12 @@ class ComparisonVault:
 
 @dataclass(frozen=True, slots=True)
 class PairFacts:
-    """The ingested, revealed facts of one pair feeding the reducer."""
+    """The ingested, revealed facts of one pair feeding the reducer.
+
+    `packet_sha256` is the digest of the pair packet the verdict must be
+    bound to: the reducer fails closed on any verdict whose recorded
+    packet hash differs from these facts.
+    """
 
     pair_index: int
     case_id: str
@@ -2117,6 +2322,7 @@ class PairFacts:
     baseline_metrics: RunMetrics | None
     challenger_metrics: RunMetrics | None
     verdict: dict[str, Any] | None
+    packet_sha256: str
 
 
 def reduce_prompt_comparison(
@@ -2136,6 +2342,12 @@ def reduce_prompt_comparison(
     available verdict is frozen — so a reduction can never see the blind
     identity before the fail-closed reveal gate opened it. The same inputs
     reduce to byte-identical output.
+
+    Packet binding is enforced at two points: the packet bytes are bound
+    to the sealed evidence at build time (build_pair_packets_from_ingested
+    is the only sanctioned live builder), and each pair's verdict is
+    re-checked here against `PairFacts.packet_sha256` (a verdict bound to
+    a different packet fails closed as VERDICT_PACKET_MISMATCH).
     """
     mappings = assert_blind_mapping_document_shape(
         closed_object(
@@ -2144,12 +2356,11 @@ def reduce_prompt_comparison(
             keys={"blind_mapping", "revealed_at", "schema_version"},
         )["blind_mapping"]
     )
-    selected_case_ids = sorted({pair.case_id for pair in pair_facts})
     gates: dict[str, Any] = {}
     decision = "promote"
 
     # Gate 1: completeness. Every pair must be complete on both arms and
-    # carry a frozen verdict.
+    # carry a frozen verdict bound to these facts' packet.
     completeness_problems: list[dict[str, Any]] = []
     for facts in sorted(pair_facts, key=lambda f: f.pair_index):
         if facts.baseline_metrics is None or facts.challenger_metrics is None:
@@ -2161,6 +2372,14 @@ def reduce_prompt_comparison(
         if verdict is None:
             completeness_problems.append(
                 {"case_id": facts.case_id, "problem": "missing_verdict"}
+            )
+        elif verdict.get("packet_sha256") != facts.packet_sha256:
+            fail(
+                "VERDICT_PACKET_MISMATCH",
+                "The verdict is bound to a different pair packet",
+                case_id=facts.case_id,
+                verdict_packet_sha256=verdict.get("packet_sha256"),
+                facts_packet_sha256=facts.packet_sha256,
             )
         elif verdict.get("verdict") == "incomparable":
             completeness_problems.append(
@@ -2229,17 +2448,18 @@ def reduce_prompt_comparison(
     if not quality_pass:
         decision = "reject"
 
-    # Gate 3: domain-method fit (>= 2 improved, 0 regressed).
+    # Gate 3: domain-method fit (>= 2 challenger-better, 0 baseline-better).
+    # The verdict instrument is pair-level: a pair counts as improved only
+    # when the challenger arm's fit is strictly better than the baseline
+    # arm's (challenger_better), judged on the blinded packet.
     improved = 0
     regressed = 0
     for facts in pair_facts:
         verdict = facts.verdict or {}
-        fit = verdict.get("domain_method_fit", {})
-        challenger_fit = _arm_value_for_challenger(facts.case_id, mappings, fit)
-        baseline_fit = _arm_value_for_baseline(facts.case_id, mappings, fit)
-        if challenger_fit == "improved" and baseline_fit != "improved":
+        fit = verdict.get("domain_method_fit")
+        if fit == "challenger_better":
             improved += 1
-        if challenger_fit == "worse":
+        elif fit == "baseline_better":
             regressed += 1
     fit_pass = improved >= DOMAIN_METHOD_MIN_IMPROVED and regressed == 0
     gates["domain_method_fit"] = {
@@ -2250,13 +2470,13 @@ def reduce_prompt_comparison(
     if not fit_pass:
         decision = "reject"
 
-    # Gate 4: unjustified ML intrusion cannot increase on any pair.
+    # Gate 4: unjustified ML intrusion cannot increase on any pair
+    # (pair-level: the challenger arm's intrusion relative to the baseline
+    # arm must not be judged "increased" on the blinded packet).
     intrusion_increased: list[str] = []
     for facts in pair_facts:
         verdict = facts.verdict or {}
-        intrusion = verdict.get("unjustified_ml_intrusion", {})
-        challenger_value = _arm_value_for_challenger(facts.case_id, mappings, intrusion)
-        if challenger_value == "increased":
+        if verdict.get("unjustified_ml_intrusion") == "increased":
             intrusion_increased.append(facts.case_id)
     gates["ml_intrusion"] = {
         "increased_pairs": intrusion_increased,
@@ -2282,25 +2502,24 @@ def reduce_prompt_comparison(
     if floor_hits:
         decision = "reject"
 
-    # Gate 6: deterministic zero-tolerance (ingestion verdicts).
-    deterministic_problems: list[dict[str, Any]] = []
-    for facts in pair_facts:
-        baseline = facts.baseline_metrics
-        challenger = facts.challenger_metrics
-        if baseline is None or challenger is None:
-            continue
-        if baseline.deterministic_validation_passed and not (
-            challenger.deterministic_validation_passed
-        ):
-            deterministic_problems.append(
-                {"case_id": facts.case_id, "pattern": "baseline_pass_challenger_fail"}
-            )
+    # Gate 6: deterministic zero-tolerance, recorded honestly. Every arm
+    # reaching PairFacts passed all ingestion gates (evidence chain seal,
+    # profile and input pins, sanitized export identity, evaluation
+    # coverage) fail-closed in ingest_comparison_result, so the
+    # pre-registered zero-tolerance criterion is enforced structurally at
+    # ingestion; this gate records that enforcement point instead of
+    # asserting an always-True per-run flag.
     gates["deterministic_regression"] = {
-        "problems": deterministic_problems,
-        "pass": not deterministic_problems,
+        "enforced_at": "result_ingestion",
+        "ingested_gates": [
+            "evidence_chain_seal",
+            "profile_and_input_pins",
+            "sanitized_export_identity",
+            "evaluation_coverage",
+        ],
+        "problems": [],
+        "pass": True,
     }
-    if deterministic_problems:
-        decision = "reject"
 
     # Gate 7: truncation / terminal failure / retry regressions are
     # challenger-only patterns; zero tolerance.
@@ -2390,13 +2609,23 @@ def reduce_prompt_comparison(
     if not (cost_ok and latency_ok):
         decision = "reject"
 
-    # Gate 9: the frozen spend bounds (sub-cap, then the 30 CNY cap).
-    spend = ledger_current_spend(ledger)
+    # Gate 9: the frozen spend bounds (sub-cap, then the 30 CNY cap). The
+    # deliberate asymmetry: the consultation gate (plan_gate_next_run_allowed)
+    # is strictly preventive (`<`; exactly-at-cap refuses the next run),
+    # while the reducer is verdictive — a post-hoc reduction at exactly the
+    # sub-cap is compliant — so this gate uses non-strict `<=` on both the
+    # sub-cap and the cap, over the total stage spend (historical
+    # Canary-stage spend + tracked comparison actual spend).
+    total_spend = ledger_total_stage_spend(ledger)
     subcap = _money(ledger["plan_gate_subcap_cny"], label="plan_gate_subcap_cny")
-    budget_ok = spend <= subcap and spend <= CANARY_HARD_CAP_CNY
+    budget_ok = total_spend <= subcap and total_spend <= CANARY_HARD_CAP_CNY
     gates["budget"] = {
-        "current_actual_spend_cny": str(_quantize_cny(spend)),
+        "comparison_actual_spend_cny": str(_quantize_cny(ledger_current_spend(ledger))),
+        "historical_spend_cny": str(
+            _money(ledger["historical_spend_cny"], label="historical_spend_cny")
+        ),
         "plan_gate_subcap_cny": str(subcap),
+        "total_stage_spend_cny": str(_quantize_cny(total_spend)),
         "pass": budget_ok,
     }
     if not budget_ok:
@@ -2420,22 +2649,6 @@ def _mapping_for_case(
         if mapping.case_id == case_id:
             return mapping
     fail("MISSING_BLIND_MAPPING", "The reveal lacks the pair mapping", case_id=case_id)
-
-
-def _arm_value_for_challenger(
-    case_id: str, mappings: tuple[BlindPairMapping, ...], arm_values: dict[str, Any]
-) -> Any:
-    mapping = _mapping_for_case(mappings, case_id)
-    arm = "arm_a" if mapping.arm_a_profile_id == CHALLENGER_PROFILE_ID else "arm_b"
-    return arm_values.get(arm)
-
-
-def _arm_value_for_baseline(
-    case_id: str, mappings: tuple[BlindPairMapping, ...], arm_values: dict[str, Any]
-) -> Any:
-    mapping = _mapping_for_case(mappings, case_id)
-    arm = "arm_a" if mapping.arm_a_profile_id == BASELINE_PROFILE_ID else "arm_b"
-    return arm_values.get(arm)
 
 
 def _reduction_document(
@@ -2489,7 +2702,8 @@ def freeze_prompt_comparison_package(
     4. Builds 4-pair / 8-run frozen matrix (2/2 order balance, self-pinning).
     5. Builds frozen blind mapping (2/2 A/B balance).
     6. Builds exact credential-free CLI commands.
-    7. Initializes 0.00 CNY spend ledger with sub-cap.
+    7. Initializes the spend ledger over the recorded 0.14 CNY historical
+       Canary-stage opening balance, with the Plan Gate sub-cap.
     8. Materializes artifacts to target_dir with idempotent byte-identical safety.
     9. Sets up ComparisonVault for results, pair packets, verdicts, reveal, and reducer.
     """
@@ -2532,6 +2746,7 @@ def freeze_prompt_comparison_package(
     ledger = initialize_comparison_ledger(
         matrix_document=matrix_document,
         plan_gate_subcap_cny=plan_gate_subcap_cny,
+        historical_spend_cny=CANARY_STAGE_HISTORICAL_SPEND_CNY,
     )
 
     pkg_dir = (
