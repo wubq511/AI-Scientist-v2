@@ -36,3 +36,5 @@ blocked_by:
 - CLI 增加 `evaluation assemble|validate|list-coverage` 子命令（结构化 stdout/stderr 与 exit 码）；`--help` baseline hash 与准入导入闭包门禁同步更新。
 
 验收证据（2026-09-04，StubTransport 全零网络零费用）：全量 pytest 628 passed（新增 59 项全量通过，含 21 项负向 draft 参数化、13 项畸形 linkage 形状 fail-closed 参数化、supersedes 链、coverage 三态/异常 run/read-only、CLI seam）；`compileall` 与触及文件 `black` 检查通过（全树 14 处既存 upstream 漂移为基线状态，与本票无关）。脱敏 schema/coverage 说明与运行说明见 [post-seal-evaluation-evidence.md](../../../research/post-seal-evaluation-evidence.md)。
+
+2026-09-04 Robert 完成本票验收：brief.md 排版经 agent 逐节审读与真实 CLI 端到端复验确认合理（Robert 授权 agent 自判），七项 verdict 语义已同步确认。
