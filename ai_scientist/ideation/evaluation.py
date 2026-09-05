@@ -398,18 +398,19 @@ def _load_idea_evidence(
     return idea_value, list(grounding_value), sidecar_value, idea_entry
 
 
-def _collect_retrieval_excerpts(
-    context: RunContext, run_id: str, sidecar: dict[str, Any], grounding: list[str]
+def _collect_release_record(
+    context: RunContext, run_id: str, sidecar: dict[str, Any]
 ) -> dict[str, list[dict[str, Any]]]:
-    """Collect, per declared paper, the exact segment excerpts the model saw,
-    from the retrieval payloads referenced by the event chain."""
+    """Collect, for every paper returned by the sidecar-bound retrieval
+    operations, the exact segment excerpts the model saw — the complete
+    per-paper release record, not limited to declared grounding papers."""
     operation_seqs = sidecar.get("retrieval_operation_seqs")
     if not isinstance(operation_seqs, list) or not all(
         isinstance(item, int) and not isinstance(item, bool) for item in operation_seqs
     ):
         fail("RUN_CORRUPT", "Idea sidecar retrieval_operation_seqs is invalid")
     wanted = set(operation_seqs)
-    excerpts: dict[str, list[dict[str, Any]]] = {paper_id: [] for paper_id in grounding}
+    released: dict[str, list[dict[str, Any]]] = {}
     seen_operations: set[int] = set()
     for event in context.store.read_events(run_id):
         if event.get("event_type") != "operation.finished":
@@ -466,7 +467,7 @@ def _collect_retrieval_excerpts(
             if not isinstance(paper, dict):
                 fail("RUN_CORRUPT", "Retrieval payload paper is not a JSON object")
             paper_id = paper.get("paper_id")
-            if not isinstance(paper_id, str) or paper_id not in excerpts:
+            if not isinstance(paper_id, str):
                 continue
             title = paper.get("title")
             if not isinstance(title, str):
@@ -486,7 +487,7 @@ def _collect_retrieval_excerpts(
                 if not isinstance(content_type, str) or not isinstance(text, str):
                     fail("RUN_CORRUPT", "Retrieval payload segment is malformed")
                 collected_segments.append({"content_type": content_type, "text": text})
-            excerpts[paper_id].append(
+            released.setdefault(paper_id, []).append(
                 {
                     "operation_seq": operation_seq,
                     "segments": collected_segments,
@@ -499,12 +500,24 @@ def _collect_retrieval_excerpts(
             "Sidecar retrieval operations are missing from the event chain",
             missing=sorted(wanted - seen_operations),
         )
-    for paper_id, occurrences in excerpts.items():
+    return released
+
+
+def _collect_retrieval_excerpts(
+    context: RunContext, run_id: str, sidecar: dict[str, Any], grounding: list[str]
+) -> dict[str, list[dict[str, Any]]]:
+    """Collect, per declared paper, the exact segment excerpts the model saw,
+    from the retrieval payloads referenced by the event chain."""
+    released = _collect_release_record(context, run_id, sidecar)
+    excerpts: dict[str, list[dict[str, Any]]] = {}
+    for paper_id in grounding:
+        occurrences = released.get(paper_id)
         if not occurrences:
             fail(
                 "EVALUATION_LINKAGE_INCONSISTENT",
                 f"Declared grounding paper {paper_id} appears in no retrieval payload",
             )
+        excerpts[paper_id] = occurrences
     return excerpts
 
 
@@ -668,17 +681,22 @@ def _write_bytes_once(path: Path, data: bytes, *, label: str) -> None:
         fail("STORAGE_WRITE_FAILED", f"Cannot write {label}: {detail}")
 
 
-def _existing_versions(idea_dir: Path) -> list[tuple[int, str]]:
+def _existing_versions(
+    idea_dir: Path,
+    *,
+    pattern: re.Pattern[str] = VERSION_NAME_PATTERN,
+    label: str = "Evaluation artifact",
+) -> list[tuple[int, str]]:
     """List finalized artifact versions as (seq, filename), ascending."""
     if not idea_dir.is_dir():
         return []
     versions: list[tuple[int, str]] = []
     for path in idea_dir.iterdir():
         if path.is_symlink():
-            fail("SYMLINK_FORBIDDEN", f"Evaluation artifact is a symlink: {path.name}")
+            fail("SYMLINK_FORBIDDEN", f"{label} is a symlink: {path.name}")
         if not path.is_file():
             continue
-        match = VERSION_NAME_PATTERN.fullmatch(path.name)
+        match = pattern.fullmatch(path.name)
         if match:
             versions.append((int(match.group(1)), path.name))
     versions.sort()

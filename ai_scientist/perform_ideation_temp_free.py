@@ -83,6 +83,30 @@ def _build_parser() -> argparse.ArgumentParser:
         "list-coverage",
         help="Read-only evaluation coverage over the seal inventory.",
     )
+    ev_export_review = evaluation_actions.add_parser(
+        "export-review-package",
+        help="Export the anonymous AI review package and ready-to-send request.",
+    )
+    ev_export_review.add_argument("--run-id", required=True)
+    ev_export_review.add_argument("--idea-index", type=int, required=True)
+    ev_import_review = evaluation_actions.add_parser(
+        "import-review-response",
+        help="Import one operator-supplied AI review response (write-once).",
+    )
+    ev_import_review.add_argument("--run-id", required=True)
+    ev_import_review.add_argument("--idea-index", type=int, required=True)
+    ev_import_review.add_argument("--response-file", required=True)
+    ev_import_review.add_argument("--provider", required=True)
+    ev_import_review.add_argument("--model-id", required=True)
+    ev_import_review.add_argument("--responded-at", required=True)
+    ev_import_review.add_argument("--supplied-by", required=True)
+    ev_import_review.add_argument("--imported-by", required=True)
+    ev_validate_review = evaluation_actions.add_parser(
+        "validate-review",
+        help="Validate the latest imported response into an immutable AI review record and evidence card.",
+    )
+    ev_validate_review.add_argument("--run-id", required=True)
+    ev_validate_review.add_argument("--idea-index", type=int, required=True)
     return parser
 
 
@@ -453,6 +477,98 @@ def _run_evaluation_validate(
     return 0
 
 
+def _run_evaluation_export_review_package(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Export the AI review package: exit 0 exported, 1 rejected."""
+    from ai_scientist.ideation.ai_review import export_review_package
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = export_review_package(root, args.run_id, args.idea_index)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "export_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_import_review_response(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Import a review response: exit 0 imported, 1 rejected/invalid format.
+
+    An unparseable response is still retained on disk; the failure report
+    names the stored file so the raw input stays auditable.
+    """
+    from ai_scientist.ideation.ai_review import import_review_response
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = import_review_response(
+            root,
+            args.run_id,
+            args.idea_index,
+            response_path=Path(args.response_file),
+            provider=args.provider,
+            model_id=args.model_id,
+            responded_at=args.responded_at,
+            supplied_by=args.supplied_by,
+            imported_by=args.imported_by,
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "import_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0 if result["parse_status"] == "ok" else 1
+
+
+def _run_evaluation_validate_review(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Validate the latest imported response: exit 0 validated, 1 rejected."""
+    from ai_scientist.ideation.ai_review import validate_ai_review
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = validate_ai_review(root, args.run_id, args.idea_index)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "review_validation_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
 def _run_evaluation_list_coverage(
     args: argparse.Namespace,
     *,
@@ -496,6 +612,12 @@ if __name__ == "__main__":
             raise SystemExit(_run_evaluation_validate(_args))
         if _args.evaluation_action == "list-coverage":
             raise SystemExit(_run_evaluation_list_coverage(_args))
+        if _args.evaluation_action == "export-review-package":
+            raise SystemExit(_run_evaluation_export_review_package(_args))
+        if _args.evaluation_action == "import-review-response":
+            raise SystemExit(_run_evaluation_import_review_response(_args))
+        if _args.evaluation_action == "validate-review":
+            raise SystemExit(_run_evaluation_validate_review(_args))
     # No subcommand: print the same help text and exit like --help.
     _parser.print_help()
     raise SystemExit(0)

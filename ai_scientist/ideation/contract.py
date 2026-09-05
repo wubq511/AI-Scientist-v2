@@ -50,6 +50,25 @@ EVALUATION_RUBRIC_POLICY_SHA256 = (
     "3b1548d06060047ac29f759d8c5f3e46d0287d6593f3fd839ef80074ca0b3d8c"
 )
 EVALUATION_ROOT_RELPATH = Path("artifacts/evaluations")
+# AI-assisted evaluation authoring contract v2 (single-review mode). The
+# authoring contract, prompt version, and response schema are versioned
+# together: a review package, its rendered request, and every validated AI
+# review record bind all three, and a drift in any pinned bytes fails closed.
+EVALUATION_AUTHORING_CONTRACT_VERSION = "evaluation-authoring-contract-v2.0.0"
+EVALUATION_REVIEW_PACKAGE_SCHEMA_VERSION = "evaluation-review-package-v1.0.0"
+EVALUATION_REVIEW_MATERIALS_SCHEMA_VERSION = "evaluation-review-materials-v1.0.0"
+EVALUATION_AI_REVIEW_RECORD_SCHEMA_VERSION = "evaluation-ai-review-record-v2.0.0"
+EVALUATION_AI_REVIEW_RESPONSE_SCHEMA_VERSION = "ai-review-response-v1.0.0"
+EVALUATION_REVIEW_RESPONSE_IMPORT_SCHEMA_VERSION = (
+    "evaluation-review-response-import-v1.0.0"
+)
+EVALUATION_AI_REVIEW_PROMPT_SINGLE_VERSION = "single-review-v1"
+EVALUATION_AI_REVIEW_PROMPT_SINGLE_PATH = Path(
+    "ai_scientist/ideation/policies/ai-review-prompt-single-v1.md"
+)
+EVALUATION_AI_REVIEW_PROMPT_SINGLE_SHA256 = (
+    "5a609dbc65d9377150ea10f4eb1cff3c80898af48e020a33ce0771a37891a5b0"
+)
 CORPUS_QUARANTINED_FIELDS = frozenset(
     {
         "targetPaperId",
