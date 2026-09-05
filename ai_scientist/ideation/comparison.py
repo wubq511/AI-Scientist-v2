@@ -2378,6 +2378,46 @@ def reserve_comparison_slot(
     reservations_dir = package / "vault" / "run-reservations"
     reservations_dir.mkdir(parents=True, exist_ok=True)
     reservation_seq = 1 + len(_slot_quarantine_records(package, run_index))
+    argv_sha256 = sha256_bytes(canonical_json_bytes(list(command_argv)))
+    if reservation_seq == 1:
+        existing_path = reservations_dir / f"run-{run_index:03d}.json"
+        if existing_path.is_file():
+            # Idempotent re-entry (Robert-approved 2026-09-05): a relaunch of
+            # the exact same authorized slot — identical frozen argv, code
+            # commit, authorization, and price table — reuses the existing
+            # reservation instead of failing. This covers a launch that
+            # reserved and then failed before any paid work (e.g. a preflight
+            # credential rejection) without weakening the dup-launch race
+            # guard: any drift in what is being launched fails closed, and a
+            # quarantined slot keeps requiring the sequenced supersede path.
+            existing = parse_json_bytes(
+                existing_path.read_bytes(), label="comparison slot reservation"
+            )
+            if (
+                existing_path.is_symlink()
+                or not isinstance(existing, dict)
+                or existing.get("schema_version") != RUN_RESERVATION_SCHEMA_VERSION
+                or existing.get("run_index") != run_index
+                or existing.get("reservation_seq") != 1
+                or existing.get("supersedes_reservation_sha256") is not None
+                or existing.get("command_argv_sha256") != argv_sha256
+                or existing.get("execution_code_commit") != execution_commit
+                or existing.get("authorization") != dict(authorization)
+                or existing.get("price_table_sha256")
+                != launch.get("price_table_sha256")
+            ):
+                fail(
+                    "COMPARISON_SLOT_ALREADY_RESERVED",
+                    "The comparison slot reservation exists and cannot be "
+                    "overwritten by a different launch",
+                    run_index=run_index,
+                )
+            return {
+                "document": existing,
+                "path": str(existing_path),
+                "sha256": sha256_bytes(existing_path.read_bytes()),
+                "reused": True,
+            }
     supersedes_sha256: str | None = None
     if reservation_seq >= 2:
         reservations = _slot_reservation_documents(package, run_index)
@@ -2405,7 +2445,7 @@ def reserve_comparison_slot(
     )
     document = {
         "authorization": dict(authorization),
-        "command_argv_sha256": sha256_bytes(canonical_json_bytes(list(command_argv))),
+        "command_argv_sha256": argv_sha256,
         "execution_code_commit": execution_commit,
         "price_table_sha256": launch.get("price_table_sha256"),
         "reserved_at": _now(),

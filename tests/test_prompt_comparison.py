@@ -2337,8 +2337,18 @@ def test_slot_reservation_is_write_once_and_blocks_duplicate_launches(
     assert document["command_argv_sha256"] == sha256_bytes(
         canonical_json_bytes(list(launch["command_argv"]))
     )
+    # An identical relaunch of the same authorized slot reuses the existing
+    # reservation (idempotent re-entry); any drift in the authorization
+    # fails closed on the write-once guard.
+    reused = _reserve(launch)
+    assert reused["reused"] is True
+    assert reused["sha256"] == reservation["sha256"]
+    drifted_launch = dict(launch)
+    drifted_launch["authorization"] = dict(
+        launch["authorization"], projected_hard_ceiling_cny="99.99"
+    )
     with pytest.raises(IdeationInputError) as exc_info:
-        _reserve(launch)
+        _reserve(drifted_launch)
     assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
 
     # CLI leg: a fresh package whose pin matches the real repository HEAD, so
@@ -2428,11 +2438,10 @@ def test_first_slot_creates_execution_code_pin_and_same_commit_retry_is_safe(
     assert pin["schema_version"] == "comparison-execution-code-pin-v1.0.0"
     assert reservation["document"]["execution_code_commit"] == EXECUTION_COMMIT_A
 
-    # A same-commit retry stays fail-closed on the reservation and never
-    # touches the existing pin.
-    with pytest.raises(IdeationInputError) as exc_info:
-        _reserve(launch)
-    assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
+    # A same-commit retry reuses the reservation (idempotent re-entry) and
+    # never touches the existing pin.
+    reused = _reserve(launch)
+    assert reused["reused"] is True
     assert json.loads(pin_path.read_text())["commit"] == EXECUTION_COMMIT_A
 
 
@@ -2947,8 +2956,10 @@ def test_replacement_reservation_sequencing(
 
     env = quarantine_env
 
-    # A same-slot relaunch without a quarantine record is still blocked by
-    # the write-once reservation.
+    # An identical relaunch of the same authorized slot reuses the existing
+    # write-once reservation (idempotent re-entry, Robert-approved
+    # 2026-09-05): the fixture reserved slot 1 at this commit and this
+    # package state, so the same launch returns the same document.
     launch = cmp_mod.prepare_comparison_slot_launch(
         env["workspace"],
         package_dir=env["package_dir"],
@@ -2958,9 +2969,35 @@ def test_replacement_reservation_sequencing(
         expected_reapproval_threshold_cny=Decimal("5.00"),
         run_index=1,
     )
+    reused = _reserve(launch, commit=env["admission_commit"])
+    assert reused["reused"] is True
+    assert reused["sha256"] == env["reservation"]["sha256"]
+    assert reused["document"] == env["reservation"]["document"]
+
+    # Any drift in the relaunch — a different commit, a different price
+    # table, or tampered reservation bytes — still fails closed. A commit
+    # drift is caught by the execution-code pin before the reuse check.
     with pytest.raises(IdeationInputError) as exc_info:
-        _reserve(launch, commit=env["admission_commit"])
+        _reserve(launch, commit=EXECUTION_COMMIT_A)
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISMATCH"
+
+    drifted = dict(launch)
+    drifted["price_table_sha256"] = "f" * 64
+    with pytest.raises(IdeationInputError) as exc_info:
+        _reserve(drifted, commit=env["admission_commit"])
     assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
+
+    tampered = env["package_dir"] / "vault" / "run-reservations" / "run-001.json"
+    original_bytes = tampered.read_bytes()
+    tampered_document = parse_json_bytes(original_bytes, label="reservation")
+    tampered_document["command_argv_sha256"] = "e" * 64
+    tampered.write_bytes(canonical_json_bytes(tampered_document))
+    try:
+        with pytest.raises(IdeationInputError) as exc_info:
+            _reserve(launch, commit=env["admission_commit"])
+        assert exc_info.value.code == "COMPARISON_SLOT_ALREADY_RESERVED"
+    finally:
+        tampered.write_bytes(original_bytes)
 
     _quarantine(env, env["run_id"])
 
