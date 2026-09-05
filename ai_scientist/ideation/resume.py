@@ -41,6 +41,7 @@ from .admission import (
 )
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
 from .contract import _now
+from .profiles import ML_BASELINE_V1, require_executable_profile
 from .profiles import (
     validate_profile_field as _validate_profile_field,
 )
@@ -49,7 +50,13 @@ from .profiles import (
 )
 from .controller import IdeationController, rebuild_resume_plan
 from .errors import IdeationInputError, fail
-from .run_store import RunHandle, RunStore, _validate_run_id
+from .run_store import (
+    LEGACY_RUN_REQUEST_SCHEMA_VERSION,
+    RUN_REQUEST_SCHEMA_VERSION,
+    RunHandle,
+    RunStore,
+    _validate_run_id,
+)
 
 RESUME_APPROVAL_SCHEMA_VERSION = "resume-cost-approval-v1.0.0"
 
@@ -67,10 +74,17 @@ def _request_from_document(document: dict[str, Any], run_id: str) -> NewRunReque
         fail("RUN_CORRUPT", "request.json belongs to another run")
     workshop = document.get("workshop") or {}
     corpus = document.get("corpus") or {}
-    profile_field = document.get("prompt_profile")
-    prompt_profile_id = (
-        profile_field.get("profile_id") if isinstance(profile_field, dict) else None
-    )
+    if document.get("schema_version") == LEGACY_RUN_REQUEST_SCHEMA_VERSION:
+        if "prompt_profile" in document:
+            fail("INVALID_SCHEMA", "A legacy request cannot carry a prompt profile")
+        prompt_profile_id = ML_BASELINE_V1.profile_id
+    elif document.get("schema_version") == RUN_REQUEST_SCHEMA_VERSION:
+        profile_field = _validate_profile_field(
+            document.get("prompt_profile"), label="request.json.prompt_profile"
+        )
+        prompt_profile_id = profile_field["profile_id"]
+    else:
+        fail("INVALID_SCHEMA", "The recorded request schema is unsupported")
     request = NewRunRequest(
         case_id=document.get("case_id"),
         workshop=workshop.get("path"),
@@ -79,7 +93,7 @@ def _request_from_document(document: dict[str, Any], run_id: str) -> NewRunReque
         corpus_sha256=corpus.get("sha256"),
         max_num_generations=document.get("max_num_generations"),
         num_reflections=document.get("num_reflections"),
-        prompt_profile_id=prompt_profile_id or NewRunRequest.prompt_profile_id,
+        prompt_profile_id=prompt_profile_id,
     )
     request.validate()
     return request
@@ -229,6 +243,15 @@ def resume_run(
     admission_bytes = store.read_artifact(run_id, "admission.json")
     admission = parse_json_bytes(admission_bytes, label="admission.json")
     admission_sha = sha256_bytes(admission_bytes)
+    if admitted_events and admitted_events[0].get("admission_sha256") != admission_sha:
+        fail(
+            "ADMISSION_TAMPERED",
+            "admission.json content does not match admission hash pinned in event chain",
+        )
+    # Reject retired runs before repairing crash windows, reserving a writer
+    # epoch, seeking cost approval, or issuing any provider request.
+    profile = _resolve_admission_profile(admission)
+    require_executable_profile(profile.profile_id)
     if not admitted_events:
         # Approved crash window between the write-once admission commit and
         # the admitted event append: complete it epoch-less, exactly as the
@@ -242,17 +265,6 @@ def resume_run(
             },
         )
         events = store.read_events(run_id)
-    elif admitted_events[0].get("admission_sha256") != admission_sha:
-        fail(
-            "ADMISSION_TAMPERED",
-            "admission.json content does not match admission hash pinned in event chain",
-        )
-
-    # Prompt Profile pin re-verification (ticket 01): a resumed run rebuilds
-    # prompt bytes from its admitted profile only. New-schema admissions are
-    # re-validated field by field against the registry; legacy admissions are
-    # interpreted exclusively as ml-baseline-v1 and never upgraded.
-    _resolve_admission_profile(admission)
 
     # -- Admission pins re-verification --------------------------------------
     request_bytes = store.read_artifact(run_id, "request.json")

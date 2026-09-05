@@ -25,7 +25,7 @@ from .contract import (
     _now,
 )
 from .errors import IdeationInputError, fail
-from .profiles import resolve_profile as _resolve_request_profile
+from .profiles import require_executable_profile as _resolve_request_profile
 from .retrieval import bind_corpus
 from .run_store import (
     RUN_ADMISSION_SCHEMA_VERSION,

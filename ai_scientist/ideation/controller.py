@@ -30,7 +30,7 @@ from .canonical import (
     workspace_relative_path,
 )
 from .contract import _now
-from .profiles import PromptProfile
+from .profiles import PromptProfile, require_executable_profile
 from .profiles import (
     render_generation_prompt as _render_generation_prompt,
 )
@@ -210,61 +210,22 @@ ARGUMENTS_PATTERN = re.compile(
     r"ARGUMENTS:\s*(.*?)(?:$|\nTHOUGHT:|\n$)", re.DOTALL | re.IGNORECASE
 )
 
-# Baseline generation and reflection prompts verbatim (Ticket 006 / Ticket 024)
-# Legacy module constants retained as canonical evidence of the production
-# baseline semantics (tests extract them from HEAD); the runtime renders all
-# model-visible prompt bytes through the closed Prompt Profile registry.
-IDEA_GENERATION_PROMPT = """{workshop_description}
-
-Here are the proposals that you have already generated:
-
-'''
-{prev_ideas_string}
-'''
-
-Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
-"""
-
-IDEA_REFLECTION_PROMPT = """Round {current_round}/{num_reflections}.
-
-In your thoughts, first carefully consider the quality, novelty, and feasibility of the proposal you just created.
-Include any other factors that you think are important in evaluating the proposal.
-Ensure the proposal is clear and concise, and the JSON is in the correct format.
-Do not make things overly complicated.
-In the next attempt, try to refine and improve your proposal.
-Stick to the spirit of the original idea unless there are glaring issues.
-
-If you have new information from tools, such as literature search results, incorporate them into your reflection and refine your proposal accordingly.
-
-Results from your last action (if any):
-
-{last_tool_results}
-"""
-
 
 def build_tool_catalog() -> tuple[str, str]:
-    """Return the model-visible tool descriptions and comma-separated quoted names.
-
-    Legacy baseline helper retained for tests and documentation: runtime
-    rendering goes through the closed Prompt Profile registry (ticket 01).
-    """
-    from .profiles import ML_BASELINE_V1
+    """Return the active profile's model-visible tool descriptions and names."""
+    from .profiles import CROSS_DOMAIN_V1
 
     return (
-        ML_BASELINE_V1.tool_descriptions_template,
-        ML_BASELINE_V1.tool_names_template,
+        CROSS_DOMAIN_V1.tool_descriptions_template,
+        CROSS_DOMAIN_V1.tool_names_template,
     )
 
 
 def build_system_prompt() -> str:
-    """Build the default (production baseline) model-visible system prompt.
+    """Build the cross-domain system prompt; baseline has no default path."""
+    from .profiles import CROSS_DOMAIN_V1
 
-    Legacy baseline helper retained for tests and documentation: runtime
-    paths resolve the admitted Prompt Profile instead of a mutable default.
-    """
-    from .profiles import ML_BASELINE_V1
-
-    return _render_system_prompt(ML_BASELINE_V1)
+    return _render_system_prompt(CROSS_DOMAIN_V1)
 
 
 def _failure_message(exc: ModelRoundError) -> str:
@@ -617,6 +578,7 @@ class IdeationController:
         # against the registry so model-visible bytes match the pin before
         # the first model operation.
         self.profile: PromptProfile = _resolve_admission_profile(self.admission)
+        require_executable_profile(self.profile.profile_id)
 
         # Verify admission event pin in evidence chain. The `admitted` event
         # is located by type, not by fixed sequence: a preflight re-run during

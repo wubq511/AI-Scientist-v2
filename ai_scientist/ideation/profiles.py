@@ -1,9 +1,9 @@
 """Closed, versioned Prompt Profiles for Ideation Runs (ticket 01).
 
-A Prompt Profile is a closed, versioned run input: the only initial values
-are `ml-baseline-v1` (byte-exact preservation of the current production
-prompt semantics) and `cross-domain-v1` (the spec-approved domain-neutral
-challenger). Callers cannot supply prompt bytes, paths, fragments, templates
+A Prompt Profile is a closed, versioned run input. Only `cross-domain-v1`
+is executable. The retired `ml-baseline-v1` identity and frozen templates
+remain solely for historical evidence verification, never as a fallback.
+Callers cannot supply prompt bytes, paths, fragments, templates
 or unregistered identifiers; the resolved profile id, profile contract
 version, and the SHA-256 of the complete canonical prompt bundle are pinned
 into the Run Request and Run Admission.
@@ -225,9 +225,9 @@ REGISTERED_PROMPT_PROFILE_IDS: tuple[str, ...] = (
     CROSS_DOMAIN_V1.profile_id,
 )
 
-# The production default stays pinned to the baseline until an approved
-# Promotion Gate decision opens a new Design Epoch.
-DEFAULT_PROMPT_PROFILE_ID = ML_BASELINE_V1.profile_id
+# Robert adopted cross-domain-v1 and retired baseline execution on 2026-09-06.
+# The historical registry stays byte-frozen so old evidence pins still verify.
+DEFAULT_PROMPT_PROFILE_ID = CROSS_DOMAIN_V1.profile_id
 
 
 # The registry document is deterministic from in-code constants; compute it
@@ -295,7 +295,7 @@ def assert_registry_integrity() -> None:
 
 
 def resolve_profile(profile_id: object) -> PromptProfile:
-    """Resolve a closed profile id; anything else fails closed."""
+    """Resolve a historical or current identity for evidence verification."""
     parsed = parse_profile_id(profile_id, label="prompt_profile_id")
     assert_registry_integrity()
     profile = _REGISTRY_PROFILE_BY_ID.get(parsed)
@@ -305,6 +305,18 @@ def resolve_profile(profile_id: object) -> PromptProfile:
             "The prompt profile id is not registered",
             profile_id=parsed,
             registered=sorted(_REGISTRY_PROFILE_BY_ID),
+        )
+    return profile
+
+
+def require_executable_profile(profile_id: object) -> PromptProfile:
+    """Resolve the sole executable profile; retired identities are read-only."""
+    profile = resolve_profile(profile_id)
+    if profile.profile_id != CROSS_DOMAIN_V1.profile_id:
+        fail(
+            "PROMPT_PROFILE_RETIRED",
+            "This profile is retired and cannot start or resume an Ideation Run",
+            profile_id=profile.profile_id,
         )
     return profile
 
@@ -419,6 +431,7 @@ __all__ = [
     "render_generation_prompt",
     "render_reflection_prompt",
     "render_system_prompt",
+    "require_executable_profile",
     "resolve_admission_profile",
     "resolve_profile",
     "validate_profile_field",

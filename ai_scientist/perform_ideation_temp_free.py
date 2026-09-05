@@ -33,9 +33,9 @@ def _build_parser() -> argparse.ArgumentParser:
     new_run.add_argument("--num-reflections", type=int, required=True)
     new_run.add_argument(
         "--prompt-profile",
-        required=True,
+        default="cross-domain-v1",
         metavar="PROFILE_ID",
-        help="Closed, versioned Prompt Profile id: ml-baseline-v1 or cross-domain-v1.",
+        help="Prompt Profile id (default and sole executable profile: cross-domain-v1).",
     )
 
     # Resume entry: continue one suspended Ideation Run; exact run_id only
