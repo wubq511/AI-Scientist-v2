@@ -41,3 +41,16 @@
 **结果：**
 - ✅ 协议注册链 CLI 验证通过（build → register → 注册后 manifest 字段完整）。
 - 真实迁移仍未执行（下一步按 runbook 第 2 节建 pin worktree `d733ffed…` 后从第 1 步开始）。
+
+# Session 记录 - 2026-09-05 22:xx（真实迁移启动：slot 1 归账）
+
+**工作内容：**
+- Explore subagent 调研四项执行机制，关键发现：(1) 主区 .env 含 Moonshot 三键会被 pinned with-project-env 拒绝（仅允许单条 DEEPSEEK_API_KEY）→ worktree 单独写最小 .env 规避；(2) production admission 的 yes 必须 tty 交互输入，无非交互通道（APPROVAL_UNAVAILABLE fail closed），机器禁止代打；(3) slot 1 的单条双评审已被真实 smoke 完成（1143a894 idea 0 complete_resolved、floor clean、consensus sha 133bbe49）。
+- 真实迁移准备：建 pin worktree `AI-Scientist-v2-pin`（d733ffed，clean）；冻结包 + 4 case workshops/corpora 复制；六文件双侧哈希核验全过；ledger recency same_state；worktree verify-migration-package CLI 不存在（旧代码，符合预期，用逐文件哈希核验）；evaluation-protocol-pin.json 已生成（config 8078…dce30）；evaluation-cost-ledger.json 已初始化（created_by Robert）。
+- Robert 首跑 run-index 2 被 `PREVIOUS_SLOT_NOT_INGESTED` 拒绝——串行纪律正确生效：slot 1 替换 run 1143a894 从未 ingest 归账（ledger 0 entries）。
+- 归账：1143a894 按**矩阵 slot 1** ingest（非 run_index 2；LEDGER_SLOT_DRIFT 首次失败后依据 _validate_ledger_arithmetic frozen-slot-order 规则与 test_ledger_v13_forfeited_accounting 先例更正）——quarantine 记 slot 1 forfeit 0.10，替换 run 以 run_index 1 ingest，actual 0.08（2 attempts，terminal success）。ledger 现状：entries=[slot1 1143a894 0.08]，forfeited=[966d0fdc 0.10]，total 0.32，status ingesting。
+- ledger 同步 worktree，recency same_state 复核；authorize_next_comparison_run(run_index=2) dry-run 通过（projected ceiling 7.40 ≤ 30.00，total 0.32 < 5.00 阈值）。
+
+**结果：**
+- ✅ slot 2 启动门已开，等 Robert 交互重跑冻结命令（yes 批准）。
+- 注意：`authorize_next_comparison_run` 与 ledger ingest 的 run_index 语义 = **矩阵 slot 序号**（替换 run 归其占用的 slot，不按执行顺序递增）。
