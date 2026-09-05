@@ -184,6 +184,30 @@ _Avoid_: Comparison pair packet (that is the comparison stage's artifact), blind
 The write-once restoration of the four pair reviews (two evaluator slots × two directions) from display-side verdicts back to anonymous content: only four valid judgments converging on the same content (or four ties) yield a stable result; position flips, evaluator conflicts, incomparable judgments, and missing/invalid records are incomparable with recorded reasons. Each arm's quality floor state is carried from its Dual-Review Consensus Record and is never overridden by the overall preference.
 _Avoid_: Winner declaration, averaged score, promotion verdict
 
+**Evaluation Protocol Manifest**（评估协议清单）:
+The write-once registration (`artifacts/evaluations/evaluation-protocol-manifest.json`) that amends the governed comparison's scoring role after its first output: it pins the review execution config hash, prompt versions (single-review-v2 / pair-review-v1), all material schema versions, the aggregation-rules id, and a fixed post-first-output revision disclosure, and every consumption point re-verifies it so records from two protocols can never merge. It only changes who may author the post-seal judgment; pre-registered promotion criteria stay untouched. Offline coding acceptance only — activation requires Robert's explicit approval.
+_Avoid_: Prompt config, gate approval, pre-registered blind review
+
+**AI Verdict Channel**（AI 判定通道）:
+The write-once `ai-verdicts/` directory of a comparison vault carrying an AI-authored pair verdict (schema `comparison-ai-verdict-v1.0.0`, authorship `ai_pair_reduction`) in anonymous content space, bound to the same packet hash a human verdict binds; it is disjoint from Robert's blinded human `verdicts/` and never satisfies the human reveal gate. Recording after reveal or recording twice fails closed; consuming it in the reducer requires the registered Evaluation Protocol Manifest.
+_Avoid_: Robert's verdict, judge score, promotion input
+
+**Evaluation Coverage Branch**（评估覆盖分支）:
+The explicit version branch a comparison run's evaluation coverage takes: the unchanged v1 human `evaluation_artifact_v1` channel or the registered-protocol v2 AI `evaluation_artifact_v2_ai` channel (per-idea states missing / invalid / unaggregated / complete_resolved / complete_unresolved). Missing, invalid, and unaggregated fail closed at ingestion; complete_unresolved ingests but unresolved quality floors still block promotion; a run carrying both channels fails closed as a channel conflict.
+_Avoid_: Mixed scoring, boolean coverage flag
+
+**Evaluation Cost Ledger**（评审费用台账）:
+The separate, append-only, hash-linked ledger (`artifacts/evaluations/evaluation-cost-ledger.json`, schema `evaluation-cost-ledger-v1.0.0`) recording physical AI review call counts and CNY costs (single_review / pair_review / repair); its merged read-only report carries the explicit disclosure that review costs are not covered by the generation Plan Gate approval and never silently extend the generation budget.
+_Avoid_: Generation spend ledger, silent budget extension
+
+**Migration Handoff Manifest**（迁移交接清单）:
+The hash manifest (`migration-handoff-manifest-v1.0.0`) recording the direction, ledger state, and per-file SHA-256 of a private material round-trip between the generation worktree and the evaluation workspace, so the receiving end proves byte-exact receipt and both ends can tell which state is current. Missing or drifted files fail closed; ambiguity never resolves to guessing.
+_Avoid_: Copy log, sync tool
+
+**Ledger Recency Comparison**（台账新旧判定）:
+The deterministic comparison of two workspaces' copies of the authoritative spend ledger (entries then forfeited entries, identical bytes as same_state) used before every new slot to decide which side may proceed after an interrupted round-trip. Equal progress with differing bytes fails closed as ambiguous and must be resolved by Robert against reservation/quarantine evidence, never guessed — this prevents double billing or slot skipping.
+_Avoid_: Latest timestamp, manual diff
+
 **Validation Matrix**:
 The versioned contract (`docs/agents/validation-matrix.md`) cataloging every check across nine layers (unit, contract, integration, replay, leakage, isolation, fault-injection, minimal-environment, qualitative), defining what must pass and what evidence proves each gate; it indexes runtime gates decided elsewhere and defines the development-time tests that prove them.
 _Avoid_: Test plan, test suite

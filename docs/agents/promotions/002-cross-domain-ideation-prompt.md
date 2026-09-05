@@ -122,6 +122,15 @@ created: 2026-09-04
 - **效力边界**：AI 评审记录作者类型为 AI、无晋升效力；本提案对比矩阵的判分在 ticket 03 的评审修订获 Robert 显式批准前，仍完全由 Robert 按 v1 人工 Evaluation Artifact 合同执行；旧 Promotion Gate 对 AI 记录继续拒绝。采用 AI 评审替代人工判分属于「首条输出产生后的评估协议修订」，须披露并单独批准，本条不构成该批准。
 - **费用边界**：本 addendum 登记的离线验收零 provider 调用、零支出；真实 smoke（六次基础调用）属未来执行输入，需 exact model 配置、费用上界与数据出站授权，并按既有 stage 预算口径单独列项。
 
+## 评估协议修订说明 (2026-09-05, versioned addendum 二 — ticket 03)
+
+- **范围**：ticket 03 交付的是**消费侧离线机制**，不是判据修订。已实现并离线验收：comparison ingestion 的 AI 双评审覆盖分支（`evaluation_artifact_v2_ai`，与 v1 人工 `evaluation_artifact_v1` 分支并列）、ComparisonVault 的 write-once AI 判定通道（`ai-verdicts/`，schema `comparison-ai-verdict-v1.0.0`，与 Robert 盲审 `verdicts/` 分离）、以及 reducer 在已注册的评估协议清单（`evaluation-protocol-manifest-v1.0.0`，protocol id `ai-review-evaluation-protocol-v1`）下的 AI 消费与新闸门。全部机制见 [ai-review-authoring-contract-v2.md](../ai-review-authoring-contract-v2.md) 的「Comparison 接入（ticket 03）」一节，执行顺序见 [ai-review-migration-runbook.md](../ai-review-migration-runbook.md)。
+- **判据不变**：本修订**不改动**任何 pre-registered 判据——盲审胜负 3-0、domain-method fit（challenger ≥2 对严格优于且无任何一对更差）、既有质量底线（`problem_space_match`/`feasibility_soundness`/`grounding_synthesis`/contamination/leakage 任一命中自动拒绝）、deterministic zero tolerance、challenger-only 异常零容忍、2.0× 成本/延迟包络、30.00 CNY 硬上限与 5.00 CNY 重审批阈值全部保持。修订只把「谁可以担任判分角色」从 Robert 唯一人工改为可标识作者的 AI 评审记录，并为其划出显式边界：判分工具换人，判据与阈值不动。
+- **单一协议纪律**：矩阵全部 8 条结果必须使用同一个评估协议（要么全部 v1 人工、要么全部 v2 AI），reducer 对混用 fail closed（`EVALUATION_PROTOCOL_MISMATCH`）；`complete_unresolved` 覆盖可 ingest 并允许后续 slot 继续，但未决质量底线（`unresolved`/`not_evaluated`）由 `ai_quality_floor_unresolved` 闸门阻止晋升判断（未决状态仍阻止受影响的晋升判断）。
+- **修订性质披露**：本修订按规格第 7 节与 manifest 固定披露文本标记为**首条输出产生后的评估协议修订**（`post-first-output evaluation-protocol revision`）——判定角色自 Robert 人工 artifact 移至可标识作者的 AI 评审记录，判据不变；**不是**事前注册的人工盲评，也不是独立科研验证。该披露逐字进入 manifest（`EVALUATION_PROTOCOL_REVISION_STATEMENT`）与每次含 AI 判定的 reduction 文档的 `evaluation_protocol` 闸门。
+- **效力边界**：上述机制全部处于离线编码验收状态（全量 pytest 879 passed，black/compileall 通过；迁移 rehearsal 见 `tests/test_comparison_migration_rehearsal.py` 与 `tests/test_evaluation_costs.py`）。六次基础评审 smoke 已于 2026-09-05 执行并通过（4/4 完成条件，证据 [ai-review-real-smoke-evidence.md](../../research/ai-review-real-smoke-evidence.md)），但**正式激活仍需要**：Robert 对本修订的显式批准 + 按迁移 runbook 的真实迁移 smoke/执行 + 每个 run 的逐 run 费用确认。旧 Promotion Gate 在批准前继续拒绝 AI 记录（reducer 无 `ai_verdicts` 参数时输出与修订前逐字节一致）。
+- **费用边界**：评审实际费用单列于新的 hash 链接 AI 评审费用台账（`evaluation-cost-ledger.json`，schema `evaluation-cost-ledger-v1.0.0`，`evaluation init-evaluation-cost-ledger` / `record-evaluation-cost` / `evaluation-cost-report --package-dir` 合并只读报告，报告含未授权支出披露），**从不静默扩展**生成端 30.00 CNY 硬上限口径——评审费用不占用生成预算，且不在生成 Plan Gate 批准范围内，需要 Robert 单独、显式批准其上限。
+
 ## Promotion Gate 记录
 
 *待对比实验完整执行、盲审冻结、揭盲和判据 reduction 后，由 Robert 宣判。*
