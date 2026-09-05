@@ -80,7 +80,7 @@ created: 2026-09-04
 - **选集批准记录 (`selection-approval.json`)**：`9944dc5e4d00fc6aaec1f541ccc6bb7481bca8a36e3634a3a6e63bcf49e893ba`
 - **8-Run 运行矩阵 (`run-matrix.json`)**：`c8a9217ffcf60718cc132ef04688bdf0bd3bd23758f0e54373993e1237d78ef4`（自验签 `matrix_sha256`: `c60d72748d8ab6aa06e712332e4bee2b4b7cf275b7f34ba58c210c09f5d963c3`）
 - **双盲平衡映射 (`blind-mapping.json`)**：`a605f3755b7bfeeb6497f6e27a9bc1e3f6f36822155497f1c9f19d85388f0a9e`
-- **初始花费账本 (`spend-ledger.json`)**：`56562175984e4a99a4eb734cb1fc6c88527afb1059bc31fc62da1b3093f35d3f`（`comparison-spend-ledger-v1.2.0`；含 0.14 CNY 历史 opening balance、5.00 CNY 重审批阈值与 30.00 CNY 硬上限）
+- **初始花费账本 (`spend-ledger.json`)**：`12708349c183a2fafbeb352fdf84abcec972c3275b5029e609b9173045b985ed`（`comparison-spend-ledger-v1.3.0`；含 0.14 CNY 历史 opening balance、5.00 CNY 重审批阈值与 30.00 CNY 硬上限；2026-09-05 修订案重冻结后更新，旧 v1.2.0 字节 `56562175…` 逐字归档于私有 `superseded/v1.2.0-pre-quarantine/spend-ledger.json`）
 - **CLI 运行命令 (`commands.txt`)**：`3851ca37ed6fdc9fe2c634238d865693db4f3663859f9d1c6bcedc2b62664af6`（8 条命令均经项目 credential wrapper 进入 `scripts/run-prompt-comparison-slot`，并携带 frozen matrix file SHA-256 与 `5.00 CNY` threshold 外部 pin，不再绕过 aggregate preflight）
 - **执行代码 pin (`execution-code-pin.json`)**：付费期 runtime 产物，当前不存在；首个 slot reservation 时 exclusive-create（`0600`，`comparison-execution-code-pin-v1.0.0`），其 hash 在创建后纳入对账记录，不改动上列冻结物料。
 
