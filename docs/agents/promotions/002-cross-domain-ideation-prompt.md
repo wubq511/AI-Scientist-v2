@@ -116,6 +116,12 @@ created: 2026-09-04
 - **实现与验证**：commits `bf92ea0`（coverage gate 修复）、`2d61d6a`（controller 末轮收敛）、`dec4058`（slot 更替）、`a02d8cd`（评审修正）；全量 pytest 787 passed，零 provider 调用、零新增支出；Validation Matrix 新增 VM-CONTRACT-COMPARE-06；ticket 02/03 已补记。
 - **实现偏差记录**：adapter（`deepseek.py`）新增 `max_attempts` 参数——规格字面写"修改的模块只有两个"，但"纠正调用禁用内部传输重试"必须在 adapter 的 attempt 循环上实现；默认值保持既有行为，属规格要求的最小机制。
 
+## Post-Seal AI 评审工具化说明 (2026-09-05, versioned addendum)
+
+- **范围**：仅登记工具存在与效力边界，不修改本提案任何 pre-registered 判据、Regression Budget 或盲审语义。post-seal 单条 idea 的 AI 评审已按 [AI 辅助 Ideation 评审规格](../ai-assisted-ideation-evaluation-spec.md) 与 authoring contract v2 完成离线编码验收（tracker ticket 01，评审记录 schema `evaluation-ai-review-record-v2.0.0`，VM-QUAL-02）。
+- **效力边界**：AI 评审记录作者类型为 AI、无晋升效力；本提案对比矩阵的判分在 ticket 03 的评审修订获 Robert 显式批准前，仍完全由 Robert 按 v1 人工 Evaluation Artifact 合同执行；旧 Promotion Gate 对 AI 记录继续拒绝。采用 AI 评审替代人工判分属于「首条输出产生后的评估协议修订」，须披露并单独批准，本条不构成该批准。
+- **费用边界**：本 addendum 登记的离线验收零 provider 调用、零支出；真实 smoke（六次基础调用）属未来执行输入，需 exact model 配置、费用上界与数据出站授权，并按既有 stage 预算口径单独列项。
+
 ## Promotion Gate 记录
 
 *待对比实验完整执行、盲审冻结、揭盲和判据 reduction 后，由 Robert 宣判。*

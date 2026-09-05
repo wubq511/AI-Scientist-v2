@@ -152,6 +152,18 @@ _Avoid_: Benchmark score, official metric
 The private, tool-assembled side-by-side comparison material — a finalized idea payload with its Declared Grounding and the relevant Retrieval Segments set against the Target Paper's `abstract_summary` and full abstract — that Robert reads to author an Evaluation Artifact. It is reading material, not evidence, and may be regenerated.
 _Avoid_: Judge prompt, evaluation report
 
+**AI Review Record**:
+The private, write-once v2-authoring record (under `artifacts/evaluations/<run_id>/ideas/<idx>/ai/`) that stores one AI evaluator's evidence-linked seven-dimension suggestion for one finalized idea — original verdict enums plus an independent `insufficient_evidence` status — with the AI author, the validating tool, and any operator decision recorded as separate roles. It is honest engineering-advice evidence with no promotion authority and no claim of expert scientific truth; it never replaces or rewrites a v1 Evaluation Artifact.
+_Avoid_: Robert's verdict, judge score, promotion input
+
+**Review Material Package**:
+The deterministic, anonymous two-layer export the AI reviewer reads: a model-visible payload (Workshop text, sealed idea fields, the complete retrieval release record of the sidecar-bound operations, Target Comparator, and an honest audit scope statement, identified only by package-internal source IDs) plus a private outer envelope binding run, seal, and idea hashes with the real paper identities. Model-visible parts never contain Prompt Profile identity, baseline/challenger mapping, winner intent, or run metadata.
+_Avoid_: Evaluation Brief (that is the human artifact's reading material), prompt, dataset
+
+**Evidence Card**:
+The regenerable Chinese rendering of one validated AI Review Record: per-dimension suggested verdicts or abstentions with rationale, verbatim-verified quotes, key assumptions, and open questions, always stating that quote existence is machine-verified while semantic support is not and that a single-review card is not scientific ground truth.
+_Avoid_: Evaluation Artifact, review report, verdict
+
 **Validation Matrix**:
 The versioned contract (`docs/agents/validation-matrix.md`) cataloging every check across nine layers (unit, contract, integration, replay, leakage, isolation, fault-injection, minimal-environment, qualitative), defining what must pass and what evidence proves each gate; it indexes runtime gates decided elsewhere and defines the development-time tests that prove them.
 _Avoid_: Test plan, test suite
