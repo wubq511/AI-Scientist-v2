@@ -21,5 +21,10 @@
 **问题与状态：**
 - 文档回写由后台 subagent 进行中（Promotion Proposal 修订附录、VM-QUAL-04、authoring contract 更新、迁移操作手册、ticket 03 关票、map/CONTEXT）。
 
+**Code review（双轴，871a813 基线）：**
+- Standards 轴：5 项可行动发现已修——CLI 死参数 --pair-index、协议 manifest 同秒归档覆盖（改 exclusive-create 序列号）、comparison_ai 重复常量改 import、reducer Gate 5/5b 投影去重、migration 死参数与 _now 重复。
+- Spec 轴：3 项发现已修——verify_generation_package_compatibility 跨 slug 拼凑改单 package 定位（歧义/篡改 matrix fail closed）；_ai_coverage_for_run 吞篡改错误改 fail closed（re-raise）；补两项关键测试：完整 4 对 AI 矩阵 promote/reduce E2E（gates 2-4 消费 AI verdicts）与无 AI 参数 reduction 字节稳定 golden 断言；漂移工作区拒绝测试（EXECUTION_CODE_PIN_MISMATCH + stale pin 保留）补齐 ticket AC。
+- 计数修正：文档 13/14 项与 879 passed 全部更正为 17 项 / 883 passed。
+
 **相关 Commit：**
-- 待整理（实现分批 commit）。
+- 196b566 协议 manifest → dd238c4 coverage → 6fb0d98 AI verdict 通道+reducer 门 → 20b702b comparison_ai 桥 → 5dfd6a5 migration+cost ledger → 27db76e CLI → 67aba35 测试 → 3e11f64/5d40c13 文档 → 6138d3b work-log → c0e879a standards 修复 → 3706b05 spec 修复。
