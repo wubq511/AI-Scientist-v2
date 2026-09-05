@@ -581,8 +581,19 @@ _CONFIG_AUTHORIZATION_KEYS = {
 }
 
 
-def _check_review_config(value: object) -> dict[str, Any]:
-    """Closed validation of the review execution config document."""
+def _check_review_config(
+    value: object, *, at_registration: bool = False
+) -> dict[str, Any]:
+    """Closed validation of the review execution config document.
+
+    Prompt-version equality with the current code constants is enforced only
+    at registration. Templates are versioned so they can be revised during a
+    session (the runbook's prompt-revision path); at load time version
+    compatibility is enforced per artifact — every request render, response
+    import, and record pins its own prompt version — so re-comparing the
+    registered declaration here would retroactively brick configs across
+    unrelated modes.
+    """
     config = closed_object(
         value,
         label="review execution config",
@@ -610,7 +621,7 @@ def _check_review_config(value: object) -> dict[str, Any]:
         label="review execution config.prompt_versions",
         keys={"pair", "single"},
     )
-    if (
+    if at_registration and (
         prompt_versions["single"] != EVALUATION_AI_REVIEW_PROMPT_SINGLE_VERSION
         or prompt_versions["pair"] != EVALUATION_AI_REVIEW_PROMPT_PAIR_VERSION
     ):
@@ -701,7 +712,7 @@ def register_review_config(workspace_root: Path, config_path: Path) -> dict[str,
     if config_path.is_symlink() or not config_path.is_file():
         fail("INVALID_INPUT", f"Config file is missing: {config_path}")
     value = parse_json_bytes(config_path.read_bytes(), label="review execution config")
-    checked = _check_review_config(value)
+    checked = _check_review_config(value, at_registration=True)
     root = workspace / EVALUATION_ROOT_RELPATH
     if root.is_symlink():
         fail("SYMLINK_FORBIDDEN", "The evaluations root is a symlink")

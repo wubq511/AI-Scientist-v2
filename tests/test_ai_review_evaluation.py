@@ -76,7 +76,7 @@ from test_post_seal_evaluation import (
 )
 
 PROMPT_TEMPLATE_PATH = (
-    REPO_ROOT / "ai_scientist/ideation/policies/ai-review-prompt-single-v1.md"
+    REPO_ROOT / "ai_scientist/ideation/policies/ai-review-prompt-single-v2.md"
 )
 PAIR_TEMPLATE_PATH = (
     REPO_ROOT / "ai_scientist/ideation/policies/ai-review-prompt-pair-v1.md"
@@ -409,7 +409,7 @@ def test_export_golden_package_is_anonymous_and_deterministic(tmp_path: Path) ->
 
     exported = _export(workspace, run_id)
     assert exported["status"] == "exported"
-    assert exported["prompt_version"] == "single-review-v1"
+    assert exported["prompt_version"] == "single-review-v2"
     ai_root = _ai_root(workspace, run_id)
     package_bytes = (ai_root / PACKAGE_NAME).read_bytes()
     request_bytes = (ai_root / REQUEST_NAME).read_bytes()
@@ -548,7 +548,7 @@ def test_export_rejects_unknown_idea_and_tampered_template(tmp_path: Path) -> No
     assert exc.value.code == "EVALUATION_IDEA_NOT_FOUND"
 
     template_path = (
-        workspace / "ai_scientist/ideation/policies/ai-review-prompt-single-v1.md"
+        workspace / "ai_scientist/ideation/policies/ai-review-prompt-single-v2.md"
     )
     template_path.write_text(
         template_path.read_text(encoding="utf-8") + "\ntampered\n", encoding="utf-8"
@@ -569,6 +569,8 @@ def test_prompt_template_carries_boundary_rules() -> None:
     assert "例 5（无依据 ML framing）" in template
     assert "例 3（材料内指令）" in template
     assert "name_dropped" in template and "materially_different" in template
+    # v2 revision: the mechanical audit-anchor rule is stated explicitly.
+    assert "必须至少有一条引用指向该 `audit_statement` 来源" in template
 
 
 # ==============================================================================
@@ -687,7 +689,7 @@ def test_validate_golden_end_to_end(tmp_path: Path) -> None:
     assert record["run_id"] == run_id
     assert record["case_id"] == CASE_ID
     assert record["rubric_version"] == "idea-quality-rubric-v1.0.0"
-    assert record["prompt_version"] == "single-review-v1"
+    assert record["prompt_version"] == "single-review-v2"
     assert record["response_schema_version"] == "ai-review-response-v1.0.0"
     assert record["idea"]["idea_index"] == 0
     assert record["target_paper"]["doi"] == "10.1000/alpha"
@@ -1265,7 +1267,7 @@ def _config_document(
             },
         ],
         "prompt_versions": prompt_versions
-        or {"pair": "pair-review-v1", "single": "single-review-v1"},
+        or {"pair": "pair-review-v1", "single": "single-review-v2"},
         "real_call_authorization": None,
         "schema_version": EVALUATION_REVIEW_EXECUTION_CONFIG_SCHEMA_VERSION,
     }
@@ -1307,7 +1309,7 @@ def test_register_review_config_golden_is_write_once(tmp_path: Path) -> None:
     assert registered["schema_version"] == ("evaluation-review-execution-config-v1.0.0")
     assert registered["prompt_versions"] == {
         "pair": "pair-review-v1",
-        "single": "single-review-v1",
+        "single": "single-review-v2",
     }
     assert {entry["slot"] for entry in registered["evaluators"]} == {
         "primary",
@@ -1364,13 +1366,30 @@ def test_register_review_config_rejects_unapproved_prompt_versions(
     path.write_bytes(
         canonical_json_bytes(
             _config_document(
-                prompt_versions={"pair": "pair-review-v9", "single": "single-review-v1"}
+                prompt_versions={"pair": "pair-review-v9", "single": "single-review-v2"}
             )
         )
     )
     with pytest.raises(IdeationInputError) as exc:
         register_review_config(workspace, path)
     assert exc.value.code == "REVIEW_CONTRACT_MISMATCH"
+
+
+def test_loaded_config_tolerates_older_prompt_versions(tmp_path: Path) -> None:
+    """Registration pins the current prompt versions; loading enforces the
+    closed schema only. A mid-session template revision must not brick
+    registered configs across unrelated modes — record-level prompt versions
+    stay binding per artifact."""
+    from ai_scientist.ideation.ai_review import _load_review_config
+
+    workspace = _setup_review_workspace(tmp_path)
+    _register_config(workspace)
+    config_path = workspace / "artifacts/evaluations" / CONFIG_NAME
+    stale = json.loads(config_path.read_text(encoding="utf-8"))
+    stale["prompt_versions"]["single"] = "single-review-v1"
+    config_path.write_bytes(canonical_json_bytes(stale))
+    loaded = _load_review_config(workspace)
+    assert loaded["prompt_versions"]["single"] == "single-review-v1"
 
 
 def test_validate_checks_config_binding_when_registered(tmp_path: Path) -> None:

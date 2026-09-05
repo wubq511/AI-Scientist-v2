@@ -62,12 +62,12 @@ EVALUATION_AI_REVIEW_RESPONSE_SCHEMA_VERSION = "ai-review-response-v1.0.0"
 EVALUATION_REVIEW_RESPONSE_IMPORT_SCHEMA_VERSION = (
     "evaluation-review-response-import-v1.0.0"
 )
-EVALUATION_AI_REVIEW_PROMPT_SINGLE_VERSION = "single-review-v1"
+EVALUATION_AI_REVIEW_PROMPT_SINGLE_VERSION = "single-review-v2"
 EVALUATION_AI_REVIEW_PROMPT_SINGLE_PATH = Path(
-    "ai_scientist/ideation/policies/ai-review-prompt-single-v1.md"
+    "ai_scientist/ideation/policies/ai-review-prompt-single-v2.md"
 )
 EVALUATION_AI_REVIEW_PROMPT_SINGLE_SHA256 = (
-    "5a609dbc65d9377150ea10f4eb1cff3c80898af48e020a33ce0771a37891a5b0"
+    "a3e7de6333e59ea4dbef56c4e9b11c62ea16e6c2fd96ebee678f4a25dfb43401"
 )
 # Ticket 02 (independent dual review + stable pairwise blind review): the
 # pair template, its response contract, the dual-review consensus record,

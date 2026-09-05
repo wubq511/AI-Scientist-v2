@@ -18,7 +18,7 @@
   "schema_version": "evaluation-review-execution-config-v1.0.0",
   "authoring_contract_version": "evaluation-authoring-contract-v2.0.0",
   "prompt_versions": {
-    "single": "single-review-v1",
+    "single": "single-review-v2",
     "pair": "pair-review-v1"
   },
   "evaluators": [

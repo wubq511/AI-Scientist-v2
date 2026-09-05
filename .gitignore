@@ -202,6 +202,9 @@ artifacts/ideation-runs/
 # Private post-seal Evaluation Artifacts (briefs, drafts, finalized versions)
 artifacts/evaluations/
 
+# Session-local review execution config source for the real smoke run
+artifacts/evaluations-smoke-config.json
+
 # Sanitized Evidence Chain exports (untracked so between-slot exports do not
 # dirty the worktree pinned by the comparison execution-code pin)
 evidence/ideation-runs/

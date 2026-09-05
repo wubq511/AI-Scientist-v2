@@ -27,7 +27,7 @@ v1 合同规定 Robert 是 post-seal Evaluation Artifact 的唯一作者。v2 au
 | 响应导入记录 schema | `evaluation-review-response-import-v1.0.0` |
 | AI 评审记录 schema | `evaluation-ai-review-record-v2.0.0` |
 | 模型输出契约 | `ai-review-response-v1.0.0` |
-| 单评审 prompt 版本 | `single-review-v1`（模板 `ai_scientist/ideation/policies/ai-review-prompt-single-v1.md`，SHA-256 pin 于 contract.py） |
+| 单评审 prompt 版本 | `single-review-v2`（模板 `ai_scientist/ideation/policies/ai-review-prompt-single-v2.md`，SHA-256 pin 于 contract.py；v1 历史版本在 git 历史中，旧 v1 响应不可与 v2 合并） |
 | 评审执行配置 schema | `evaluation-review-execution-config-v1.0.0`（ticket 02） |
 | 双评审共识记录 schema | `evaluation-ai-review-consensus-record-v2.0.0`（ticket 02） |
 | 成对包 schema | `evaluation-pair-package-v1.0.0`（ticket 02） |
@@ -70,7 +70,9 @@ artifacts/evaluations/<run_id>/ideas/<idea_index>/
 
 ## 响应契约与验证规则
 
-模型按 `single-review-v1` 模板输出一个 JSON 对象（`task: single_idea_review` + 七维 `dimensions`）。每维仅六个字段：`assessment_status`、`proposed_verdict`、`rationale`（中文）、`evidence_refs`、`key_assumptions`、`missing_information`。
+模型按 `single-review-v2` 模板输出一个 JSON 对象（`task: single_idea_review` + 七维 `dimensions`）。每维仅六个字段：`assessment_status`、`proposed_verdict`、`rationale`（中文）、`evidence_refs`、`key_assumptions`、`missing_information`。
+
+v2 修订（2026-09-05，真实 smoke 证据驱动）：v1 模板下两次独立真实调用（不同响应）均在 `contamination_signal` 判 `judged` 时未引用 `audit_statement` 来源而触发 `AUDIT_STATEMENT_REF_REQUIRED`——维度表对 `contamination_signal` 的描述使模型不会联想到审计锚定。v2 仅做机械性强化：在「诚实边界」、维度表与边界例 2 中显式写明 `contamination_signal`/`leakage_review` 判 `judged` 时必须至少一条引用指向 `audit_statement` 来源。响应契约与校验规则不变。
 
 确定性校验（全部 fail closed，失败不产生记录）：
 
@@ -121,7 +123,7 @@ exit 0 = 成功；exit 1 = 被拒（stderr 为 canonical JSON 错误，含 code�
 独立复核的前提是两位评审确实来自不同 model families。执行配置（review execution config）是 workspace 级 write-once 文件 `artifacts/evaluations/ai-review-config.json`，由 Robert 用 `evaluation register-review-config --config-file <f>` 注册：
 
 - 封闭 schema：恰好两个 evaluator（`slot` ∈ {`primary`, `second`}），各含 `provider`、exact `model_id` 与操作者声明的 `model_family`。family 分类是声明值，程序无法验证模型谱系，只强制**两个 slot 的 family 不得相同**（`REVIEW_CONFIG_FAMILIES_NOT_DISTINCT`——同模型的两个人设不是两位独立评审）、**exact model id 不得相同**（`REVIEW_CONFIG_MODELS_NOT_DISTINCT`），并逐字记录声明值、标注「程序未认证」。
-- `prompt_versions` 必须精确匹配 pinned 的 `single-review-v1` / `pair-review-v1`（`REVIEW_CONTRACT_MISMATCH`）；`real_call_authorization`（approved_by/approved_at/token_budget/cost_boundary/outbound_scope）为可选声明，注册本身不构成付费授权。
+- `prompt_versions` 在**注册时**必须精确匹配当前 pinned 的 `single-review-v2` / `pair-review-v1`（`REVIEW_CONTRACT_MISMATCH`）；**加载时**只做封闭 schema 校验，不再与当前常量重比——模板是合同内的版本化修订，注册声明不因会话中途的版本升级被追溯作废，版本兼容由每条 request/记录自带的 `prompt_version` 逐 artifact 强制。`real_call_authorization`（approved_by/approved_at/token_budget/cost_boundary/outbound_scope）为可选声明，注册本身不构成付费授权。
 - 注册 write-once：重复注册（即使内容相同）`ARTIFACT_EXISTS`。config SHA-256 进共识记录与成对还原记录（`review_config_sha256`）。
 - 已注册 config 时，`validate-review` 与 `validate-pair-review` 强制把响应声明的 provider/model_id 绑定到对应 slot（`REVIEW_CONFIG_MISMATCH`）；`aggregate-review` / `reduce-pair-review` 必须存在已注册 config（`REVIEW_CONFIG_NOT_FOUND`）。
 
