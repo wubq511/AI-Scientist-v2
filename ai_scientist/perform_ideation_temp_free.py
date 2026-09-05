@@ -171,6 +171,70 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Restore anonymous content across the four pair reviews into a stable result or incomparable.",
     )
     ev_reduce_pair.add_argument("--pair-id", required=True)
+    # Ticket 03: evaluation protocol manifest + AI coverage + AI verdict bridge.
+    ev_build_protocol = evaluation_actions.add_parser(
+        "build-evaluation-protocol",
+        help="Derive the evaluation protocol manifest skeleton over the registered review config (writes to --out).",
+    )
+    ev_build_protocol.add_argument("--out", required=True)
+    ev_register_protocol = evaluation_actions.add_parser(
+        "register-evaluation-protocol",
+        help="Register the write-once evaluation protocol manifest (post-first-output revision).",
+    )
+    ev_register_protocol.add_argument("--manifest-file", required=True)
+    ev_register_protocol.add_argument("--registered-by", required=True)
+    evaluation_actions.add_parser(
+        "list-ai-coverage",
+        help="Read-only AI dual-review coverage over the seal inventory.",
+    )
+    ev_record_ai_verdict = evaluation_actions.add_parser(
+        "record-comparison-ai-verdict",
+        help="Consume one pair's AI reduction into the comparison vault's ai-verdicts channel (write-once).",
+    )
+    ev_record_ai_verdict.add_argument("--package-dir", required=True)
+    ev_record_ai_verdict.add_argument("--case-id", required=True)
+    ev_record_ai_verdict.add_argument("--baseline-run-id", required=True)
+    ev_record_ai_verdict.add_argument("--challenger-run-id", required=True)
+    ev_record_ai_verdict.add_argument("--pair-index", type=int, required=True)
+    ev_record_ai_verdict.add_argument("--packet-sha256", required=True)
+    ev_record_ai_verdict.add_argument("--recorded-by", required=True)
+    ev_cost_init = evaluation_actions.add_parser(
+        "init-evaluation-cost-ledger",
+        help="Initialize the write-once AI review cost ledger (separate from generation spend).",
+    )
+    ev_cost_init.add_argument("--created-by", required=True)
+    ev_cost_record = evaluation_actions.add_parser(
+        "record-evaluation-cost",
+        help="Append one AI review call cost entry to the evaluation cost ledger.",
+    )
+    ev_cost_record.add_argument(
+        "--call-kind", required=True, choices=["single_review", "pair_review", "repair"]
+    )
+    ev_cost_record.add_argument("--run-id", default=None)
+    ev_cost_record.add_argument("--pair-id", default=None)
+    ev_cost_record.add_argument("--idea-index", type=int, default=None)
+    ev_cost_record.add_argument("--provider", required=True)
+    ev_cost_record.add_argument("--model-id", required=True)
+    ev_cost_record.add_argument("--physical-call-count", type=int, required=True)
+    ev_cost_record.add_argument("--cost-cny", required=True)
+    ev_cost_record.add_argument("--responded-at", required=True)
+    ev_cost_record.add_argument("--recorded-by", required=True)
+    ev_cost_record.add_argument("--note", default=None)
+    ev_cost_report = evaluation_actions.add_parser(
+        "evaluation-cost-report",
+        help="Merged cost report: generation stage ledger plus the separate AI review cost ledger.",
+    )
+    ev_cost_report.add_argument("--package-dir", required=True)
+    ev_verify_migration = evaluation_actions.add_parser(
+        "verify-migration-package",
+        help="Verify the frozen comparison package files in this workspace against pinned SHA-256s.",
+    )
+    ev_verify_migration.add_argument(
+        "--expected-sha256",
+        action="append",
+        required=True,
+        metavar="NAME=SHA256",
+    )
     return parser
 
 
@@ -840,6 +904,273 @@ def _run_evaluation_list_coverage(
     return 0
 
 
+def _run_evaluation_build_evaluation_protocol(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Derive the protocol manifest skeleton: exit 0 written, 1 rejected."""
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.evaluation_protocol import (
+        build_evaluation_protocol_manifest,
+    )
+
+    root = workspace_root or Path.cwd()
+    try:
+        manifest = build_evaluation_protocol_manifest(root)
+        out_path = Path(args.out)
+        out_path.write_bytes(canonical_json_bytes(manifest) + b"\n")
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "build_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(
+        canonical_json_bytes(
+            {
+                "out": str(out_path),
+                "protocol_id": manifest["protocol_id"],
+                "status": "written",
+            }
+        )
+    )
+    return 0
+
+
+def _run_evaluation_register_evaluation_protocol(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Register the write-once protocol manifest: exit 0 registered, 1 rejected."""
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.evaluation_protocol import register_evaluation_protocol
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = register_evaluation_protocol(
+            root, Path(args.manifest_file), registered_by=args.registered_by
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "protocol_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_list_ai_coverage(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Read-only AI dual-review coverage: exit 0 reported, 1 rejected."""
+    from ai_scientist.ideation.ai_review import list_ai_review_coverage
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = list_ai_review_coverage(root)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "error",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_record_comparison_ai_verdict(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Consume one pair's AI reduction into the vault: exit 0 recorded, 1 rejected."""
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.comparison_ai import record_comparison_ai_verdict
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = record_comparison_ai_verdict(
+            root,
+            package_dir=Path(args.package_dir),
+            case_id=args.case_id,
+            baseline_run_id=args.baseline_run_id,
+            challenger_run_id=args.challenger_run_id,
+            packet_sha256=args.packet_sha256,
+            recorded_by=args.recorded_by,
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "ai_verdict_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_init_evaluation_cost_ledger(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        from ai_scientist.ideation.evaluation_costs import (
+            initialize_evaluation_cost_ledger,
+        )
+
+        result = initialize_evaluation_cost_ledger(root, created_by=args.created_by)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "cost_ledger_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_record_evaluation_cost(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        from ai_scientist.ideation.evaluation_costs import (
+            load_evaluation_cost_ledger,
+            record_evaluation_cost,
+            save_evaluation_cost_ledger,
+        )
+
+        ledger = load_evaluation_cost_ledger(root)
+        from ai_scientist.ideation.contract import _now
+
+        updated = record_evaluation_cost(
+            ledger,
+            call_kind=args.call_kind,
+            run_id=args.run_id,
+            pair_id=args.pair_id,
+            idea_index=args.idea_index,
+            provider=args.provider,
+            model_id=args.model_id,
+            physical_call_count=args.physical_call_count,
+            cost_cny=args.cost_cny,
+            responded_at=args.responded_at,
+            recorded_at=_now(),
+            recorded_by=args.recorded_by,
+            note=args.note,
+        )
+        result = save_evaluation_cost_ledger(root, updated)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "cost_record_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_evaluation_cost_report(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    from ai_scientist.ideation.canonical import canonical_json_bytes, parse_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        from ai_scientist.ideation.evaluation_costs import (
+            load_evaluation_cost_ledger,
+            merged_cost_report,
+        )
+
+        evaluation_ledger = load_evaluation_cost_ledger(root)
+        generation_ledger = parse_json_bytes(
+            (Path(args.package_dir) / "spend-ledger.json").read_bytes(),
+            label="generation spend ledger",
+        )
+        result = merged_cost_report(generation_ledger, evaluation_ledger)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "cost_report_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_verify_migration_package(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+    from ai_scientist.ideation.migration import verify_generation_package_compatibility
+
+    root = workspace_root or Path.cwd()
+    expected: dict[str, str] = {}
+    for item in args.expected_sha256:
+        name, _sep, digest = item.partition("=")
+        if not _sep or not name or len(digest) != 64:
+            error = {
+                "code": "INVALID_INPUT",
+                "message": "expected-sha256 must look like NAME=SHA256",
+                "status": "migration_rejected",
+            }
+            sys.stderr.buffer.write(canonical_json_bytes(error))
+            return 1
+        expected[name] = digest
+    try:
+        result = verify_generation_package_compatibility(
+            root, expected_sha256s=expected
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "migration_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
 if __name__ == "__main__":
     _parser = _build_parser()
     _args = _parser.parse_args()
@@ -876,6 +1207,22 @@ if __name__ == "__main__":
             raise SystemExit(_run_evaluation_validate_pair_review(_args))
         if _args.evaluation_action == "reduce-pair-review":
             raise SystemExit(_run_evaluation_reduce_pair_review(_args))
+        if _args.evaluation_action == "build-evaluation-protocol":
+            raise SystemExit(_run_evaluation_build_evaluation_protocol(_args))
+        if _args.evaluation_action == "register-evaluation-protocol":
+            raise SystemExit(_run_evaluation_register_evaluation_protocol(_args))
+        if _args.evaluation_action == "list-ai-coverage":
+            raise SystemExit(_run_evaluation_list_ai_coverage(_args))
+        if _args.evaluation_action == "record-comparison-ai-verdict":
+            raise SystemExit(_run_evaluation_record_comparison_ai_verdict(_args))
+        if _args.evaluation_action == "init-evaluation-cost-ledger":
+            raise SystemExit(_run_evaluation_init_evaluation_cost_ledger(_args))
+        if _args.evaluation_action == "record-evaluation-cost":
+            raise SystemExit(_run_evaluation_record_evaluation_cost(_args))
+        if _args.evaluation_action == "evaluation-cost-report":
+            raise SystemExit(_run_evaluation_evaluation_cost_report(_args))
+        if _args.evaluation_action == "verify-migration-package":
+            raise SystemExit(_run_evaluation_verify_migration_package(_args))
     # No subcommand: print the same help text and exit like --help.
     _parser.print_help()
     raise SystemExit(0)
