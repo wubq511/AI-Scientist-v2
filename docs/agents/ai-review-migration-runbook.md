@@ -1,16 +1,16 @@
 # 真实迁移执行手册（ticket 03 — comparison 接入 AI 评估）
 
-日期：2026-09-05。状态：**未执行**（离线编码验收已完成，真实迁移需 Robert 批准评估协议修订后按本手册执行）。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)「Comparison 接入（ticket 03）」一节；规格见 [ai-assisted-ideation-evaluation-spec.md](ai-assisted-ideation-evaluation-spec.md) 第 7 节；迁移 rehearsal 证据见 `tests/test_comparison_migration_rehearsal.py`（17 项）与 `tests/test_evaluation_costs.py`（23 项）。
+日期：2026-09-05。状态：**已批准待执行**（Robert 已批准评估协议修订、slot 1 走 AI 双评审、评审费用不设固定上限——2026-09-05；真实迁移尚未开始执行）。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)「Comparison 接入（ticket 03）」一节；规格见 [ai-assisted-ideation-evaluation-spec.md](ai-assisted-ideation-evaluation-spec.md) 第 7 节；迁移 rehearsal 证据见 `tests/test_comparison_migration_rehearsal.py`（17 项）与 `tests/test_evaluation_costs.py`（23 项）。
 
 本手册是**可执行操作手册**：所有命令、哈希、目录都是当前真实状态；每一步都有机器检查，任何检查不过都 fail closed 并停在原地（见「失败保留」）。
 
 ## 1. 前置条件（全部成立才能开始）
 
-1. **Robert 显式批准评估协议修订**：`evaluation register-evaluation-protocol` 注册 `evaluation-protocol-manifest.json`（首条输出后的评估协议修订，含固定 `revision_disclosure`）并批准修订版 Promotion Gate 对 AI 记录的消费。**当前未批准**；本手册与任何离线验收都不构成该批准。
+1. **Robert 显式批准评估协议修订**：`evaluation register-evaluation-protocol` 注册 `evaluation-protocol-manifest.json`（首条输出后的评估协议修订，含固定 `revision_disclosure`）并批准修订版 Promotion Gate 对 AI 记录的消费。**已批准并注册**（2026-09-05T13:45:29Z，`registered_by=Robert`，manifest SHA-256 `8dc34cfa75396d12fcd1136d22a9ec8a6f560d261ee4097b38f53002b87f0847`，绑定 config `8078…dce30`）。
 2. **真实 smoke 按 [ai-review-smoke-runbook.md](ai-review-smoke-runbook.md) 通过并出证据报告**：已满足——2026-09-05 六次基础调用 + 修复/重跑共 14 次物理调用全部完成，runbook 四个完成条件 4/4（预设缺陷 4/4 检出、引用 31/31 + 37/37 逐字通过、position_flip/evaluator_conflict 为 0），证据报告 [ai-review-real-smoke-evidence.md](../research/ai-review-real-smoke-evidence.md)。注意：slot 1 材料因此被暴露（development/diagnostic），见第 4 节。
 3. **provider 配置可用且已注册**：当前 pin = `artifacts/evaluations/ai-review-config.json`（`evaluation-review-execution-config-v1.0.0`）：primary=deepseek/`deepseek-v4-pro`、second=moonshot/`k3-256k`（Kimi Code 订阅端点），两 slot 异 model family、异 exact model id；config SHA-256 当前为 `807886563f9770de29084bf719d46795dc709252471c6cc606080520f5d6ce30`（supersede 留档 `ai-review-config-archived-20260905T114121Z.json`）。config 变更会使已注册 manifest 加载失败（`EVALUATION_PROTOCOL_MISMATCH`），因此迁移期间**不得再 supersede config**。
 4. **每个 run 费用单独确认**：生成端沿用 production admission 的逐 run 交互式批准（`yes`），与 Plan Gate、reservation 互不替代；每个真实评审调用同样逐次记录并确认。
-5. **评审费用预算单独列出**：AI 评审费用记入独立台账 `artifacts/evaluations/evaluation-cost-ledger.json`（`evaluation-cost-ledger-v1.0.0`，`evaluation init-evaluation-cost-ledger` / `record-evaluation-cost`），**不占用**生成端 30.00 CNY 硬上限口径——这是独立的新预算列项，其**上限必须由 Robert 单独批准**（当前未批准）。smoke 期间已发生的 DeepSeek 1.6224 CNY 与 Kimi 订阅零边际费用属于 smoke 授权范畴，不入迁移评审预算。
+5. **评审费用预算单独列出**：AI 评审费用记入独立台账 `artifacts/evaluations/evaluation-cost-ledger.json`（`evaluation-cost-ledger-v1.0.0`，`evaluation init-evaluation-cost-ledger` / `record-evaluation-cost`），**不占用**生成端 30.00 CNY 硬上限口径。Robert 已决定（2026-09-05）**不设固定总额上限**：授权边界 = 每次真实评审调用前逐次确认 + 台账逐笔记账 + 每 slot 结束 `evaluation-cost-report --package-dir <p>` 合并只读披露；累计显著超出预期量级（smoke 实测推算 4 对 pair 全 AI 评审 DeepSeek ≈2.3 CNY、含修复重试最坏 ≈4.6 CNY，Kimi 订阅内边际 0）时暂停并向 Robert 汇报。smoke 期间已发生的 DeepSeek 1.6224 CNY 与 Kimi 订阅零边际费用属于 smoke 授权范畴，不入迁移评审预算。
 
 ## 2. 迁移拓扑
 
@@ -127,7 +127,7 @@ EOF
      --pair-id <pair_id>
    ```
 
-   ingestion（`ingest_comparison_result`）与减缩（`reduce_prompt_comparison`）沿用既有 comparison CLI；AI 判定消费经 vault `ai-verdicts/` 通道——把 pair 还原结果写入 package vault（write-once，每 case 一条）：
+   ingestion（`ingest_comparison_result`）与减缩（`reduce_prompt_comparison`）目前**没有 CLI 包装**：二者是库函数，由操作者在评估 workspace 用 `python3 - <<'EOF'` 直调（rehearsal 测试展示了完整装配：`ingest_comparison_result(workspace, package_dir=…, run_id=…, …)` → `load_evaluation_protocol` + `vault.ai_verdicts()` → `reduce_prompt_comparison(..., ai_verdicts=…, evaluation_protocol=…)`）；操作时如需脚本化装配，以 `tests/test_comparison_migration_rehearsal.py::test_full_ai_matrix_reduces_to_promote` 的装配顺序为准。AI 判定消费经 vault `ai-verdicts/` 通道——把 pair 还原结果写入 package vault（write-once，每 case 一条）：
 
    ```bash
    python ai_scientist/perform_ideation_temp_free.py evaluation record-comparison-ai-verdict \
@@ -147,9 +147,8 @@ EOF
 替换 run `1143a894-1230-4ee1-b41a-f801cc50c027`（材料科学 case）已 sealed、含 1 个 finalized idea（idea 0）：
 
 - 该 idea 0 的匿名评审材料包**已被真实 smoke 用作单条评审对象且结果被开发者观察**（证据报告「暴露披露」节），按规范降级为 **development/diagnostic**——其响应此后不得充当 prompt 优化后的未见测试证据；正式评估应使用未暴露的 run。原 slot 1 零产出 run `966d0fdc-…` 已 quarantine（forfeited 0.10 CNY 入账，vault `quarantine/run-001.json`），替换 run 的 reservation 为 `run-001-seq-2.json`（projected ceiling 7.32 ≤ 30.00 ✓）。
-- 该 idea 的 v1 人工 draft 已存在（`ideas/000000/brief.md` + `draft.json`）但**未 validate**；两条合法路径二选一（**须 Robert 决定**）：
-  - **（a）按修订协议改走 AI 双评审**：按第 3 节第 4 步执行；暴露状态如实记录，其 AI 判定只能以 development/diagnostic 证据的身份进入 vault `ai-verdicts/`（若 Robert 决定它参与本轮矩阵判分，须在裁决中同时批准暴露材料的处理方式）。
-  - **（b）由 Robert 继续人工 validate**（v1 通道仍可用）：v1 人工 Evaluation Artifact 通道语义不变，该 pair 的判定走 `verdicts/` 人工通道；同一矩阵其余 7 条结果仍必须全部走 AI 通道（不混用）。
+- 该 idea 的 v1 人工 draft 已存在（`ideas/000000/brief.md` + `draft.json`）但**未 validate**。**Robert 已决定（2026-09-05）：走路径（a）AI 双评审**；暴露状态如实记录，其 AI 判定以 development/diagnostic 证据的身份进入 vault `ai-verdicts/`，且 Robert 在最终 Promotion 裁决中同步声明暴露材料的处理方式（本条即声明：该 idea 的评审材料曾被开发者观察，其结果在本轮矩阵中只作 development/diagnostic 证据，Promotion 判断对其权重由 Robert 在裁决中明示）。
+- 原候选路径（b）由 Robert 人工 validate（v1 通道语义不变，判定走 `verdicts/` 人工通道）**已弃选**。注意（更正 2026-09-05）：路径（b）若启用，其含义是**本轮全部 4 条 pair 都走人工通道**——reducer 强制一次 reduction 内 AI 与人工 verdict 混用 fail closed（`EVALUATION_PROTOCOL_MISMATCH`），不存在「slot 1 人工 + 其余 7 条 AI」的组合（本手册早先版本误记为可选组合，特此更正）。
 - 两条路径都被程序强制互斥：一个 case 的 AI 判定与人工判定不可同存（`EVALUATION_CHANNEL_CONFLICT`），一次 reduction 内 AI 与人工 verdict 混用 fail closed。
 
 ## 5. 失败保留

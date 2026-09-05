@@ -28,3 +28,16 @@
 
 **相关 Commit：**
 - 196b566 协议 manifest → dd238c4 coverage → 6fb0d98 AI verdict 通道+reducer 门 → 20b702b comparison_ai 桥 → 5dfd6a5 migration+cost ledger → 27db76e CLI → 67aba35 测试 → 3e11f64/5d40c13 文档 → 6138d3b work-log → c0e879a standards 修复 → 3706b05 spec 修复。
+# Session 记录 - 2026-09-05 21:xx（三项 Robert 决定落账）
+
+**工作内容：**
+- Robert 批准第 1、3 项并回答第 2 项后，执行三项决定的落账：
+  1. **评估协议修订批准 → 已注册**：`evaluation build-evaluation-protocol`（骨架从运行代码 + 已注册 config 重推导）→ `evaluation register-evaluation-protocol --registered-by Robert`。`artifacts/evaluations/evaluation-protocol-manifest.json` registered_at 2026-09-05T13:45:29Z，SHA-256 `8dc34cfa75396d12fcd1136d22a9ec8a6f560d261ee4097b38f53002b87f0847`，绑定 config `807886…dce30`。修订版 Promotion Gate 对 AI 记录的消费自此可用；旧 Gate 保留并继续拒绝 AI 结果。
+  2. **slot 1 处置 → AI 双评审**：核实中发现 runbook 4(b) 原文「slot 1 人工 + 其余 7 条 AI」与 reducer 混用 gate 矛盾（代码正确：任一 AI verdict 存在则全部 8 条结果必须同通道，混用 `EVALUATION_PROTOCOL_MISMATCH`，spec §138「八条结果统一同一评估协议」）——文档错误，代码符合 spec。向 Robert 说明并修正后，Robert 选 AI 双评审（路径 a）；暴露材料以 development/diagnostic 身份参与，Promotion 裁决明示权重。
+  3. **评审费用上限 → 不设固定总额上限**：授权边界 = 逐次调用前确认 + 台账逐笔记账 + 每 slot `evaluation-cost-report` 合并披露；量级依据（smoke 实测 token 推算）：4 对 pair 全 AI 评审 DeepSeek 预期 ≈2.3 CNY（单条 8 次 ≈0.17 + pair 方向 8 次 ≈0.12，Kimi 订阅边际 0），含修复重试最坏 ≈4.6 CNY；显著超量级暂停汇报。
+- runbook 修正三处：状态行（未批准 → 已批准待执行）、前置条件 1（批准 + manifest 哈希落账）、前置条件 5（不设上限的授权边界）、第 4 节（选定路径 a + 更正 4(b) 语义 + 声明暴露处理方式）、第 3 节第 4 步（ingest/reduce 为库函数直调，无 CLI 包装——修正「沿用既有 comparison CLI」的失实表述，装配以 rehearsal 测试为准）。
+- map.md 增 2026-09-05 决策行；ticket 03 未完成项更新为已批准状态。
+
+**结果：**
+- ✅ 协议注册链 CLI 验证通过（build → register → 注册后 manifest 字段完整）。
+- 真实迁移仍未执行（下一步按 runbook 第 2 节建 pin worktree `d733ffed…` 后从第 1 步开始）。
