@@ -28,6 +28,7 @@ EXPECTED_IMPORT_CLOSURE = ImportClosure(
             "ai_scientist.ideation.canonical",
             "ai_scientist.ideation.comparison",
             "ai_scientist.ideation.comparison_ai",
+            "ai_scientist.ideation.comparison_preauthorization",
             "ai_scientist.ideation.contract",
             "ai_scientist.ideation.controller",
             "ai_scientist.ideation.deepseek",

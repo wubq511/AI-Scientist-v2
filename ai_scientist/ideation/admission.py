@@ -421,7 +421,13 @@ def _run_preflight_steps(
     _check_credential_presence()
     _append_step(store, run.run_id, "credential_presence", "pass")
 
-    # Step 8: conservative cost bound and explicit approval.
+    # Step 8: conservative cost bound and explicit approval. The default is
+    # Robert's interactive per-run `yes`. Robert's write-once batch
+    # preauthorization (comparison_preauthorization, pointed at by
+    # COMPARISON_PREAUTHORIZATION) covers named frozen matrix slots instead;
+    # a set-but-unreadable/non-covering variable fails closed rather than
+    # silently falling back to prompting, and every approval record carries
+    # its provenance verbatim.
     price_table = pricing.load_price_table(workspace)
     model_rounds = request.max_num_generations * request.num_reflections
     worst_case_input_tokens = model_rounds * WORST_CASE_INPUT_TOKENS_PER_ROUND
@@ -432,7 +438,20 @@ def _run_preflight_steps(
         output_tokens=worst_case_output_tokens,
         attempts=MAX_ATTEMPTS_PER_OPERATION,
     )
-    approval = _request_cost_approval(stream, estimate)
+    from .comparison_preauthorization import (
+        covering_preauthorization,
+        preauthorization_admission_field,
+    )
+
+    authorization = covering_preauthorization(
+        case_id=request.case_id,
+        prompt_profile_id=request.prompt_profile_id,
+        worst_case_bound_cny=str(estimate.total_cny),
+    )
+    if authorization is not None:
+        approval = preauthorization_admission_field(authorization)
+    else:
+        approval = _request_cost_approval(stream, estimate)
     _append_step(
         store,
         run.run_id,

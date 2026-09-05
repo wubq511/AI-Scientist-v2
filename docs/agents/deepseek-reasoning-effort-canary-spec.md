@@ -120,7 +120,7 @@ label: ready-for-agent
 - Adding a second model, provider, endpoint, API format, LLM judge, numeric idea score, online literature search, provider-native tool, or automatic qualitative evaluator.
 - Changing prompts, action schema, retriever/ranker, Workshop rendering, Corpus semantics, model version, temperature, generation count, reflection count, evidence schema, rubric criteria, or failure taxonomy.
 - Comparing smaller or larger completion limits in the same matrix, dynamically increasing tokens after truncation, or choosing a limit from observed token percentiles without a new Plan Gate.
-- Parallel provider execution, batch cost approval, automatic typing of `yes`, hidden spend authorization, or exceeding the 30 CNY aggregate cap.
+- Parallel provider execution, automatic typing of `yes`, hidden spend authorization, or exceeding the 30 CNY aggregate cap. (Robert's 2026-09-05 spec revision permits one explicit exception: the write-once, in-package `run-preauthorization.json` batch pre-authorization consumed by admission via `COMPARISON_PREAUTHORIZATION`, with provenance recorded verbatim in the Run Admission; any scripted typing of `yes` and any undocumented spend authorization remain forbidden.)
 - Repairing, overwriting, resealing, exporting, evaluating, or promoting from a corrupt run; substituting failed cases after outcomes are known; or dropping unfavorable pairs.
 - Publishing raw Target Paper identity, Workshop text, Corpus content, prompts, responses, reasoning, ideas, provider response IDs, credentials, host identity, absolute private paths, Evaluation Artifacts, or blind mappings.
 - BFTS, downstream code experiments, plotting, LaTeX writing, paper generation, automated review, deployment, public release, or merging to `main`.
