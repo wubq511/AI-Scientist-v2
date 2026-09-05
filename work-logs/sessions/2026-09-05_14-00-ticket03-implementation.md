@@ -54,3 +54,22 @@
 **结果：**
 - ✅ slot 2 启动门已开，等 Robert 交互重跑冻结命令（yes 批准）。
 - 注意：`authorize_next_comparison_run` 与 ledger ingest 的 run_index 语义 = **矩阵 slot 序号**（替换 run 归其占用的 slot，不按执行顺序递增）。
+
+# Session 记录 - 2026-09-05 23:xx（slot 2 全链完成：run 2 + pair 1 AI 判定入 vault）
+
+**工作内容：**
+- Robert 交互执行 run-index 2 成功：run `8a136ac4-8ac0-4545-9624-63d8270c9663`（case 589dbcb3，cross-domain-v1 臂）sealed success，1 finalized idea。
+- handoff 回收：生成端 export sanitized evidence + `migration_handoff_manifest`（42 文件含 spend-ledger、run 全链、evidence 导出）→ 复制回评估端 → `verify_handoff_manifest` 全过。
+- 归账：slot 2 actual 0.13 CNY（3 attempts）ingest 进 ledger（total 0.45）。
+- 完整 `ingest_comparison_result` 首跑 `EVALUATION_ARTIFACT_MISSING`（coverage 门正确生效）→ 先做双评审再 ingest。
+- run 2 idea 0 双评审：export-review-package → primary（DeepSeek max，237s，0.2443 CNY，一次 validated）+ second（Kimi 首调 HTTP 504 网关超时 300s 保留原错误 → 重试 292s validated，订阅零边际）→ aggregate `complete_resolved`、floor clean、0 conflict。评审台账 2 笔（total 0.24 → 0.47 前段）。
+- **合同级修正（Robert 批准选项 A）**：`export-pair-package` 对 pair 1 `PAIR_PACKET_BLIND_LEAK`——baseline 臂 sealed idea 的 Related Work 自引 3 处 `Paper ID <哈希>`（declared-grounding 风格，属 idea 正文内容），与 pair 盲评 secrets 清单里的 paper_id 冲突。诊断确认：哈希指向共享语料的参考文献而非臂身份，不构成臂泄漏；单评审无此检查、slot 3-8 大概率复现。修复：`ai_pair_review.py` secrets 移除 paper_id（run/case/profile/pair 身份保持 fail closed）+ 回归测试 `test_export_pair_package_allows_paper_ids_inside_idea_text` + authoring contract 修正注记。全量 **884 passed**（基线 883+1）；commits `73e1091`+`99ee349`。
+- pair 1 盲评（`pair-5e8017d85c25e967`）：4 次调用全一次 validated（primary ab 99s/ba 90s，second ab 154s/ba 127s），reduce `stable`：overall_preference content_2（=challenger）、fit content_2、intrusion equal、双臂 floor clean。评审台账 pair_review 2 笔（DeepSeek 0.23 / Kimi 0.00，评审台账 total 0.47）。
+- `record-comparison-ai-verdict` 写入 vault `ai-verdicts/`（write-once）：packet sha 7887c361…（经 pair-filtered matrix + 两臂 ingest 重推导，facts_sha256 与之一致），document sha f8b69052…。
+- ledger 同步 worktree，recency `same_state`。
+
+**结果：**
+- ✅ pair 1 AI 判定通道完成：challenger（cross-domain）胜、fit 优、intrusion 平、floor 双 clean。与 Robert 已选 AI 双评审路径一致；暴露材料（baseline 臂）以 development/diagnostic 身份参与，Promotion 裁决时明示权重。
+- 注意：`validate-pair-review` 重复执行会追加 vNNNN（同响应 supersedes 链，head 判定不变）——操作时 validate 一次即可。
+- 注意：`build_pair_packets_from_ingested` 要求全部 pair 两臂齐备；单 pair 场景用 pair-filtered matrix + case-filtered mappings 构包（packet 字节只依赖该 pair 的行）。
+- 费用：生成端 total 0.45；评审台账 total 0.47（primary single 0.24 + repair 0.00 + pair DeepSeek 0.23 + Kimi 0.00）。
