@@ -5,6 +5,15 @@ label: ready-for-agent
 
 # 跨领域 Ideation Prompt 资格验证规格
 
+## 当前执行决定（2026-09-06，Robert 批准）
+
+Robert 在读取矩阵证据后批准采用 `cross-domain-v1`，并明确要求抛弃 baseline，不保留回退。此决定修订下文针对 Proposal 002 的默认 profile 与固定晋升门槛的执行效力；下文比较设计和阈值保留为已执行矩阵的历史合同，不追溯改写为通过。
+
+- `cross-domain-v1` 是唯一可执行 profile，也是 `new-run` CLI 与库接口默认；CLI 可省略 `--prompt-profile`，显式指定 baseline 返回 `PROMPT_PROFILE_RETIRED`。
+- baseline 新建、恢复和 controller 执行均停止，不提供回退配置。旧 admission 不会被改写成 cross-domain；其冻结身份、模板及 registry hash 只用于历史 Evidence Chain 验证和导出。
+- 原协议结果仍为未满足晋升条件；实际采用依据是分维度观察到的改善和领域目标匹配，完整判定见 [002 裁决记录](comparison-002-promotion-criteria.md)。这不是新的预注册验证结果。
+- 本次开启新的采用 Design Epoch；不修改既有 run、盲评或冻结比较包，不重新 supersede 已结束矩阵的 execution pin，也不恢复旧 035 付费矩阵。后续运行继续使用既有身份、证据、检索及费用合同。
+
 ## Problem Statement
 
 Robert 需要系统从 IdeaBench 跨领域数据中生成有文献依据、问题空间匹配、方法学合理且可验证的科研构想。当前生产 prompt 却完整保留了 AI Scientist-v2 面向机器学习研究的上游目标：把模型设定为 AI researcher，要求成果可发表于 top ML conferences，以 conference format 写摘要，并在验证方案中给出 precise algorithmic changes 和 evaluation metrics。

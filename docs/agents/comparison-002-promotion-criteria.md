@@ -1,9 +1,19 @@
-# 002 比较矩阵执行结果与 Promotion 判据（待 Robert 终裁）
+# 002 比较矩阵结果与采用裁决（Robert 已批准）
 
 **日期**：2026-09-06
-**状态**：生成端 8/8 slot 全部 sealed success 并 ingest；评审端 4 对盲评全部完成；**pair 3、pair 4 无法产出 stable AI verdict（诚实结果，未重跑）**。Promotion 裁决权在 Robert。
+**状态**：生成端 8/8 slot 全部 sealed success 并 ingest；评审端 4 对盲评全部完成；**pair 3、pair 4 无法产出 stable AI verdict（诚实结果，未重跑）**。Robert 已批准基于改善证据采用 cross-domain-v1，并明确抛弃 baseline，不保留回退。
 
 ---
+
+## 当前裁决：采用 cross-domain-v1，退役 baseline
+
+- **批准依据**：Robert 先提出不应被固定胜场门槛僵硬限制，目标是效果比旧方案更好；随后批准采用 cross-domain-v1，并明确要求“直接抛弃 baseline，保留回退并没有价值”。
+- **证据判断**：pair 1/2/4 的 overall 在两评审、两顺序下均为 challenger 更好；pair 3 为三次 challenger 更好、一次 tie。方向观测彼此相关，不能当作 16 个独立样本。pair 4 的整体改善仍可供采用判断使用，其 fit/intrusion 未知也完整保留。
+- **任务价值**：新 prompt 移除对跨领域任务不适当的 ML conference 与算法目标要求；结合改善信号，支持当前工程采用。四案例 AI 评审不足以证明所有领域普遍优越。
+- **暴露材料权重**：slot 1 已暴露的 baseline 材料只作 development/diagnostic 辅助证据，不以 pair 1 作为采用决定的必要支持；排除该对后，Social/Health 的稳定整体改善与 Genetics 的改善倾向仍支持采用。
+- **运行结果**：cross-domain-v1 成为唯一可执行及默认 profile；baseline 新建、resume、controller 执行均拒绝，无回退开关。历史 profile 与模板保留只读校验身份，旧 run 不升级、不重跑。
+- **原协议结果**：仍未满足原预注册晋升条件（non-promote/inconclusive）。以下原判据表是该协议下的对照，不能解释为新默认尚待批准。没有执行或伪造完整矩阵的机器 reduction 成功结果。
+- **修订性质**：这是看到证据后的明确采用决定，按 Promotion Gate v1.1 对 Proposal 002 的定向修订落账，不是追溯宣称实验成功。不增加模型调用或费用，不恢复旧 035 矩阵。
 
 ## 1. 执行与费用现状
 
@@ -21,7 +31,7 @@
 | pair | case | overall | fit | intrusion | floor | AI verdict |
 |---|---|---|---|---|---|---|
 | 1 Materials | 589dbcb3 | challenger 胜 | challenger 胜 | equal | 双 clean | **已入 vault**（challenger 胜） |
-| 2 Social | 2a08725c | challenger 胜 | challenger 胜 | baseline 更少 | c1 clean / c2 unresolved | **已入 vault**（challenger 胜） |
+| 2 Social | 2a08725c | challenger 胜 | challenger 胜 | challenger 更少 | c1 clean / c2 unresolved | **已入 vault**（challenger 胜） |
 | 3 Genetics | 5f3f2126 | incomparable（Kimi position flip：ab tie→ba content_2） | incomparable（同因） | incomparable（ab equal→ba content_1） | 双 clean | **fail-closed 拒绝** |
 | 4 Health | 8c6ddd33 | stable challenger 胜 | incomparable（两 slot 均 ab content_1→ba tie，position_flip） | incomparable（evaluator_conflict） | 双 clean | **fail-closed 拒绝** |
 
@@ -41,12 +51,14 @@
 | challenger ≥ 3 胜 | 只有 2 对有 stable AI verdict，且都是 challenger 胜 | ❌ 最多 2 胜 |
 | baseline 胜 0 | 现有 2 verdict 中 baseline 0 胜 | ✅（暂时） |
 | fit ≥ 2 严格改善且无变差 | pair 1/2 严格改善；pair 3/4 fit 不可判 | 无法满足「无一对变差」的全称检验（2 对不可判） |
-| intrusion 不增加 | pair 1 equal、pair 2 baseline 更少；pair 3/4 不可判 | 部分满足 |
+| intrusion 不增加 | pair 1 equal、pair 2 challenger 更少；pair 3/4 不可判 | 部分满足 |
 | Regression Budgets | 8/8 ingest 门通过 | ✅ |
 
-**按规格字面**： incomparable 计入任何一方（canary spec §36「ties and incomparable pairs count for neither arm」），challenger 最多 2 胜 < 3，且 fit/intrusion 的全称检验无法在不可判的 2 对上完成 → **本矩阵无法产出 promote 结论**（non-promote/inconclusive）。
+**按规格字面**： incomparable 不计入任何一方的胜场（canary spec §36「ties and incomparable pairs count for neither arm」），challenger 最多 2 胜 < 3，且 fit/intrusion 的全称检验无法在不可判的 2 对上完成 → **本矩阵无法产出 promote 结论**（non-promote/inconclusive）。
 
-## 4. 待 Robert 裁决的处置选项
+2026-09-06 交接复核勘误：pair 2 的 `unjustified_ml_intrusion = content_2` 表示 baseline 侧侵入更多；响应合同使用 `a_more` / `b_more`，`comparison.py` 的角色投影对应 challenger `decreased`。此前正文及会话记录中的「baseline 更少」方向写反，以原始 reduction、vault verdict 和本处更正为准。此勘误不改变不满足晋升门槛的结论。
+
+## 4. 历史处置选项（已被上述采用决定取代）
 
 程序已强制：不重跑 AI 盲评（`AI_PAIR_NOT_STABLE` write-once，绝不 rerun to taste）。
 
@@ -54,9 +66,9 @@
 2. **Robert 人工盲评 pair 3/4**：走人工通道 `verdicts/`。注意 reducer 强制一次 reduction 内 AI 与人工混用 fail closed（EVALUATION_PROTOCOL_MISMATCH）——启用人工通道意味着**全部 4 对都走人工判定**（AI verdict 作废出通道，评审费用 2.15 CNY 沉没），Robert 需重做 pair 1/2 的人工盲评。
 3. **Design Epoch 重开**：换评审配置（如换第二评审员模型解决 Kimi 位置翻转敏感度）后重新执行受影响 pair——这是新 Design Epoch，需要 Robert 显式批准新的预算与规格修订，当前证据保留为 development/diagnostic。
 
-## 5. 暴露材料声明义务（Robert 已定）
+## 5. 暴露材料声明
 
-slot 1 baseline 臂（1143a894）在真实 smoke 中被开发者观察，属 development/diagnostic 证据；Promotion 裁决中其权重由 Robert 明示。本报告按此义务披露。
+slot 1 baseline 臂（1143a894）在真实 smoke 中被开发者观察，属 development/diagnostic 证据；本次采用中仅作辅助 diagnostic，不把该对作为决定所必需的支持，权重说明见当前裁决。
 
 ## 6. 证据坐标
 

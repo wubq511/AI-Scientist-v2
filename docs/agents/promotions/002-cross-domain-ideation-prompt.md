@@ -1,9 +1,17 @@
 ---
 id: 002-cross-domain-ideation-prompt
-state: plan-approved
+state: promoted
+decision_basis: post-evidence-adoption
+decided: 2026-09-06
 filer: Robert
 created: 2026-09-04
 ---
+
+## 当前结论（2026-09-06）
+
+Robert 批准采用 `cross-domain-v1` 并抛弃 baseline，明确不保留回退。`promoted` 在本记录中表示经 [Promotion Gate v1.1 定向修订](../promotion-gate.md) 批准的采用决定，**不表示原预注册矩阵通过**。新建运行默认 cross-domain；baseline 的新建、resume 和 controller 执行均退役，历史证据只读。
+
+证据、局限与采用依据见 [002 裁决记录](../comparison-002-promotion-criteria.md)。本文件下文保留原提案与执行历程；旧 frozen commands 仅是历史工件，不再作为后续执行入口。
 
 ## 问题与证据
 
@@ -133,4 +141,4 @@ created: 2026-09-04
 
 ## Promotion Gate 记录
 
-*待对比实验完整执行、盲审冻结、揭盲和判据 reduction 后，由 Robert 宣判。*
+2026-09-06，Robert 在看到证据后批准采用 cross-domain-v1，并明确要求抛弃 baseline、无需回退。决定依据为 `post-evidence-adoption`，原协议仍不满足晋升门槛；未经稳定判定的 pair 3/4 没有被补写 AI verdict，亦未伪造最终 reducer 成功输出。本次只变更后续运行策略并开启新 Design Epoch，原始 run 与评审工件保留。

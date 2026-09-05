@@ -6,6 +6,10 @@ status: closed
 
 # Qualify a Domain-Neutral Ideation Prompt
 
+## 当前运行状态（2026-09-06）
+
+Robert 已批准采用 `cross-domain-v1`，并明确抛弃 baseline、不保留回退；`new-run` 默认 cross-domain，baseline 的新建与恢复均退役。原矩阵未通过预注册门槛，采用依据另行披露为 post-evidence-adoption。以下 tickets 与 Decisions 是历史交付记录，当前效力以 [002 裁决记录](../../agents/comparison-002-promotion-criteria.md) 为准。
+
 ## Authority
 
 - [Cross-domain Ideation Prompt specification](../../agents/cross-domain-ideation-prompt-spec.md)

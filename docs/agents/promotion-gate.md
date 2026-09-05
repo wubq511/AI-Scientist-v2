@@ -1,8 +1,16 @@
 # Optimization Promotion Gate
 
-版本:v1.0(2026-08-30,经 ticket [Define the optimization promotion gate](../wayfinder/ideation-pipeline/tickets/029-define-the-optimization-promotion-gate.md) 由 Robert 批准)
+版本:v1.1（2026-09-06：Robert 批准 Proposal 002 定向采用修订；其余流程沿用 v1.0）
+
+v1.0 来源：(2026-08-30,经 ticket [Define the optimization promotion gate](../wayfinder/ideation-pipeline/tickets/029-define-the-optimization-promotion-gate.md) 由 Robert 批准)
 
 本文档定义 Optimization Promotion 机制:把 Evidence Feedback Loop 的发现转变为被接受的设计变更的门槛与流程。它受版本治理——任何修订 = 新版本 + Robert 批准(012)。
+
+## Proposal 002 定向修订（当前生效）
+
+Robert 已批准基于现有改善证据采用 `cross-domain-v1`，并移除 baseline 的执行与回退能力。本决定允许 Proposal 002 在原预注册判据未通过时明确记录 `decision_basis: post-evidence-adoption` 后采用，覆盖本文“不引入新裁量”及“无 promoted 默认不变”条款对本次变更的阻断效力。原始比较结果保持不通过，不能改称预注册成功；原 reducer 和盲评 write-once 记录保持不变。
+
+依据与未知项见 [002 裁决记录](comparison-002-promotion-criteria.md)。采用开启新 Design Epoch；不要求为凑足胜场重跑，不恢复旧付费矩阵。此定向批准不自动授权其他提案修改判据或花费，也不创建通用 override 开关。
 
 ## 定位与边界
 
