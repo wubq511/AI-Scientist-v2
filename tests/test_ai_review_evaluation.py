@@ -31,14 +31,24 @@ from ai_scientist.ideation.admission import NewRunRequest
 from ai_scientist.ideation.ai_review import (
     AI_DIRNAME,
     CARD_NAME,
+    CONSENSUS_CARD_HTML_NAME,
+    CONSENSUS_CARD_NAME,
+    CONSENSUS_DIRNAME,
+    CONFIG_NAME,
     PACKAGE_NAME,
     REQUEST_NAME,
     RESPONSES_DIRNAME,
+    aggregate_review,
     export_review_package,
     import_review_response,
+    register_review_config,
     validate_ai_review,
 )
 from ai_scientist.ideation.canonical import canonical_json_bytes, sha256_bytes
+from ai_scientist.ideation.contract import (
+    EVALUATION_AUTHORING_CONTRACT_VERSION,
+    EVALUATION_REVIEW_EXECUTION_CONFIG_SCHEMA_VERSION,
+)
 from ai_scientist.ideation.deepseek import (
     DeepSeekAdapter,
     StubTransport,
@@ -68,6 +78,9 @@ from test_post_seal_evaluation import (
 PROMPT_TEMPLATE_PATH = (
     REPO_ROOT / "ai_scientist/ideation/policies/ai-review-prompt-single-v1.md"
 )
+PAIR_TEMPLATE_PATH = (
+    REPO_ROOT / "ai_scientist/ideation/policies/ai-review-prompt-pair-v1.md"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -81,11 +94,12 @@ def _mock_interactive_session(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _setup_review_workspace(tmp_path: Path) -> Path:
-    """Standard evaluation workspace plus the pinned review prompt template."""
+    """Standard evaluation workspace plus the pinned review prompt templates."""
     workspace = _setup_workspace(tmp_path)
     policies_dir = workspace / "ai_scientist/ideation/policies"
     policies_dir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(PROMPT_TEMPLATE_PATH, policies_dir / PROMPT_TEMPLATE_PATH.name)
+    shutil.copyfile(PAIR_TEMPLATE_PATH, policies_dir / PAIR_TEMPLATE_PATH.name)
     return workspace
 
 
@@ -147,6 +161,13 @@ def _create_sealed_run(
 
 def _ai_root(workspace: Path, run_id: str, idea_index: int = 0) -> Path:
     return _idea_dir(workspace, run_id, idea_index) / AI_DIRNAME
+
+
+def _slot_root(
+    workspace: Path, run_id: str, idea_index: int = 0, slot: str = "primary"
+) -> Path:
+    """One evaluator slot's isolated directory (ticket 02 dual-review layout)."""
+    return _ai_root(workspace, run_id, idea_index) / slot
 
 
 def _export(workspace: Path, run_id: str, idea_index: int = 0) -> dict[str, Any]:
@@ -326,14 +347,19 @@ def _import_response(
     run_id: str,
     response_file: Path,
     idea_index: int = 0,
+    *,
+    evaluator_slot: str = "primary",
+    provider: str = "example-provider",
+    model_id: str = "example-model-1",
 ) -> dict[str, Any]:
     return import_review_response(
         workspace,
         run_id,
         idea_index,
         response_path=response_file,
-        provider="example-provider",
-        model_id="example-model-1",
+        evaluator_slot=evaluator_slot,
+        provider=provider,
+        model_id=model_id,
         responded_at="2026-09-05T09:00:00.000000Z",
         supplied_by="Robert",
         imported_by="integration-tester",
@@ -341,9 +367,23 @@ def _import_response(
 
 
 def _validate_review(
-    workspace: Path, run_id: str, idea_index: int = 0
+    workspace: Path,
+    run_id: str,
+    idea_index: int = 0,
+    *,
+    evaluator_slot: str = "primary",
 ) -> dict[str, Any]:
-    return validate_ai_review(workspace, run_id, idea_index)
+    return validate_ai_review(
+        workspace, run_id, idea_index, evaluator_slot=evaluator_slot
+    )
+
+
+def _write_response_file(
+    workspace: Path, body: dict[str, Any], *, fenced: bool = False
+) -> Path:
+    path = workspace / f"response-{len(list(workspace.glob('response-*')))}.txt"
+    path.write_text(_response_text(body, fenced=fenced), encoding="utf-8")
+    return path
 
 
 def _import_body(
@@ -354,8 +394,7 @@ def _import_body(
     *,
     fenced: bool = False,
 ) -> dict[str, Any]:
-    path = workspace / f"response-{len(list(workspace.glob('response-*')))}.txt"
-    path.write_text(_response_text(body, fenced=fenced), encoding="utf-8")
+    path = _write_response_file(workspace, body, fenced=fenced)
     return _import_response(workspace, run_id, path, idea_index)
 
 
@@ -551,7 +590,7 @@ def test_import_stores_write_once_response_with_provenance(tmp_path: Path) -> No
     assert result["parse_status"] == "ok"
     assert result["response_seq"] == 1
 
-    response_path = _ai_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json"
+    response_path = _slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json"
     response = json.loads(response_path.read_text(encoding="utf-8"))
     assert response["schema_version"] == "evaluation-review-response-import-v1.0.0"
     assert response["provenance"] == {"kind": "user_supplied", "supplied_by": "Robert"}
@@ -567,7 +606,26 @@ def test_import_stores_write_once_response_with_provenance(tmp_path: Path) -> No
     first_bytes = response_path.read_bytes()
     _import_body(workspace, run_id, body)
     assert response_path.read_bytes() == first_bytes
-    assert (_ai_root(workspace, run_id) / RESPONSES_DIRNAME / "r0002.json").is_file()
+    assert (_slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0002.json").is_file()
+
+    # The second slot is a fully separate context: same body lands elsewhere.
+    second = import_review_response(
+        workspace,
+        run_id,
+        0,
+        response_path=_write_response_file(workspace, body),
+        evaluator_slot="second",
+        provider="other-provider",
+        model_id="other-model-9",
+        responded_at="2026-09-05T09:00:00.000000Z",
+        supplied_by="Robert",
+        imported_by="integration-tester",
+    )
+    assert second["response_seq"] == 1
+    assert (
+        _slot_root(workspace, run_id, slot="second") / RESPONSES_DIRNAME / "r0001.json"
+    ).is_file()
+    assert (_slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0002.json").is_file()
 
     # A fenced response parses too.
     result3 = _import_body(workspace, run_id, body, fenced=True)
@@ -587,7 +645,7 @@ def test_import_retains_invalid_response_and_reports_failure(tmp_path: Path) -> 
         assert result["parse_error"]
 
     stored = json.loads(
-        (_ai_root(workspace, run_id) / RESPONSES_DIRNAME / "r0002.json").read_text(
+        (_slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0002.json").read_text(
             encoding="utf-8"
         )
     )
@@ -621,7 +679,7 @@ def test_validate_golden_end_to_end(tmp_path: Path) -> None:
     result = _validate_review(workspace, run_id)
     assert result["status"] == "validated"
     assert result["version"] == "v0001.json"
-    ai_root = _ai_root(workspace, run_id)
+    ai_root = _slot_root(workspace, run_id)
     record = json.loads((ai_root / "v0001.json").read_text(encoding="utf-8"))
 
     assert record["schema_version"] == "evaluation-ai-review-record-v2.0.0"
@@ -638,7 +696,8 @@ def test_validate_golden_end_to_end(tmp_path: Path) -> None:
     assert evaluator["author_type"] == "AI"
     assert evaluator["declared_model_id"] == "example-model-1"
     assert evaluator["provenance"]["kind"] == "user_supplied"
-    assert evaluator["response_file"] == "responses/r0001.json"
+    assert evaluator["evaluator_slot"] == "primary"
+    assert evaluator["response_file"] == "primary/responses/r0001.json"
     assert record["audit"]["validated_by"] == (
         "ai_scientist.ideation.ai_review.validate_ai_review"
     )
@@ -708,7 +767,7 @@ def test_validate_rejects_fake_citations(tmp_path: Path) -> None:
     with pytest.raises(IdeationInputError) as exc:
         _validate_review(workspace, run_id)
     assert exc.value.code == "CITATION_SOURCE_NOT_FOUND"
-    assert not (_ai_root(workspace, run_id) / "v0001.json").exists()
+    assert not (_slot_root(workspace, run_id) / "v0001.json").exists()
 
     # Plausible-looking quote that is not a verbatim excerpt.
     mutated = json.loads(json.dumps(body))
@@ -719,7 +778,7 @@ def test_validate_rejects_fake_citations(tmp_path: Path) -> None:
     with pytest.raises(IdeationInputError) as exc2:
         _validate_review(workspace, run_id)
     assert exc2.value.code == "CITATION_QUOTE_NOT_FOUND"
-    assert not (_ai_root(workspace, run_id) / "v0001.json").exists()
+    assert not (_slot_root(workspace, run_id) / "v0001.json").exists()
 
 
 def test_validate_honors_abstention_rules(tmp_path: Path) -> None:
@@ -748,7 +807,7 @@ def test_validate_honors_abstention_rules(tmp_path: Path) -> None:
     _import_body(workspace, run_id, body)
     _validate_review(workspace, run_id)
     record = json.loads(
-        (_ai_root(workspace, run_id) / "v0001.json").read_text(encoding="utf-8")
+        (_slot_root(workspace, run_id) / "v0001.json").read_text(encoding="utf-8")
     )
     assert record["judgments"]["relative_novelty"] == {
         "assessment_status": "insufficient_evidence",
@@ -758,11 +817,11 @@ def test_validate_honors_abstention_rules(tmp_path: Path) -> None:
         "proposed_verdict": None,
         "rationale": "材料只覆盖 target 本身，缺少比较基线，无法判断相对增量。",
     }
-    card = (_ai_root(workspace, run_id) / CARD_NAME).read_text(encoding="utf-8")
+    card = (_slot_root(workspace, run_id) / CARD_NAME).read_text(encoding="utf-8")
     assert "### relative_novelty — 弃权（insufficient_evidence）" in card
     assert "缺少与 target 同期的其他方法对比材料" in card
     assert "未决维度不构成通过或否决" in card
-    card_html = (_ai_root(workspace, run_id) / "evidence-card.html").read_text(
+    card_html = (_slot_root(workspace, run_id) / "evidence-card.html").read_text(
         encoding="utf-8"
     )
     assert "弃权 · insufficient_evidence" in card_html
@@ -822,7 +881,7 @@ def test_validate_rejects_invalid_enums_task_and_format(tmp_path: Path) -> None:
 
     # Unparseable head response cannot validate.
     _import_body(workspace, run_id, {"task": "single_idea_review"})
-    head = _ai_root(workspace, run_id) / RESPONSES_DIRNAME / "r0003.json"
+    head = _slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0003.json"
     stored = json.loads(head.read_text(encoding="utf-8"))
     assert stored["parse_status"] == "ok"
     truncated = '{"task": "single_idea_review", "dimensions": {'
@@ -850,7 +909,7 @@ def test_validate_rejects_tampered_package_and_stale_response(tmp_path: Path) ->
 
     # Restore, then forge a stale package binding on the stored response.
     _export(workspace, run_id)
-    response_path = _ai_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json"
+    response_path = _slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json"
     stored = json.loads(response_path.read_text(encoding="utf-8"))
     stored["review_package_sha256"] = "f" * 64
     response_path.write_bytes(canonical_json_bytes(stored))
@@ -997,7 +1056,7 @@ def test_cli_review_end_to_end(tmp_path: Path) -> None:
     )
     assert validated.returncode == 0, validated.stderr
     assert json.loads(validated.stdout)["version"] == "v0001.json"
-    assert (_ai_root(workspace, run_id) / CARD_NAME).is_file()
+    assert (_slot_root(workspace, run_id) / CARD_NAME).is_file()
 
 
 def test_cli_review_rejects_corrupt_run_and_invalid_response(tmp_path: Path) -> None:
@@ -1045,7 +1104,7 @@ def test_cli_invalid_response_exits_nonzero_and_retains_raw(tmp_path: Path) -> N
     payload = json.loads(imported.stdout)
     assert payload["parse_status"] == "invalid_format"
     stored = json.loads(
-        (_ai_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json").read_text(
+        (_slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json").read_text(
             encoding="utf-8"
         )
     )
@@ -1080,7 +1139,7 @@ def test_verbatim_quote_with_unsupported_claim_still_validates(tmp_path: Path) -
     _validate_review(workspace, run_id)
 
     record = json.loads(
-        (_ai_root(workspace, run_id) / "v0001.json").read_text(encoding="utf-8")
+        (_slot_root(workspace, run_id) / "v0001.json").read_text(encoding="utf-8")
     )
     assert (
         record["judgments"]["feasibility_soundness"]["evidence_refs"][0]["claim"]
@@ -1089,7 +1148,7 @@ def test_verbatim_quote_with_unsupported_claim_still_validates(tmp_path: Path) -
     citation = record["citation_verification"]
     assert citation["refs_quote_verified"] == citation["refs_total"]
     assert citation["semantic_support_verification"] == "not_performed"
-    card = (_ai_root(workspace, run_id) / CARD_NAME).read_text(encoding="utf-8")
+    card = (_slot_root(workspace, run_id) / CARD_NAME).read_text(encoding="utf-8")
     assert "语义支持未核验" in card
 
 
@@ -1140,7 +1199,7 @@ def test_cross_run_response_material_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(IdeationInputError) as exc:
         _validate_review(workspace_b, run_b)
     assert exc.value.code == "CITATION_QUOTE_NOT_FOUND"
-    assert not (_ai_root(workspace_b, run_b) / "v0001.json").exists()
+    assert not (_slot_root(workspace_b, run_b) / "v0001.json").exists()
 
 
 def test_tampered_request_file_fails_closed(tmp_path: Path) -> None:
@@ -1161,7 +1220,9 @@ def test_tampered_request_file_fails_closed(tmp_path: Path) -> None:
         _import_body(workspace, run_id, body)
     assert exc.value.code == "REVIEW_REQUEST_DRIFT"
     # The drift check fires before anything is stored.
-    assert not (_ai_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json").exists()
+    assert not (
+        _slot_root(workspace, run_id) / RESPONSES_DIRNAME / "r0001.json"
+    ).exists()
 
     with pytest.raises(IdeationInputError) as exc:
         _validate_review(workspace, run_id)
@@ -1172,3 +1233,567 @@ def test_tampered_request_file_fails_closed(tmp_path: Path) -> None:
     _import_body(workspace, run_id, body)
     result = _validate_review(workspace, run_id)
     assert result["status"] == "validated"
+
+
+# ==============================================================================
+# Review execution config (ticket 02)
+# ==============================================================================
+
+
+def _config_document(
+    *,
+    primary_family: str = "family-alpha",
+    second_family: str = "family-beta",
+    primary_model: str = "example-model-1",
+    second_model: str = "other-model-9",
+    prompt_versions: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "authoring_contract_version": EVALUATION_AUTHORING_CONTRACT_VERSION,
+        "evaluators": [
+            {
+                "model_family": primary_family,
+                "model_id": primary_model,
+                "provider": "example-provider",
+                "slot": "primary",
+            },
+            {
+                "model_family": second_family,
+                "model_id": second_model,
+                "provider": "other-provider",
+                "slot": "second",
+            },
+        ],
+        "prompt_versions": prompt_versions
+        or {"pair": "pair-review-v1", "single": "single-review-v1"},
+        "real_call_authorization": None,
+        "schema_version": EVALUATION_REVIEW_EXECUTION_CONFIG_SCHEMA_VERSION,
+    }
+
+
+def _register_config(
+    workspace: Path, document: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    path = workspace / "review-execution-config.json"
+    path.write_bytes(canonical_json_bytes(document or _config_document()))
+    return register_review_config(workspace, path)
+
+
+def _run_two_valid_reviews(workspace: Path, run_id: str) -> None:
+    """Export, then import+validate a same-verdict response into both slots."""
+    _export(workspace, run_id)
+    body = _valid_response_body(workspace, run_id)
+    _import_body(workspace, run_id, body)
+    _validate_review(workspace, run_id)
+    second_path = _write_response_file(workspace, body)
+    _import_response(
+        workspace,
+        run_id,
+        second_path,
+        evaluator_slot="second",
+        provider="other-provider",
+        model_id="other-model-9",
+    )
+    _validate_review(workspace, run_id, evaluator_slot="second")
+
+
+def test_register_review_config_golden_is_write_once(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    result = _register_config(workspace)
+    assert result["status"] == "registered"
+
+    config_path = workspace / "artifacts/evaluations" / CONFIG_NAME
+    registered = json.loads(config_path.read_text(encoding="utf-8"))
+    assert registered["schema_version"] == ("evaluation-review-execution-config-v1.0.0")
+    assert registered["prompt_versions"] == {
+        "pair": "pair-review-v1",
+        "single": "single-review-v1",
+    }
+    assert {entry["slot"] for entry in registered["evaluators"]} == {
+        "primary",
+        "second",
+    }
+    assert result["config_sha256"] == sha256_bytes(config_path.read_bytes())
+    assert result["evaluators"]["primary"]["model_family"] == "family-alpha"
+    assert result["evaluators"]["second"]["model_id"] == "other-model-9"
+
+    # The registration is write-once: any second registration fails closed.
+    with pytest.raises(IdeationInputError) as exc:
+        _register_config(workspace)
+    assert exc.value.code == "ARTIFACT_EXISTS"
+    assert sha256_bytes(config_path.read_bytes()) == result["config_sha256"]
+
+
+def test_register_review_config_rejects_non_distinct_families(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    path = workspace / "config.json"
+    # Two personas of one model are not two independent evaluators.
+    path.write_bytes(
+        canonical_json_bytes(
+            _config_document(
+                primary_family="family-same",
+                second_family="family-same",
+                second_model="other-model-9",
+            )
+        )
+    )
+    with pytest.raises(IdeationInputError) as exc:
+        register_review_config(workspace, path)
+    assert exc.value.code == "REVIEW_CONFIG_FAMILIES_NOT_DISTINCT"
+    assert not (workspace / "artifacts/evaluations" / CONFIG_NAME).exists()
+
+
+def test_register_review_config_rejects_same_model_id(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    path = workspace / "config.json"
+    path.write_bytes(
+        canonical_json_bytes(
+            _config_document(primary_model="model-x", second_model="model-x")
+        )
+    )
+    with pytest.raises(IdeationInputError) as exc:
+        register_review_config(workspace, path)
+    assert exc.value.code == "REVIEW_CONFIG_MODELS_NOT_DISTINCT"
+
+
+def test_register_review_config_rejects_unapproved_prompt_versions(
+    tmp_path: Path,
+) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    path = workspace / "config.json"
+    path.write_bytes(
+        canonical_json_bytes(
+            _config_document(
+                prompt_versions={"pair": "pair-review-v9", "single": "single-review-v1"}
+            )
+        )
+    )
+    with pytest.raises(IdeationInputError) as exc:
+        register_review_config(workspace, path)
+    assert exc.value.code == "REVIEW_CONTRACT_MISMATCH"
+
+
+def test_validate_checks_config_binding_when_registered(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _export(workspace, run_id)
+    body = _valid_response_body(workspace, run_id)
+
+    # A record whose declared model is not the slot's config binding fails.
+    path = _write_response_file(workspace, body)
+    _import_response(
+        workspace,
+        run_id,
+        path,
+        evaluator_slot="primary",
+        provider="example-provider",
+        model_id="unregistered-model",
+    )
+    with pytest.raises(IdeationInputError) as exc:
+        _validate_review(workspace, run_id)
+    assert exc.value.code == "REVIEW_CONFIG_MISMATCH"
+
+    # The config-bound declaration validates cleanly.
+    workspace2 = _setup_review_workspace(tmp_path / "second")
+    run_id2 = _create_sealed_run(workspace2)["run_id"]
+    _register_config(workspace2)
+    _export(workspace2, run_id2)
+    _import_body(workspace2, run_id2, _valid_response_body(workspace2, run_id2))
+    result = _validate_review(workspace2, run_id2)
+    assert result["status"] == "validated"
+
+
+# ==============================================================================
+# Dual-review aggregation (ticket 02)
+# ==============================================================================
+
+
+def test_aggregate_golden_consensus(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _run_two_valid_reviews(workspace, run_id)
+
+    result = aggregate_review(workspace, run_id, 0)
+    assert result["status"] == "aggregated"
+    assert result["coverage"] == "complete_resolved"
+    assert result["quality_floor_state"] == "clean"
+    assert result["version"] == "v0001.json"
+
+    ai_root = _ai_root(workspace, run_id)
+    record = json.loads(
+        (ai_root / CONSENSUS_DIRNAME / "v0001.json").read_text(encoding="utf-8")
+    )
+    assert record["schema_version"] == "evaluation-ai-review-consensus-record-v2.0.0"
+    assert record["record_kind"] == "dual_ai_review_consensus"
+    assert record["run_id"] == run_id
+    assert record["case_id"] == CASE_ID
+    assert record["review_config_sha256"] == sha256_bytes(
+        (workspace / "artifacts/evaluations" / CONFIG_NAME).read_bytes()
+    )
+    assert record["coverage"] == "complete_resolved"
+    for criterion_id, judgment in record["judgments"].items():
+        assert judgment["state"] == "consensus", criterion_id
+        assert judgment["consensus_verdict"] == (
+            record["judgments"][criterion_id]["sides"]["primary"]["proposed_verdict"]
+        )
+        # Both rationales are preserved even under agreement.
+        assert judgment["sides"]["second"] is not None
+    assert record["quality_floor"] == {
+        "dimensions": {
+            "problem_space_match": "aligned",
+            "feasibility_soundness": "sound",
+            "grounding_synthesis": "synthesized",
+            "contamination_signal": "none_found",
+            "leakage_review": "clean",
+        },
+        "state": "clean",
+    }
+    evaluators = record["evaluators"]
+    assert evaluators["primary"]["state"] == "valid"
+    assert evaluators["primary"]["declared_model_id"] == "example-model-1"
+    assert evaluators["primary"]["model_family"] == "family-alpha"
+    assert evaluators["primary"]["record_file"] == "primary/v0001.json"
+    assert evaluators["second"]["record_file"] == "second/v0001.json"
+    assert evaluators["second"]["declared_model_id"] == "other-model-9"
+
+    card = (ai_root / CONSENSUS_DIRNAME / CONSENSUS_CARD_NAME).read_text(
+        encoding="utf-8"
+    )
+    assert "# AI 评审共识卡（双评审汇总）" in card
+    assert "评审一（primary）" in card and "评审二（second）" in card
+    assert "complete_resolved" in card
+    html_text = (ai_root / CONSENSUS_DIRNAME / CONSENSUS_CARD_HTML_NAME).read_text(
+        encoding="utf-8"
+    )
+    assert "<!DOCTYPE html>" in html_text and "<script" not in html_text
+
+    # Per-slot records stay untouched; re-aggregation supersedes linearly.
+    primary_record = (ai_root / "primary" / "v0001.json").read_bytes()
+    second_record = (ai_root / "second" / "v0001.json").read_bytes()
+    second = aggregate_review(workspace, run_id, 0)
+    assert second["version"] == "v0002.json"
+    assert second["supersedes"] == "v0001.json"
+    record2 = json.loads(
+        (ai_root / CONSENSUS_DIRNAME / "v0002.json").read_text(encoding="utf-8")
+    )
+    assert record2["supersedes"] == "v0001.json"
+    assert (ai_root / "primary" / "v0001.json").read_bytes() == primary_record
+    assert (ai_root / "second" / "v0001.json").read_bytes() == second_record
+
+
+def test_aggregate_requires_registered_config(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _export(workspace, run_id)
+    body = _valid_response_body(workspace, run_id)
+    _import_body(workspace, run_id, body)
+    _validate_review(workspace, run_id)
+
+    with pytest.raises(IdeationInputError) as exc:
+        aggregate_review(workspace, run_id, 0)
+    assert exc.value.code == "REVIEW_CONFIG_NOT_FOUND"
+
+
+def test_aggregate_negative_consensus_keeps_floor_violated(tmp_path: Path) -> None:
+    """一致负面保留为负面: two slots agreeing on an unsound feasibility keep
+    the negative verdict and set the quality floor to violated."""
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _export(workspace, run_id)
+    body = _valid_response_body(workspace, run_id)
+    body["dimensions"]["feasibility_soundness"]["proposed_verdict"] = "unsound"
+    body["dimensions"]["feasibility_soundness"][
+        "rationale"
+    ] = "实验计划缺少对照，关键假设无法由给定材料支持。"
+    _import_body(workspace, run_id, body)
+    _validate_review(workspace, run_id)
+    second_path = _write_response_file(workspace, body)
+    _import_response(
+        workspace,
+        run_id,
+        second_path,
+        evaluator_slot="second",
+        provider="other-provider",
+        model_id="other-model-9",
+    )
+    _validate_review(workspace, run_id, evaluator_slot="second")
+
+    result = aggregate_review(workspace, run_id, 0)
+    assert result["coverage"] == "complete_resolved"
+    assert result["quality_floor_state"] == "violated"
+    record = json.loads(
+        (_ai_root(workspace, run_id) / CONSENSUS_DIRNAME / "v0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    judgment = record["judgments"]["feasibility_soundness"]
+    assert judgment["state"] == "consensus"
+    assert judgment["consensus_verdict"] == "unsound"
+    assert record["quality_floor"]["dimensions"]["feasibility_soundness"] == "unsound"
+    card = (
+        _ai_root(workspace, run_id) / CONSENSUS_DIRNAME / CONSENSUS_CARD_NAME
+    ).read_text(encoding="utf-8")
+    assert "violated" in card
+
+
+def test_aggregate_conflict_stays_unresolved(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _export(workspace, run_id)
+    body_a = _valid_response_body(workspace, run_id)
+    body_b = json.loads(json.dumps(body_a))
+    body_b["dimensions"]["relative_novelty"]["proposed_verdict"] = "beyond_target"
+    _import_body(workspace, run_id, body_a)
+    _validate_review(workspace, run_id)
+    second_path = _write_response_file(workspace, body_b)
+    _import_response(
+        workspace,
+        run_id,
+        second_path,
+        evaluator_slot="second",
+        provider="other-provider",
+        model_id="other-model-9",
+    )
+    _validate_review(workspace, run_id, evaluator_slot="second")
+
+    result = aggregate_review(workspace, run_id, 0)
+    assert result["coverage"] == "complete_unresolved"
+    assert result["quality_floor_state"] == "clean"
+    record = json.loads(
+        (_ai_root(workspace, run_id) / CONSENSUS_DIRNAME / "v0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    conflict = record["judgments"]["relative_novelty"]
+    assert conflict["state"] == "conflict"
+    assert conflict["consensus_verdict"] is None
+    assert conflict["sides"]["primary"]["proposed_verdict"] == "on_par"
+    assert conflict["sides"]["second"]["proposed_verdict"] == "beyond_target"
+    resolved = record["judgments"]["problem_space_match"]
+    assert resolved["state"] == "consensus"
+
+
+def test_aggregate_abstention_stays_unresolved_and_floor_unresolved(
+    tmp_path: Path,
+) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _export(workspace, run_id)
+    body_a = _valid_response_body(workspace, run_id)
+    body_b = json.loads(json.dumps(body_a))
+    body_b["dimensions"]["contamination_signal"] = {
+        "assessment_status": "insufficient_evidence",
+        "evidence_refs": [],
+        "key_assumptions": [],
+        "missing_information": ["缺少训练数据来源材料"],
+        "proposed_verdict": None,
+        "rationale": "材料无法覆盖训练侧，弃权。",
+    }
+    _import_body(workspace, run_id, body_a)
+    _validate_review(workspace, run_id)
+    second_path = _write_response_file(workspace, body_b)
+    _import_response(
+        workspace,
+        run_id,
+        second_path,
+        evaluator_slot="second",
+        provider="other-provider",
+        model_id="other-model-9",
+    )
+    _validate_review(workspace, run_id, evaluator_slot="second")
+
+    result = aggregate_review(workspace, run_id, 0)
+    assert result["coverage"] == "complete_unresolved"
+    assert result["quality_floor_state"] == "unresolved"
+    record = json.loads(
+        (_ai_root(workspace, run_id) / CONSENSUS_DIRNAME / "v0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    judgment = record["judgments"]["contamination_signal"]
+    assert judgment["state"] == "abstained"
+    assert judgment["consensus_verdict"] is None
+    assert record["quality_floor"]["dimensions"]["contamination_signal"] is None
+
+
+def test_aggregate_invalid_response_is_accounted_as_invalid(tmp_path: Path) -> None:
+    """A slot whose head response is unparseable is state invalid: coverage is
+    invalid, never complete_unresolved."""
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _export(workspace, run_id)
+    _import_body(workspace, run_id, _valid_response_body(workspace, run_id))
+    _validate_review(workspace, run_id)
+    bad = workspace / "bad-second.txt"
+    bad.write_text("looks persuasive but is not JSON", encoding="utf-8")
+    import_result = _import_response(
+        workspace,
+        run_id,
+        bad,
+        evaluator_slot="second",
+        provider="other-provider",
+        model_id="other-model-9",
+    )
+    assert import_result["parse_status"] == "invalid_format"
+
+    result = aggregate_review(workspace, run_id, 0)
+    assert result["coverage"] == "invalid"
+    record = json.loads(
+        (_ai_root(workspace, run_id) / CONSENSUS_DIRNAME / "v0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["evaluators"]["second"]["state"] == "invalid"
+    assert record["evaluators"]["second"]["declared_model_id"] is None
+    for judgment in record["judgments"].values():
+        assert judgment["state"] == "incomplete_evaluator"
+        assert judgment["sides"]["second"] is None
+    card = (
+        _ai_root(workspace, run_id) / CONSENSUS_DIRNAME / CONSENSUS_CARD_NAME
+    ).read_text(encoding="utf-8")
+    assert "invalid" in card
+
+
+def test_aggregate_missing_and_unvalidated_slots_cannot_masquerade(
+    tmp_path: Path,
+) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _export(workspace, run_id)
+
+    # Nothing imported for the second slot: state missing, coverage missing.
+    _import_body(workspace, run_id, _valid_response_body(workspace, run_id))
+    _validate_review(workspace, run_id)
+    result = aggregate_review(workspace, run_id, 0)
+    assert result["coverage"] == "missing"
+    record = json.loads(
+        (_ai_root(workspace, run_id) / CONSENSUS_DIRNAME / "v0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record["evaluators"]["second"]["state"] == "missing"
+
+    # An imported-but-unvalidated response is also not a completed review.
+    workspace2 = _setup_review_workspace(tmp_path / "second")
+    run_id2 = _create_sealed_run(workspace2)["run_id"]
+    _register_config(workspace2)
+    _export(workspace2, run_id2)
+    _import_body(workspace2, run_id2, _valid_response_body(workspace2, run_id2))
+    _validate_review(workspace2, run_id2)
+    second_path = _write_response_file(
+        workspace2, _valid_response_body(workspace2, run_id2)
+    )
+    _import_response(
+        workspace2,
+        run_id2,
+        second_path,
+        evaluator_slot="second",
+        provider="other-provider",
+        model_id="other-model-9",
+    )
+    result2 = aggregate_review(workspace2, run_id2, 0)
+    assert result2["coverage"] == "missing"
+    record2 = json.loads(
+        (_ai_root(workspace2, run_id2) / CONSENSUS_DIRNAME / "v0001.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert record2["evaluators"]["second"]["state"] == "unvalidated"
+
+
+def test_aggregate_tampered_response_fails_closed(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+    _register_config(workspace)
+    _run_two_valid_reviews(workspace, run_id)
+
+    response_path = (
+        _ai_root(workspace, run_id) / "second" / RESPONSES_DIRNAME / "r0001.json"
+    )
+    stored = json.loads(response_path.read_text(encoding="utf-8"))
+    stored["parsed_response"]["task"] = "tampered"
+    response_path.write_bytes(canonical_json_bytes(stored))
+
+    with pytest.raises(IdeationInputError) as exc:
+        aggregate_review(workspace, run_id, 0)
+    assert exc.value.code == "HASH_MISMATCH"
+
+
+def test_cli_dual_review_end_to_end(tmp_path: Path) -> None:
+    workspace = _setup_review_workspace(tmp_path)
+    run_id = _create_sealed_run(workspace)["run_id"]
+
+    config_path = workspace / "cli-config.json"
+    config_path.write_bytes(canonical_json_bytes(_config_document()))
+    registered = _evaluation_cli(
+        workspace,
+        "register-review-config",
+        "--config-file",
+        str(config_path),
+    )
+    assert registered.returncode == 0, registered.stderr
+    assert json.loads(registered.stdout)["status"] == "registered"
+
+    _evaluation_cli(
+        workspace, "export-review-package", "--run-id", run_id, "--idea-index", "0"
+    )
+    body = _valid_response_body(workspace, run_id)
+    for slot, provider, model_id in (
+        ("primary", "example-provider", "example-model-1"),
+        ("second", "other-provider", "other-model-9"),
+    ):
+        response_path = _write_response_file(workspace, body)
+        imported = _evaluation_cli(
+            workspace,
+            "import-review-response",
+            "--run-id",
+            run_id,
+            "--idea-index",
+            "0",
+            "--response-file",
+            str(response_path),
+            "--evaluator-slot",
+            slot,
+            "--provider",
+            provider,
+            "--model-id",
+            model_id,
+            "--responded-at",
+            "2026-09-05T09:00:00.000000Z",
+            "--supplied-by",
+            "Robert",
+            "--imported-by",
+            "integration-tester",
+        )
+        assert imported.returncode == 0, imported.stderr
+        validated = _evaluation_cli(
+            workspace,
+            "validate-review",
+            "--run-id",
+            run_id,
+            "--idea-index",
+            "0",
+            "--evaluator-slot",
+            slot,
+        )
+        assert validated.returncode == 0, validated.stderr
+
+    aggregated = _evaluation_cli(
+        workspace, "aggregate-review", "--run-id", run_id, "--idea-index", "0"
+    )
+    assert aggregated.returncode == 0, aggregated.stderr
+    payload = json.loads(aggregated.stdout)
+    assert payload["coverage"] == "complete_resolved"
+    assert (
+        workspace
+        / "artifacts/evaluations"
+        / run_id
+        / "ideas/000000/ai/consensus/consensus-card.md"
+    ).is_file()

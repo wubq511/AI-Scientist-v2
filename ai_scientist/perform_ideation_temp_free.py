@@ -101,12 +101,71 @@ def _build_parser() -> argparse.ArgumentParser:
     ev_import_review.add_argument("--responded-at", required=True)
     ev_import_review.add_argument("--supplied-by", required=True)
     ev_import_review.add_argument("--imported-by", required=True)
+    ev_import_review.add_argument(
+        "--evaluator-slot",
+        default="primary",
+        choices=["primary", "second"],
+        help="Which evaluator slot this response belongs to (isolated contexts).",
+    )
     ev_validate_review = evaluation_actions.add_parser(
         "validate-review",
         help="Validate the latest imported response into an immutable AI review record and evidence card.",
     )
     ev_validate_review.add_argument("--run-id", required=True)
     ev_validate_review.add_argument("--idea-index", type=int, required=True)
+    ev_validate_review.add_argument(
+        "--evaluator-slot",
+        default="primary",
+        choices=["primary", "second"],
+    )
+    ev_register_config = evaluation_actions.add_parser(
+        "register-review-config",
+        help="Register the write-once review execution config (two distinct-family evaluators).",
+    )
+    ev_register_config.add_argument("--config-file", required=True)
+    ev_aggregate_review = evaluation_actions.add_parser(
+        "aggregate-review",
+        help="Merge both evaluator slots' validated records into a dual-review consensus record and card.",
+    )
+    ev_aggregate_review.add_argument("--run-id", required=True)
+    ev_aggregate_review.add_argument("--idea-index", type=int, required=True)
+    ev_export_pair = evaluation_actions.add_parser(
+        "export-pair-package",
+        help="Export the anonymous two-arm pair package and both direction requests.",
+    )
+    ev_export_pair.add_argument("--run-id-a", required=True)
+    ev_export_pair.add_argument("--idea-index-a", type=int, required=True)
+    ev_export_pair.add_argument("--run-id-b", required=True)
+    ev_export_pair.add_argument("--idea-index-b", type=int, required=True)
+    ev_import_pair = evaluation_actions.add_parser(
+        "import-pair-response",
+        help="Import one operator-supplied pair review response (write-once, per slot/direction).",
+    )
+    ev_import_pair.add_argument("--pair-id", required=True)
+    ev_import_pair.add_argument(
+        "--evaluator-slot", required=True, choices=["primary", "second"]
+    )
+    ev_import_pair.add_argument("--direction", required=True, choices=["ab", "ba"])
+    ev_import_pair.add_argument("--response-file", required=True)
+    ev_import_pair.add_argument("--provider", required=True)
+    ev_import_pair.add_argument("--model-id", required=True)
+    ev_import_pair.add_argument("--responded-at", required=True)
+    ev_import_pair.add_argument("--supplied-by", required=True)
+    ev_import_pair.add_argument("--imported-by", required=True)
+    ev_validate_pair = evaluation_actions.add_parser(
+        "validate-pair-review",
+        help="Validate one slot/direction pair response into an immutable pair review record.",
+    )
+    ev_validate_pair.add_argument("--pair-id", required=True)
+    ev_validate_pair.add_argument(
+        "--evaluator-slot", required=True, choices=["primary", "second"]
+    )
+    ev_validate_pair.add_argument("--direction", required=True, choices=["ab", "ba"])
+    ev_reduce_pair = evaluation_actions.add_parser(
+        "reduce-pair-review",
+        help="Restore anonymous content across the four pair reviews into a stable result or incomparable.",
+    )
+    ev_reduce_pair.add_argument("--pair-id", required=True)
     return parser
 
 
@@ -524,6 +583,7 @@ def _run_evaluation_import_review_response(
             args.run_id,
             args.idea_index,
             response_path=Path(args.response_file),
+            evaluator_slot=args.evaluator_slot,
             provider=args.provider,
             model_id=args.model_id,
             responded_at=args.responded_at,
@@ -555,13 +615,192 @@ def _run_evaluation_validate_review(
 
     root = workspace_root or Path.cwd()
     try:
-        result = validate_ai_review(root, args.run_id, args.idea_index)
+        result = validate_ai_review(
+            root, args.run_id, args.idea_index, evaluator_slot=args.evaluator_slot
+        )
     except IdeationInputError as exc:
         error = {
             "code": exc.code,
             "message": exc.message,
             "run_id": args.run_id,
             "status": "review_validation_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_register_review_config(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Register the write-once review execution config: exit 0 registered, 1 rejected."""
+    from ai_scientist.ideation.ai_review import register_review_config
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = register_review_config(root, Path(args.config_file))
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "config_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_aggregate_review(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Merge both evaluator slots into a consensus record: exit 0 aggregated, 1 rejected."""
+    from ai_scientist.ideation.ai_review import aggregate_review
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = aggregate_review(root, args.run_id, args.idea_index)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "run_id": args.run_id,
+            "status": "aggregation_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_export_pair_package(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Export the anonymous pair package: exit 0 exported, 1 rejected."""
+    from ai_scientist.ideation.ai_pair_review import export_pair_package
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = export_pair_package(
+            root,
+            args.run_id_a,
+            args.idea_index_a,
+            args.run_id_b,
+            args.idea_index_b,
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "status": "export_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_import_pair_response(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Import one pair response: exit 0 imported, 1 rejected/invalid format.
+
+    An unparseable response is still retained on disk under its slot and
+    direction; the failure report names the stored file.
+    """
+    from ai_scientist.ideation.ai_pair_review import import_pair_response
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = import_pair_response(
+            root,
+            args.pair_id,
+            args.evaluator_slot,
+            args.direction,
+            response_path=Path(args.response_file),
+            provider=args.provider,
+            model_id=args.model_id,
+            responded_at=args.responded_at,
+            supplied_by=args.supplied_by,
+            imported_by=args.imported_by,
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "pair_id": args.pair_id,
+            "status": "import_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0 if result["parse_status"] == "ok" else 1
+
+
+def _run_evaluation_validate_pair_review(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Validate one slot/direction pair response: exit 0 validated, 1 rejected."""
+    from ai_scientist.ideation.ai_pair_review import validate_pair_review
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = validate_pair_review(
+            root, args.pair_id, args.evaluator_slot, args.direction
+        )
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "pair_id": args.pair_id,
+            "status": "pair_validation_rejected",
+        }
+        sys.stderr.buffer.write(canonical_json_bytes(error))
+        return 1
+    sys.stdout.buffer.write(canonical_json_bytes(result))
+    return 0
+
+
+def _run_evaluation_reduce_pair_review(
+    args: argparse.Namespace,
+    *,
+    workspace_root: Path | None = None,
+) -> int:
+    """Reduce the four pair reviews into a stable result: exit 0 reduced, 1 rejected."""
+    from ai_scientist.ideation.ai_pair_review import reduce_pair_review
+    from ai_scientist.ideation.canonical import canonical_json_bytes
+    from ai_scientist.ideation.errors import IdeationInputError
+
+    root = workspace_root or Path.cwd()
+    try:
+        result = reduce_pair_review(root, args.pair_id)
+    except IdeationInputError as exc:
+        error = {
+            "code": exc.code,
+            "message": exc.message,
+            "pair_id": args.pair_id,
+            "status": "reduction_rejected",
         }
         sys.stderr.buffer.write(canonical_json_bytes(error))
         return 1
@@ -618,6 +857,18 @@ if __name__ == "__main__":
             raise SystemExit(_run_evaluation_import_review_response(_args))
         if _args.evaluation_action == "validate-review":
             raise SystemExit(_run_evaluation_validate_review(_args))
+        if _args.evaluation_action == "register-review-config":
+            raise SystemExit(_run_evaluation_register_review_config(_args))
+        if _args.evaluation_action == "aggregate-review":
+            raise SystemExit(_run_evaluation_aggregate_review(_args))
+        if _args.evaluation_action == "export-pair-package":
+            raise SystemExit(_run_evaluation_export_pair_package(_args))
+        if _args.evaluation_action == "import-pair-response":
+            raise SystemExit(_run_evaluation_import_pair_response(_args))
+        if _args.evaluation_action == "validate-pair-review":
+            raise SystemExit(_run_evaluation_validate_pair_review(_args))
+        if _args.evaluation_action == "reduce-pair-review":
+            raise SystemExit(_run_evaluation_reduce_pair_review(_args))
     # No subcommand: print the same help text and exit like --help.
     _parser.print_help()
     raise SystemExit(0)

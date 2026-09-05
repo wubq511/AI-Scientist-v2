@@ -69,6 +69,33 @@ EVALUATION_AI_REVIEW_PROMPT_SINGLE_PATH = Path(
 EVALUATION_AI_REVIEW_PROMPT_SINGLE_SHA256 = (
     "5a609dbc65d9377150ea10f4eb1cff3c80898af48e020a33ce0771a37891a5b0"
 )
+# Ticket 02 (independent dual review + stable pairwise blind review): the
+# pair template, its response contract, the dual-review consensus record,
+# the pair review record/reduction, the anonymous pair package, and the
+# review execution config are versioned together with the v2 authoring
+# contract; a drift in any pinned bytes fails closed.
+EVALUATION_AI_REVIEW_PROMPT_PAIR_VERSION = "pair-review-v1"
+EVALUATION_AI_REVIEW_PROMPT_PAIR_PATH = Path(
+    "ai_scientist/ideation/policies/ai-review-prompt-pair-v1.md"
+)
+EVALUATION_AI_REVIEW_PROMPT_PAIR_SHA256 = (
+    "3e0bf6e3b78927f1c752a738a10021c42f05714dbe35af0830b8710445f94778"
+)
+EVALUATION_AI_PAIR_REVIEW_RESPONSE_SCHEMA_VERSION = "ai-pair-review-response-v1.0.0"
+EVALUATION_AI_REVIEW_CONSENSUS_RECORD_SCHEMA_VERSION = (
+    "evaluation-ai-review-consensus-record-v2.0.0"
+)
+EVALUATION_AI_PAIR_REVIEW_RECORD_SCHEMA_VERSION = (
+    "evaluation-ai-pair-review-record-v2.0.0"
+)
+EVALUATION_AI_PAIR_REDUCTION_SCHEMA_VERSION = (
+    "evaluation-ai-pair-reduction-record-v2.0.0"
+)
+EVALUATION_PAIR_PACKAGE_SCHEMA_VERSION = "evaluation-pair-package-v1.0.0"
+EVALUATION_PAIR_MATERIALS_SCHEMA_VERSION = "evaluation-pair-materials-v1.0.0"
+EVALUATION_REVIEW_EXECUTION_CONFIG_SCHEMA_VERSION = (
+    "evaluation-review-execution-config-v1.0.0"
+)
 CORPUS_QUARANTINED_FIELDS = frozenset(
     {
         "targetPaperId",

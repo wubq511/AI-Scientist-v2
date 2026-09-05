@@ -23,6 +23,7 @@ EXPECTED_IMPORT_CLOSURE = ImportClosure(
             "ai_scientist",
             "ai_scientist.ideation",
             "ai_scientist.ideation.admission",
+            "ai_scientist.ideation.ai_pair_review",
             "ai_scientist.ideation.ai_review",
             "ai_scientist.ideation.canonical",
             "ai_scientist.ideation.contract",

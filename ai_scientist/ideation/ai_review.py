@@ -1,9 +1,13 @@
-"""AI-assisted single-review evaluation (authoring contract v2, ticket 01).
+"""AI-assisted single-review evaluation (authoring contract v2, tickets 01+02).
 
 Implements the single-idea AI review mode of the evaluation authoring
 contract v2 (docs/agents/ai-review-authoring-contract-v2.md) on top of the
 existing post-seal evaluation machinery:
 
+- register_review_config: write-once review execution config binding the two
+  independent evaluator slots (exact model ids, distinct model families) and
+  the pinned prompt versions; the second evaluator never sees the first
+  one's answers (isolated contexts, per-slot storage).
 - export_review_package: derives an anonymous, deterministic review package
   (Workshop text, the sealed idea fields, the complete per-paper release
   record of the sidecar-bound retrieval operations, the Target Comparator,
@@ -13,17 +17,26 @@ existing post-seal evaluation machinery:
   write-once with explicit ``user_supplied`` provenance (the program never
   claims it executed the model call), parses the response text, and reports
   parse failures explicitly while retaining the raw response.
-- validate_ai_review: fail-closed validation of the latest stored response —
-  closed schema, seven dimensions with the original rubric verdict enums and
-  the independent ``insufficient_evidence`` status, per-ref verbatim quote
-  verification against the package sources, linear supersedes — then commits
-  the immutable write-once AI review record and the regenerable Chinese
-  evidence card.
+- validate_ai_review: fail-closed validation of the latest stored response
+  for one evaluator slot — closed schema, seven dimensions with the original
+  rubric verdict enums and the independent ``insufficient_evidence`` status,
+  per-ref verbatim quote verification against the package sources, linear
+  supersedes — then commits the immutable write-once AI review record and
+  the regenerable Chinese evidence card for that slot.
+- aggregate_review: merges the two slots' validated single-review records
+  into a dual-review consensus record plus the consensus card. Per dimension
+  only two valid judgments with the same verdict form a consensus (a shared
+  negative stays negative); conflicts and abstentions stay unresolved;
+  missing/invalid responses are accounted separately and can never masquerade
+  as complete.
 
 AI review files live under ``artifacts/evaluations/<run_id>/ideas/<idx>/ai/``
 so the v1 human Evaluation Artifact layout, its validation, and coverage
-stay byte-identical. A single-review record is honest advice for Robert: it
-carries no promotion authority and no claim of scientific ground truth.
+stay byte-identical. Per-evaluator records live in ``ai/primary/`` and
+``ai/second/``; the consensus record lives in ``ai/consensus/``. A consensus
+record is honest advice for Robert: it carries no promotion authority and no
+claim of scientific ground truth; pairwise review is delivered by
+``ai_pair_review`` (ticket 02).
 """
 
 from __future__ import annotations
@@ -42,15 +55,19 @@ from .canonical import (
     workspace_relative_path,
 )
 from .contract import (
+    EVALUATION_AI_REVIEW_CONSENSUS_RECORD_SCHEMA_VERSION,
+    EVALUATION_AI_REVIEW_PROMPT_PAIR_VERSION,
     EVALUATION_AI_REVIEW_PROMPT_SINGLE_PATH,
     EVALUATION_AI_REVIEW_PROMPT_SINGLE_SHA256,
     EVALUATION_AI_REVIEW_PROMPT_SINGLE_VERSION,
     EVALUATION_AI_REVIEW_RECORD_SCHEMA_VERSION,
     EVALUATION_AI_REVIEW_RESPONSE_SCHEMA_VERSION,
     EVALUATION_AUTHORING_CONTRACT_VERSION,
+    EVALUATION_REVIEW_EXECUTION_CONFIG_SCHEMA_VERSION,
     EVALUATION_REVIEW_MATERIALS_SCHEMA_VERSION,
     EVALUATION_REVIEW_PACKAGE_SCHEMA_VERSION,
     EVALUATION_REVIEW_RESPONSE_IMPORT_SCHEMA_VERSION,
+    EVALUATION_ROOT_RELPATH,
     _now,
 )
 from .errors import fail
@@ -61,7 +78,6 @@ from .evaluation import (
     _existing_versions,
     _load_context_and_comparator,
     _load_idea_evidence,
-    _load_rubric_policy,
     _validate_idea_index,
     _write_bytes_once,
     _write_bytes_overwrite,
@@ -84,17 +100,38 @@ FENCE_BLOCK_PATTERN = re.compile(
     r"```(?:json)?[ \t]*\r?\n?(.*?)\r?\n?[ \t]*```", re.DOTALL
 )
 
+# Two independent evaluator slots. The execution config must bind them to
+# two different model families; two personas of the same model are never two
+# independent evaluators.
+EVALUATOR_SLOTS = ("primary", "second")
+CONFIG_NAME = "ai-review-config.json"
+CONSENSUS_DIRNAME = "consensus"
+CONSENSUS_CARD_NAME = "consensus-card.md"
+CONSENSUS_CARD_HTML_NAME = "consensus-card.html"
+
 REVIEW_TASK_ID = "single_idea_review"
 JUDGED_STATUS = "judged"
 INSUFFICIENT_EVIDENCE_STATUS = "insufficient_evidence"
 ASSESSMENT_STATUSES = frozenset({JUDGED_STATUS, INSUFFICIENT_EVIDENCE_STATUS})
 REF_STANCES = frozenset({"supports", "contradicts"})
 VALIDATED_BY_TOOL = "ai_scientist.ideation.ai_review.validate_ai_review"
+AGGREGATED_BY_TOOL = "ai_scientist.ideation.ai_review.aggregate_review"
 # Dimensions whose judged claims are scope statements about the audit facts:
 # the template requires citing the audit_statement source so the claimed
 # scope is anchored to the checks the package actually carries.
 AUDIT_CITED_DIMENSIONS = frozenset({"contamination_signal", "leakage_review"})
 AUDIT_SOURCE_KIND = "audit_statement"
+
+# Pre-registered rubric-floor dimensions and their problem verdicts (mirrors
+# comparison.RUBRIC_FLOOR_PROBLEM_VALUES): a dual-review consensus on one of
+# these is a negative quality-floor result and is preserved as such.
+QUALITY_FLOOR_PROBLEM_VERDICTS = {
+    "problem_space_match": "mismatched",
+    "feasibility_soundness": "unsound",
+    "grounding_synthesis": "name_dropped",
+    "contamination_signal": "signal_found",
+    "leakage_review": "leak_found",
+}
 
 JUDGMENT_KEYS = {
     "assessment_status",
@@ -422,14 +459,9 @@ def _ai_dir(idea_dir: Path) -> Path:
     return ai_path
 
 
-def _ensure_ai_dirs(ai_path: Path, *, with_responses: bool) -> None:
+def _ensure_ai_dirs(ai_path: Path) -> None:
     try:
         ai_path.mkdir(parents=True, exist_ok=True)
-        if with_responses:
-            responses_dir = ai_path / RESPONSES_DIRNAME
-            if responses_dir.is_symlink():
-                fail("SYMLINK_FORBIDDEN", "The responses directory is a symlink")
-            responses_dir.mkdir(exist_ok=True)
     except OSError as exc:
         detail = exc.strerror or str(exc)
         fail("STORAGE_WRITE_FAILED", f"Cannot create ai review directory: {detail}")
@@ -494,7 +526,7 @@ def export_review_package(
 
     idea_dir = _evaluation_idea_dir(workspace, run_id, idea_index)
     ai_path = _ai_dir(idea_dir)
-    _ensure_ai_dirs(ai_path, with_responses=False)
+    _ensure_ai_dirs(ai_path)
     _write_bytes_overwrite(ai_path / PACKAGE_NAME, package_bytes, label=PACKAGE_NAME)
     _write_bytes_overwrite(ai_path / REQUEST_NAME, request_bytes, label=REQUEST_NAME)
 
@@ -517,6 +549,229 @@ def _ai_relpath(run_id: str, idea_index: int, *parts: str) -> str:
         / AI_DIRNAME
         / Path(*parts)
     ).as_posix()
+
+
+def _check_evaluator_slot(slot: object) -> str:
+    if slot not in EVALUATOR_SLOTS:
+        fail(
+            "INVALID_COORDINATE",
+            f"evaluator_slot must be one of {list(EVALUATOR_SLOTS)}",
+        )
+    return str(slot)
+
+
+def _slot_dir(ai_path: Path, slot: str) -> Path:
+    slot_path = ai_path / slot
+    if slot_path.is_symlink():
+        fail("SYMLINK_FORBIDDEN", f"The {slot} evaluator directory is a symlink")
+    return slot_path
+
+
+# ==============================================================================
+# Review execution config (two independent evaluators, distinct families)
+# ==============================================================================
+
+_CONFIG_EVALUATOR_KEYS = {"model_family", "model_id", "provider", "slot"}
+_CONFIG_AUTHORIZATION_KEYS = {
+    "approved_at",
+    "approved_by",
+    "cost_boundary",
+    "outbound_scope",
+    "token_budget",
+}
+
+
+def _check_review_config(value: object) -> dict[str, Any]:
+    """Closed validation of the review execution config document."""
+    config = closed_object(
+        value,
+        label="review execution config",
+        keys={
+            "authoring_contract_version",
+            "evaluators",
+            "prompt_versions",
+            "real_call_authorization",
+            "schema_version",
+        },
+    )
+    if config["schema_version"] != EVALUATION_REVIEW_EXECUTION_CONFIG_SCHEMA_VERSION:
+        fail(
+            "UNSUPPORTED_SCHEMA",
+            "Unsupported review execution config schema_version: "
+            f"{config['schema_version']}",
+        )
+    if config["authoring_contract_version"] != EVALUATION_AUTHORING_CONTRACT_VERSION:
+        fail(
+            "REVIEW_CONTRACT_MISMATCH",
+            "The review execution config binds another authoring contract version",
+        )
+    prompt_versions = closed_object(
+        config["prompt_versions"],
+        label="review execution config.prompt_versions",
+        keys={"pair", "single"},
+    )
+    if (
+        prompt_versions["single"] != EVALUATION_AI_REVIEW_PROMPT_SINGLE_VERSION
+        or prompt_versions["pair"] != EVALUATION_AI_REVIEW_PROMPT_PAIR_VERSION
+    ):
+        fail(
+            "REVIEW_CONTRACT_MISMATCH",
+            "The review execution config pins unapproved prompt versions",
+        )
+    evaluators_value = config["evaluators"]
+    if not isinstance(evaluators_value, list) or len(evaluators_value) != len(
+        EVALUATOR_SLOTS
+    ):
+        fail(
+            "INVALID_SCHEMA",
+            "review execution config.evaluators must list exactly "
+            f"{len(EVALUATOR_SLOTS)} evaluators",
+        )
+    evaluators: dict[str, dict[str, str]] = {}
+    for index, item in enumerate(evaluators_value):
+        entry = closed_object(
+            item,
+            label=f"review execution config.evaluators[{index}]",
+            keys=_CONFIG_EVALUATOR_KEYS,
+        )
+        slot = _check_evaluator_slot(entry["slot"])
+        if slot in evaluators:
+            fail("INVALID_SCHEMA", f"Duplicate evaluator slot: {slot}")
+        evaluators[slot] = {
+            "model_family": nonempty_string(
+                entry["model_family"], label=f"evaluators[{index}].model_family"
+            ),
+            "model_id": nonempty_string(
+                entry["model_id"], label=f"evaluators[{index}].model_id"
+            ),
+            "provider": nonempty_string(
+                entry["provider"], label=f"evaluators[{index}].provider"
+            ),
+            "slot": slot,
+        }
+    if set(evaluators) != set(EVALUATOR_SLOTS):
+        fail(
+            "INVALID_SCHEMA",
+            f"review execution config must bind the slots {list(EVALUATOR_SLOTS)}",
+        )
+    if evaluators["primary"]["model_family"] == evaluators["second"]["model_family"]:
+        fail(
+            "REVIEW_CONFIG_FAMILIES_NOT_DISTINCT",
+            "The two evaluator slots must come from different model families; "
+            "two personas of one model are not independent evaluators",
+        )
+    if evaluators["primary"]["model_id"] == evaluators["second"]["model_id"]:
+        fail(
+            "REVIEW_CONFIG_MODELS_NOT_DISTINCT",
+            "The two evaluator slots must bind different exact model ids",
+        )
+    authorization = config["real_call_authorization"]
+    if authorization is not None:
+        auth = closed_object(
+            authorization,
+            label="review execution config.real_call_authorization",
+            keys=_CONFIG_AUTHORIZATION_KEYS,
+        )
+        nonempty_string(
+            auth["approved_by"], label="real_call_authorization.approved_by"
+        )
+        timestamp(auth["approved_at"], label="real_call_authorization.approved_at")
+        nonempty_string(
+            auth["token_budget"], label="real_call_authorization.token_budget"
+        )
+        nonempty_string(
+            auth["cost_boundary"], label="real_call_authorization.cost_boundary"
+        )
+        nonempty_string(
+            auth["outbound_scope"], label="real_call_authorization.outbound_scope"
+        )
+    return config
+
+
+def register_review_config(workspace_root: Path, config_path: Path) -> dict[str, Any]:
+    """Validate and register the write-once review execution config.
+
+    The config binds the two evaluator slots (provider, exact model id, and
+    the operator-declared model family) plus the pinned prompt versions. It
+    is a declared operator input: the program cannot verify the family
+    classification, so it enforces only that the declared values differ and
+    records them verbatim.
+    """
+    workspace = workspace_root.resolve(strict=True)
+    if config_path.is_symlink() or not config_path.is_file():
+        fail("INVALID_INPUT", f"Config file is missing: {config_path}")
+    value = parse_json_bytes(config_path.read_bytes(), label="review execution config")
+    checked = _check_review_config(value)
+    root = workspace / EVALUATION_ROOT_RELPATH
+    if root.is_symlink():
+        fail("SYMLINK_FORBIDDEN", "The evaluations root is a symlink")
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        _fsync_directory(root)
+    except OSError as exc:
+        detail = exc.strerror or str(exc)
+        fail("STORAGE_WRITE_FAILED", f"Cannot create evaluations root: {detail}")
+    target = root / CONFIG_NAME
+    _write_bytes_once(target, canonical_json_bytes(checked), label=CONFIG_NAME)
+    return {
+        "config": EVALUATION_ROOT_RELPATH.joinpath(CONFIG_NAME).as_posix(),
+        "config_sha256": sha256_bytes(canonical_json_bytes(checked)),
+        "evaluators": {
+            entry["slot"]: {
+                "model_family": entry["model_family"],
+                "model_id": entry["model_id"],
+                "provider": entry["provider"],
+            }
+            for entry in sorted(checked["evaluators"], key=lambda item: item["slot"])
+        },
+        "status": "registered",
+    }
+
+
+def _config_registered(workspace: Path) -> bool:
+    path = workspace / EVALUATION_ROOT_RELPATH / CONFIG_NAME
+    return path.is_file() and not path.is_symlink()
+
+
+def _load_review_config(workspace: Path) -> dict[str, Any]:
+    """Load and re-validate the registered config; missing file fails closed."""
+    path = workspace / EVALUATION_ROOT_RELPATH / CONFIG_NAME
+    if path.is_symlink() or not path.is_file():
+        fail(
+            "REVIEW_CONFIG_NOT_FOUND",
+            "No registered review execution config; run evaluation "
+            "register-review-config first",
+        )
+    value = parse_json_bytes(path.read_bytes(), label="review execution config")
+    return _check_review_config(value)
+
+
+def _config_evaluator(config: dict[str, Any], slot: str) -> dict[str, str]:
+    for entry in config["evaluators"]:
+        if entry["slot"] == slot:
+            return entry
+    fail("REVIEW_CONFIG_MISMATCH", f"The config does not bind slot {slot}")
+
+
+def _check_config_binding(
+    config: dict[str, Any], slot: str, declared: dict[str, Any]
+) -> None:
+    """A stored record may only merge into the slot the config binds it to.
+
+    ``declared`` is either an import record's ``declared`` block or a
+    validated record's ``evaluator`` block; both carry the provider and
+    model id under different key names.
+    """
+    provider = declared.get("provider", declared.get("declared_provider"))
+    model_id = declared.get("model_id", declared.get("declared_model_id"))
+    binding = _config_evaluator(config, slot)
+    if provider != binding["provider"] or model_id != binding["model_id"]:
+        fail(
+            "REVIEW_CONFIG_MISMATCH",
+            f"The {slot} record declares provider/model "
+            f"{provider}/{model_id} but the config "
+            f"binds {binding['provider']}/{binding['model_id']}",
+        )
 
 
 def _parse_response_text(text: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -555,15 +810,19 @@ def import_review_response(
     responded_at: str,
     supplied_by: str,
     imported_by: str,
+    evaluator_slot: str = "primary",
 ) -> dict[str, Any]:
     """Store one operator-supplied model response write-once and parse it.
 
+    Each evaluator slot stores its responses separately: the second
+    evaluator's answers never flow into the first one's context or storage.
     Provenance is always ``user_supplied``: this command records who provided
     the file, never a claim that the program executed the model call. An
     unparseable response is retained on disk and reported as an explicit
     failure; it can never become a validated record.
     """
     idea_index = _validate_idea_index(idea_index)
+    slot = _check_evaluator_slot(evaluator_slot)
     provider = nonempty_string(provider, label="provider")
     model_id = nonempty_string(model_id, label="model_id")
     timestamp(responded_at, label="responded_at")
@@ -616,8 +875,19 @@ def import_review_response(
     parsed, parse_error = _parse_response_text(response_text)
     parse_status = "ok" if parsed is not None else "invalid_format"
 
-    responses_dir = ai_path / RESPONSES_DIRNAME
-    _ensure_ai_dirs(ai_path, with_responses=True)
+    slot_path = _slot_dir(ai_path, slot)
+    responses_dir = slot_path / RESPONSES_DIRNAME
+    if responses_dir.is_symlink():
+        fail("SYMLINK_FORBIDDEN", "The responses directory is a symlink")
+    try:
+        slot_path.mkdir(parents=True, exist_ok=True)
+        responses_dir.mkdir(exist_ok=True)
+    except OSError as exc:
+        detail = exc.strerror or str(exc)
+        fail(
+            "STORAGE_WRITE_FAILED", f"Cannot create {slot} response directory: {detail}"
+        )
+    _fsync_directory(slot_path)
     existing = []
     if responses_dir.is_dir():
         for path in responses_dir.iterdir():
@@ -653,10 +923,11 @@ def import_review_response(
     )
 
     result = {
+        "evaluator_slot": slot,
         "parse_status": parse_status,
         "prompt_version": prompt.version,
         "response_file": _ai_relpath(
-            run_id, idea_index, RESPONSES_DIRNAME, response_name
+            run_id, idea_index, slot, RESPONSES_DIRNAME, response_name
         ),
         "response_seq": new_seq,
         "run_id": run_id,
@@ -838,18 +1109,22 @@ def _check_review_judgments(
     return {"dimensions": dims, "refs_total": refs_total}
 
 
-def _load_head_response(ai_path: Path) -> tuple[str, dict[str, Any]]:
-    responses_dir = ai_path / RESPONSES_DIRNAME
+def _load_head_response(slot_path: Path, slot: str) -> tuple[str, dict[str, Any]]:
+    responses_dir = slot_path / RESPONSES_DIRNAME
     if not responses_dir.is_dir() or responses_dir.is_symlink():
         fail(
             "REVIEW_RESPONSE_NOT_FOUND",
-            "No imported review responses; run evaluation import-review-response first",
+            f"No imported review responses for slot {slot}; run evaluation "
+            "import-review-response first",
         )
     versions = _existing_versions(
         responses_dir, pattern=RESPONSE_NAME_PATTERN, label="Review response"
     )
     if not versions:
-        fail("REVIEW_RESPONSE_NOT_FOUND", "No imported review responses found")
+        fail(
+            "REVIEW_RESPONSE_NOT_FOUND",
+            f"No imported review responses found for slot {slot}",
+        )
     head_name = versions[-1][1]
     document = parse_json_bytes(
         (responses_dir / head_name).read_bytes(), label=f"review response {head_name}"
@@ -1195,19 +1470,487 @@ def validate_ai_review(
     workspace_root: Path,
     run_id: str,
     idea_index: int,
+    *,
+    evaluator_slot: str = "primary",
 ) -> dict[str, Any]:
-    """Validate the latest imported response and commit the AI review record.
+    """Validate the latest imported response of one slot and commit its record.
 
     Every rule is deterministic and fail-closed: a failed response never
     becomes a record, and the raw response plus the review package stay
-    untouched for audit.
+    untouched for audit. When a review execution config is registered, the
+    record's declared provider/model must match the slot's binding.
+    """
+    idea_index = _validate_idea_index(idea_index)
+    slot = _check_evaluator_slot(evaluator_slot)
+    workspace, context, target, rubric = _load_context_and_comparator(
+        workspace_root, run_id
+    )
+    _, _, _, idea_entry = _load_idea_evidence(context, run_id, idea_index)
+
+    idea_dir = _evaluation_idea_dir(workspace, run_id, idea_index)
+    ai_path = _ai_dir(idea_dir)
+    slot_path = _slot_dir(ai_path, slot)
+    package_path = ai_path / PACKAGE_NAME
+    if not package_path.is_file() or package_path.is_symlink():
+        fail(
+            "REVIEW_PACKAGE_NOT_FOUND",
+            f"No {PACKAGE_NAME} for idea {idea_index}; run evaluation "
+            "export-review-package first",
+        )
+    package_bytes = package_path.read_bytes()
+    document, _prompt = _rederive_package(
+        workspace=workspace,
+        run_id=run_id,
+        idea_index=idea_index,
+        context=context,
+        target=target,
+        rubric=rubric,
+        package_bytes=package_bytes,
+    )
+    request_path = ai_path / REQUEST_NAME
+    if not request_path.is_file() or request_path.is_symlink():
+        fail(
+            "REVIEW_REQUEST_NOT_FOUND",
+            f"No {REQUEST_NAME} for idea {idea_index}; run evaluation "
+            "export-review-package first",
+        )
+    if request_path.read_bytes() != _render_review_request(
+        _load_review_prompt(workspace).text, document["model_payload"]
+    ):
+        fail(
+            "REVIEW_REQUEST_DRIFT",
+            f"{REQUEST_NAME} on disk does not match the pinned prompt render; "
+            "re-run evaluation export-review-package",
+        )
+
+    head_name, head = _load_head_response(slot_path, slot)
+    if head["review_package_sha256"] != sha256_bytes(package_bytes):
+        fail(
+            "REVIEW_RESPONSE_PACKAGE_MISMATCH",
+            f"The head response {head_name} was imported against a different "
+            "review package",
+        )
+    if head["prompt_version"] != document["prompt_version"]:
+        fail(
+            "REVIEW_CONTRACT_MISMATCH",
+            f"The head response {head_name} was imported under another prompt "
+            "version",
+        )
+    if head["parse_status"] != "ok" or not isinstance(head["parsed_response"], dict):
+        fail(
+            "REVIEW_RESPONSE_INVALID_FORMAT",
+            f"The head response {head_name} is not a parseable review response",
+            parse_error=head["parse_error"],
+        )
+    config = _load_review_config(workspace) if _config_registered(workspace) else None
+    if config is not None:
+        _check_config_binding(config, slot, head["declared"])
+
+    parsed = closed_object(
+        head["parsed_response"], label="review response", keys=RESPONSE_TOP_KEYS
+    )
+    if parsed["task"] != REVIEW_TASK_ID:
+        fail(
+            "INVALID_SCHEMA",
+            f"review response task must be '{REVIEW_TASK_ID}'",
+        )
+    sources_by_id = {
+        source["source_id"]: source
+        for source in document["model_payload"]["materials"]["sources"]
+    }
+    checked = _check_review_judgments(parsed["dimensions"], rubric, sources_by_id)
+
+    versions = _existing_versions(slot_path)
+    expected_supersedes = versions[-1][1] if versions else None
+    new_seq = (versions[-1][0] + 1) if versions else 1
+
+    record: dict[str, Any] = {
+        "schema_version": EVALUATION_AI_REVIEW_RECORD_SCHEMA_VERSION,
+        "authoring_contract_version": EVALUATION_AUTHORING_CONTRACT_VERSION,
+        "record_kind": "single_ai_review",
+        "run_id": run_id,
+        "case_id": context.case_id,
+        "seal_sha256": context.seal_sha256,
+        "idea": {
+            "idea_index": idea_index,
+            "relative_path": idea_entry["relative_path"],
+            "sha256": idea_entry["sha256"],
+        },
+        "target_paper": document["target_paper"],
+        "rubric_version": rubric.version,
+        "prompt_version": document["prompt_version"],
+        "response_schema_version": document["response_schema_version"],
+        "review_package_sha256": sha256_bytes(package_bytes),
+        "review_request_sha256": head["review_request_sha256"],
+        "evaluator": {
+            "evaluator_slot": slot,
+            "author_type": "AI",
+            "declared_provider": head["declared"]["provider"],
+            "declared_model_id": head["declared"]["model_id"],
+            "provenance": dict(head["provenance"]),
+            "response_file": f"{slot}/{RESPONSES_DIRNAME}/{head_name}",
+            "response_sha256": head["response_sha256"],
+            "responded_at": head["declared"]["responded_at"],
+            "imported_at": head["imported_at"],
+            "imported_by": head["imported_by"],
+        },
+        "judgments": checked["dimensions"],
+        "citation_verification": {
+            "refs_total": checked["refs_total"],
+            "refs_quote_verified": checked["refs_total"],
+            "semantic_support_verification": "not_performed",
+        },
+        "audit": {
+            "imported_at": head["imported_at"],
+            "imported_by": head["imported_by"],
+            "validated_at": _now(),
+            "validated_by": VALIDATED_BY_TOOL,
+            "validation_result": "passed",
+        },
+        "supersedes": expected_supersedes,
+    }
+    _check_supersedes(
+        record["supersedes"],
+        expected_name=expected_supersedes,
+        idea_dir=slot_path,
+        run_id=run_id,
+        idea_index=idea_index,
+    )
+
+    version_name = f"v{new_seq:04d}.json"
+    card_bytes = _render_evidence_card(record, version_name)
+    card_html_bytes = _render_evidence_card_html(record, version_name)
+
+    record_bytes = canonical_json_bytes(record)
+    _write_bytes_once(slot_path / version_name, record_bytes, label=version_name)
+    _write_bytes_overwrite(slot_path / CARD_NAME, card_bytes, label=CARD_NAME)
+    _write_bytes_overwrite(
+        slot_path / CARD_HTML_NAME, card_html_bytes, label=CARD_HTML_NAME
+    )
+
+    return {
+        "evidence_card": _ai_relpath(run_id, idea_index, slot, CARD_NAME),
+        "evidence_card_html": _ai_relpath(run_id, idea_index, slot, CARD_HTML_NAME),
+        "evaluator_slot": slot,
+        "idea_index": idea_index,
+        "record": _ai_relpath(run_id, idea_index, slot, version_name),
+        "record_sha256": sha256_bytes(record_bytes),
+        "response_file": _ai_relpath(
+            run_id, idea_index, slot, RESPONSES_DIRNAME, head_name
+        ),
+        "run_id": run_id,
+        "status": "validated",
+        "supersedes": expected_supersedes,
+        "version": version_name,
+    }
+
+
+# ==============================================================================
+# Dual-review aggregation (ticket 02): consensus across two isolated slots
+# ==============================================================================
+
+_SINGLE_RECORD_KEYS = frozenset(
+    {
+        "schema_version",
+        "authoring_contract_version",
+        "record_kind",
+        "run_id",
+        "case_id",
+        "seal_sha256",
+        "idea",
+        "target_paper",
+        "rubric_version",
+        "prompt_version",
+        "response_schema_version",
+        "review_package_sha256",
+        "review_request_sha256",
+        "evaluator",
+        "judgments",
+        "citation_verification",
+        "audit",
+        "supersedes",
+    }
+)
+_SINGLE_EVALUATOR_KEYS = frozenset(
+    {
+        "evaluator_slot",
+        "author_type",
+        "declared_provider",
+        "declared_model_id",
+        "provenance",
+        "response_file",
+        "response_sha256",
+        "responded_at",
+        "imported_at",
+        "imported_by",
+    }
+)
+_RESPONSE_IMPORT_KEYS = frozenset(
+    {
+        "schema_version",
+        "authoring_contract_version",
+        "imported_at",
+        "imported_by",
+        "provenance",
+        "declared",
+        "prompt_version",
+        "parse_status",
+        "parse_error",
+        "parsed_response",
+        "response_sha256",
+        "response_text",
+        "review_package_sha256",
+        "review_request_sha256",
+    }
+)
+
+
+def _config_sha256(workspace: Path) -> str:
+    path = workspace / EVALUATION_ROOT_RELPATH / CONFIG_NAME
+    return sha256_bytes(path.read_bytes())
+
+
+def _verify_supersedes_chain(
+    records_dir: Path, *, label: str = "Review record"
+) -> None:
+    """Every record version must supersede exactly its predecessor."""
+    versions = _existing_versions(records_dir)
+    expected: str | None = None
+    for _seq, name in versions:
+        document = parse_json_bytes(
+            (records_dir / name).read_bytes(), label=f"{label.lower()} {name}"
+        )
+        if not isinstance(document, dict) or document.get("supersedes") != expected:
+            fail(
+                "EVALUATION_SUPERSEDES_INVALID",
+                f"{label} {name} breaks the linear supersedes chain",
+                expected=expected,
+            )
+        expected = name
+
+
+def _slot_record_state(
+    *,
+    ai_path: Path,
+    slot: str,
+    package_bytes: bytes,
+    document: dict[str, Any],
+    rubric: Any,
+    run_id: str,
+    idea_index: int,
+    idea_entry: dict[str, Any],
+    context: Any,
+) -> dict[str, Any]:
+    """Load one slot's head record with full integrity re-verification.
+
+    Returns {"state", "record", "record_name", "record_sha256", "note"}.
+    state: "valid" (a verified record heads the slot), "unvalidated"
+    (responses exist, none validated), "invalid" (the only/unvalidated head
+    response is unparseable), "missing" (no responses). A tampered record,
+    response, or chain fails closed instead of returning a state.
+    """
+    slot_path = _slot_dir(ai_path, slot)
+    record_versions = _existing_versions(slot_path)
+    if record_versions:
+        _verify_supersedes_chain(slot_path)
+        head_seq, head_record_name = record_versions[-1]
+        record = parse_json_bytes(
+            (slot_path / head_record_name).read_bytes(),
+            label=f"single review record {head_record_name}",
+        )
+        record = closed_object(
+            record, label="single review record", keys=_SINGLE_RECORD_KEYS
+        )
+        if record["schema_version"] != EVALUATION_AI_REVIEW_RECORD_SCHEMA_VERSION:
+            fail(
+                "UNSUPPORTED_SCHEMA",
+                f"Unsupported single review record schema_version: "
+                f"{record['schema_version']}",
+            )
+        if record["record_kind"] != "single_ai_review":
+            fail("RUN_CORRUPT", f"Review record {head_record_name} has the wrong kind")
+        if (
+            record["run_id"] != run_id
+            or record["case_id"] != context.case_id
+            or record["seal_sha256"] != context.seal_sha256
+        ):
+            fail(
+                "IDENTITY_MISMATCH",
+                f"Review record {head_record_name} belongs to another run or seal",
+            )
+        idea_link = closed_object(
+            record["idea"],
+            label="record.idea",
+            keys={"idea_index", "relative_path", "sha256"},
+        )
+        if (
+            idea_link["idea_index"] != idea_index
+            or idea_link["relative_path"] != idea_entry["relative_path"]
+            or idea_link["sha256"] != idea_entry["sha256"]
+        ):
+            fail(
+                "HASH_MISMATCH",
+                f"Review record {head_record_name} binds another idea payload",
+            )
+        if record["review_package_sha256"] != sha256_bytes(package_bytes):
+            fail(
+                "REVIEW_RESPONSE_PACKAGE_MISMATCH",
+                f"Review record {head_record_name} binds another review package",
+            )
+        if record["prompt_version"] != document["prompt_version"]:
+            fail(
+                "REVIEW_CONTRACT_MISMATCH",
+                f"Review record {head_record_name} was produced under another "
+                "prompt version",
+            )
+        if record["rubric_version"] != rubric.version:
+            fail(
+                "RUBRIC_VERSION_NOT_APPROVED",
+                f"Review record {head_record_name} pins an unapproved rubric",
+            )
+        evaluator = closed_object(
+            record["evaluator"],
+            label="record.evaluator",
+            keys=_SINGLE_EVALUATOR_KEYS,
+        )
+        if evaluator["evaluator_slot"] != slot or evaluator["author_type"] != "AI":
+            fail(
+                "IDENTITY_MISMATCH",
+                f"Review record {head_record_name} does not belong to slot {slot}",
+            )
+        provenance = closed_object(
+            evaluator["provenance"],
+            label="record.evaluator.provenance",
+            keys={"kind", "supplied_by"},
+        )
+        if provenance["kind"] != "user_supplied":
+            fail(
+                "IDENTITY_MISMATCH",
+                f"Review record {head_record_name} does not carry user_supplied "
+                "provenance",
+            )
+        response_path = ai_path / evaluator["response_file"]
+        if response_path.is_symlink() or not response_path.is_file():
+            fail(
+                "REVIEW_RESPONSE_NOT_FOUND",
+                f"Review record {head_record_name} binds a missing response file",
+            )
+        # The bound file is the stored import record; its integrity anchor is
+        # the hash of the embedded raw response text.
+        stored = parse_json_bytes(
+            response_path.read_bytes(), label="stored review response import record"
+        )
+        stored = closed_object(
+            stored, label="stored review response", keys=_RESPONSE_IMPORT_KEYS
+        )
+        if stored["parse_status"] != "ok" or not isinstance(
+            stored["parsed_response"], dict
+        ):
+            fail(
+                "RUN_CORRUPT",
+                f"The response file bound by {head_record_name} is not a "
+                "parseable import record",
+            )
+        text_sha = sha256_bytes(stored["response_text"].encode("utf-8"))
+        reparsed, _parse_error = _parse_response_text(stored["response_text"])
+        if (
+            text_sha != stored["response_sha256"]
+            or text_sha != evaluator["response_sha256"]
+            or reparsed is None
+            or canonical_json_bytes(reparsed)
+            != canonical_json_bytes(stored["parsed_response"])
+        ):
+            fail(
+                "HASH_MISMATCH",
+                f"The response file bound by {head_record_name} was modified",
+            )
+        sources_by_id = {
+            source["source_id"]: source
+            for source in document["model_payload"]["materials"]["sources"]
+        }
+        # Re-validate the authentic response and prove the committed record
+        # is exactly what it yields — any tamper on either side fails closed.
+        parsed = closed_object(
+            reparsed, label="review response", keys=RESPONSE_TOP_KEYS
+        )
+        if parsed["task"] != REVIEW_TASK_ID:
+            fail(
+                "RUN_CORRUPT",
+                f"Review record {head_record_name} binds a response with the "
+                "wrong task",
+            )
+        checked = _check_review_judgments(parsed["dimensions"], rubric, sources_by_id)
+        if canonical_json_bytes(checked["dimensions"]) != canonical_json_bytes(
+            record["judgments"]
+        ):
+            fail(
+                "RUN_CORRUPT",
+                f"Review record {head_record_name} does not match its bound "
+                "response",
+            )
+        return {
+            "state": "valid",
+            "record": record,
+            "record_name": head_record_name,
+            "record_sha256": sha256_bytes((slot_path / head_record_name).read_bytes()),
+            "note": None,
+        }
+    responses_dir = slot_path / RESPONSES_DIRNAME
+    if not responses_dir.is_dir() or responses_dir.is_symlink():
+        return {
+            "state": "missing",
+            "record": None,
+            "record_name": None,
+            "record_sha256": None,
+            "note": None,
+        }
+    response_versions = _existing_versions(
+        responses_dir, pattern=RESPONSE_NAME_PATTERN, label="Review response"
+    )
+    if not response_versions:
+        return {
+            "state": "missing",
+            "record": None,
+            "record_name": None,
+            "record_sha256": None,
+            "note": None,
+        }
+    head_name, head = _load_head_response(slot_path, slot)
+    if head["parse_status"] != "ok" or not isinstance(head["parsed_response"], dict):
+        return {
+            "state": "invalid",
+            "record": None,
+            "record_name": None,
+            "record_sha256": None,
+            "note": f"the latest imported response {head_name} is not parseable",
+        }
+    return {
+        "state": "unvalidated",
+        "record": None,
+        "record_name": None,
+        "record_sha256": None,
+        "note": f"the latest imported response {head_name} has not been validated",
+    }
+
+
+def aggregate_review(
+    workspace_root: Path,
+    run_id: str,
+    idea_index: int,
+) -> dict[str, Any]:
+    """Merge the two slots' validated single-review records into a consensus.
+
+    Per dimension only two valid, same-verdict judgments form a consensus; a
+    shared negative stays negative, conflicts and abstentions stay
+    unresolved, and a missing or invalid slot is accounted separately — it
+    can never masquerade as complete_unresolved. Both original rationales are
+    preserved even under agreement so common errors remain checkable.
     """
     idea_index = _validate_idea_index(idea_index)
     workspace, context, target, rubric = _load_context_and_comparator(
         workspace_root, run_id
     )
     _, _, _, idea_entry = _load_idea_evidence(context, run_id, idea_index)
-
     idea_dir = _evaluation_idea_dir(workspace, run_id, idea_index)
     ai_path = _ai_dir(idea_dir)
     package_path = ai_path / PACKAGE_NAME
@@ -1242,49 +1985,135 @@ def validate_ai_review(
             f"{REQUEST_NAME} on disk does not match the pinned prompt render; "
             "re-run evaluation export-review-package",
         )
+    config = _load_review_config(workspace)
 
-    head_name, head = _load_head_response(ai_path)
-    if head["review_package_sha256"] != sha256_bytes(package_bytes):
-        fail(
-            "REVIEW_RESPONSE_PACKAGE_MISMATCH",
-            f"The head response {head_name} was imported against a different "
-            "review package",
+    package_sha = sha256_bytes(package_bytes)
+    slot_results: dict[str, dict[str, Any]] = {}
+    records: dict[str, dict[str, Any] | None] = {}
+    for slot in EVALUATOR_SLOTS:
+        result = _slot_record_state(
+            ai_path=ai_path,
+            slot=slot,
+            package_bytes=package_bytes,
+            document=document,
+            rubric=rubric,
+            run_id=run_id,
+            idea_index=idea_index,
+            idea_entry=idea_entry,
+            context=context,
         )
-    if head["prompt_version"] != document["prompt_version"]:
+        slot_results[slot] = result
+        records[slot] = result["record"]
+        if result["record"] is not None:
+            _check_config_binding(config, slot, result["record"]["evaluator"])
+    if all(result["record"] is None for result in slot_results.values()):
         fail(
-            "REVIEW_CONTRACT_MISMATCH",
-            f"The head response {head_name} was imported under another prompt "
-            "version",
-        )
-    if head["parse_status"] != "ok" or not isinstance(head["parsed_response"], dict):
-        fail(
-            "REVIEW_RESPONSE_INVALID_FORMAT",
-            f"The head response {head_name} is not a parseable review response",
-            parse_error=head["parse_error"],
+            "REVIEW_RESPONSE_NOT_FOUND",
+            "No validated single-review record in either evaluator slot",
         )
 
-    parsed = closed_object(
-        head["parsed_response"], label="review response", keys=RESPONSE_TOP_KEYS
-    )
-    if parsed["task"] != REVIEW_TASK_ID:
-        fail(
-            "INVALID_SCHEMA",
-            f"review response task must be '{REVIEW_TASK_ID}'",
+    judgments: dict[str, Any] = {}
+    refs_total = 0
+    for criterion_id, _verdicts in rubric.criteria:
+        sides: dict[str, Any] = {}
+        for slot in EVALUATOR_SLOTS:
+            record = records[slot]
+            sides[slot] = None if record is None else record["judgments"][criterion_id]
+        first, second = sides["primary"], sides["second"]
+        consensus_verdict = None
+        if first is None or second is None:
+            state = "incomplete_evaluator"
+        elif (
+            first["assessment_status"] == JUDGED_STATUS
+            and second["assessment_status"] == JUDGED_STATUS
+        ):
+            if first["proposed_verdict"] == second["proposed_verdict"]:
+                state = "consensus"
+                consensus_verdict = first["proposed_verdict"]
+            else:
+                state = "conflict"
+        else:
+            state = "abstained"
+        judgments[criterion_id] = {
+            "state": state,
+            "consensus_verdict": consensus_verdict,
+            "sides": sides,
+        }
+        refs_total += sum(
+            len(side["evidence_refs"]) for side in (first, second) if side is not None
         )
-    sources_by_id = {
-        source["source_id"]: source
-        for source in document["model_payload"]["materials"]["sources"]
+
+    if any(slot_results[slot]["state"] == "invalid" for slot in EVALUATOR_SLOTS):
+        coverage = "invalid"
+    elif any(slot_results[slot]["state"] != "valid" for slot in EVALUATOR_SLOTS):
+        coverage = "missing"
+    elif all(item["state"] == "consensus" for item in judgments.values()):
+        coverage = "complete_resolved"
+    else:
+        coverage = "complete_unresolved"
+
+    floor_dimensions = {
+        dimension: (
+            judgments[dimension]["consensus_verdict"]
+            if judgments[dimension]["state"] == "consensus"
+            else None
+        )
+        for dimension in QUALITY_FLOOR_PROBLEM_VERDICTS
     }
-    checked = _check_review_judgments(parsed["dimensions"], rubric, sources_by_id)
+    if any(
+        verdict == QUALITY_FLOOR_PROBLEM_VERDICTS[dimension]
+        for dimension, verdict in floor_dimensions.items()
+        if verdict is not None
+    ):
+        floor_state = "violated"
+    elif all(verdict is not None for verdict in floor_dimensions.values()):
+        floor_state = "clean"
+    else:
+        floor_state = "unresolved"
 
-    versions = _existing_versions(ai_path)
+    evaluators: dict[str, Any] = {}
+    for slot in EVALUATOR_SLOTS:
+        binding = _config_evaluator(config, slot)
+        result = slot_results[slot]
+        record = result["record"]
+        if record is None:
+            evaluators[slot] = {
+                "declared_provider": None,
+                "declared_model_id": None,
+                "model_family": binding["model_family"],
+                "record_file": None,
+                "record_sha256": None,
+                "state": result["state"],
+                "note": result["note"],
+            }
+        else:
+            evaluators[slot] = {
+                "declared_provider": record["evaluator"]["declared_provider"],
+                "declared_model_id": record["evaluator"]["declared_model_id"],
+                "model_family": binding["model_family"],
+                "record_file": f"{slot}/{result['record_name']}",
+                "record_sha256": result["record_sha256"],
+                "state": "valid",
+                "note": None,
+            }
+
+    consensus_dir = ai_path / CONSENSUS_DIRNAME
+    if consensus_dir.is_symlink():
+        fail("SYMLINK_FORBIDDEN", "The consensus directory is a symlink")
+    try:
+        consensus_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        detail = exc.strerror or str(exc)
+        fail("STORAGE_WRITE_FAILED", f"Cannot create consensus directory: {detail}")
+    _fsync_directory(consensus_dir)
+    versions = _existing_versions(consensus_dir)
     expected_supersedes = versions[-1][1] if versions else None
     new_seq = (versions[-1][0] + 1) if versions else 1
 
-    record: dict[str, Any] = {
-        "schema_version": EVALUATION_AI_REVIEW_RECORD_SCHEMA_VERSION,
+    record_document: dict[str, Any] = {
+        "schema_version": EVALUATION_AI_REVIEW_CONSENSUS_RECORD_SCHEMA_VERSION,
         "authoring_contract_version": EVALUATION_AUTHORING_CONTRACT_VERSION,
-        "record_kind": "single_ai_review",
+        "record_kind": "dual_ai_review_consensus",
         "run_id": run_id,
         "case_id": context.case_id,
         "seal_sha256": context.seal_sha256,
@@ -1296,64 +2125,351 @@ def validate_ai_review(
         "target_paper": document["target_paper"],
         "rubric_version": rubric.version,
         "prompt_version": document["prompt_version"],
-        "response_schema_version": document["response_schema_version"],
-        "review_package_sha256": sha256_bytes(package_bytes),
-        "review_request_sha256": head["review_request_sha256"],
-        "evaluator": {
-            "evaluator_slot": "primary",
-            "author_type": "AI",
-            "declared_provider": head["declared"]["provider"],
-            "declared_model_id": head["declared"]["model_id"],
-            "provenance": dict(head["provenance"]),
-            "response_file": f"{RESPONSES_DIRNAME}/{head_name}",
-            "response_sha256": head["response_sha256"],
-            "responded_at": head["declared"]["responded_at"],
-            "imported_at": head["imported_at"],
-            "imported_by": head["imported_by"],
-        },
-        "judgments": checked["dimensions"],
+        "review_package_sha256": package_sha,
+        "review_config_sha256": _config_sha256(workspace),
+        "coverage": coverage,
+        "evaluators": evaluators,
+        "judgments": judgments,
         "citation_verification": {
-            "refs_total": checked["refs_total"],
-            "refs_quote_verified": checked["refs_total"],
+            "refs_total": refs_total,
             "semantic_support_verification": "not_performed",
         },
+        "quality_floor": {
+            "dimensions": floor_dimensions,
+            "state": floor_state,
+        },
         "audit": {
-            "imported_at": head["imported_at"],
-            "imported_by": head["imported_by"],
-            "validated_at": _now(),
-            "validated_by": VALIDATED_BY_TOOL,
+            "aggregated_at": _now(),
+            "aggregated_by": AGGREGATED_BY_TOOL,
             "validation_result": "passed",
         },
         "supersedes": expected_supersedes,
     }
     _check_supersedes(
-        record["supersedes"],
+        record_document["supersedes"],
         expected_name=expected_supersedes,
-        idea_dir=ai_path,
+        idea_dir=consensus_dir,
         run_id=run_id,
         idea_index=idea_index,
     )
 
     version_name = f"v{new_seq:04d}.json"
-    card_bytes = _render_evidence_card(record, version_name)
-    card_html_bytes = _render_evidence_card_html(record, version_name)
-
-    record_bytes = canonical_json_bytes(record)
-    _write_bytes_once(ai_path / version_name, record_bytes, label=version_name)
-    _write_bytes_overwrite(ai_path / CARD_NAME, card_bytes, label=CARD_NAME)
+    card_bytes = _render_consensus_card(record_document, version_name)
+    card_html_bytes = _render_consensus_card_html(record_document, version_name)
+    record_bytes = canonical_json_bytes(record_document)
+    _write_bytes_once(consensus_dir / version_name, record_bytes, label=version_name)
     _write_bytes_overwrite(
-        ai_path / CARD_HTML_NAME, card_html_bytes, label=CARD_HTML_NAME
+        consensus_dir / CONSENSUS_CARD_NAME, card_bytes, label=CONSENSUS_CARD_NAME
+    )
+    _write_bytes_overwrite(
+        consensus_dir / CONSENSUS_CARD_HTML_NAME,
+        card_html_bytes,
+        label=CONSENSUS_CARD_HTML_NAME,
     )
 
     return {
-        "evidence_card": _ai_relpath(run_id, idea_index, CARD_NAME),
-        "evidence_card_html": _ai_relpath(run_id, idea_index, CARD_HTML_NAME),
+        "consensus_card": _ai_relpath(
+            run_id, idea_index, CONSENSUS_DIRNAME, CONSENSUS_CARD_NAME
+        ),
+        "consensus_card_html": _ai_relpath(
+            run_id, idea_index, CONSENSUS_DIRNAME, CONSENSUS_CARD_HTML_NAME
+        ),
+        "coverage": coverage,
         "idea_index": idea_index,
-        "record": _ai_relpath(run_id, idea_index, version_name),
+        "quality_floor_state": floor_state,
+        "record": _ai_relpath(run_id, idea_index, CONSENSUS_DIRNAME, version_name),
         "record_sha256": sha256_bytes(record_bytes),
-        "response_file": _ai_relpath(run_id, idea_index, RESPONSES_DIRNAME, head_name),
         "run_id": run_id,
-        "status": "validated",
+        "status": "aggregated",
         "supersedes": expected_supersedes,
         "version": version_name,
     }
+
+
+_COVERAGE_ZH = {
+    "complete_resolved": "complete_resolved（两位评审完成，七维全部形成共识）",
+    "complete_unresolved": "complete_unresolved（两位评审完成，但存在弃权或分歧）",
+    "invalid": "invalid（存在无效响应，不能视为完成）",
+    "missing": "missing（至少一位评审缺少已验证记录）",
+}
+_FLOOR_STATE_ZH = {
+    "violated": "violated（共识触及质量底线，负面结论按原样保留）",
+    "clean": "clean（五个底线维度全部形成共识且无问题判定）",
+    "unresolved": "unresolved（底线维度未全部形成共识；未决不等于通过）",
+}
+_DIMENSION_STATE_ZH = {
+    "consensus": "共识",
+    "conflict": "冲突（unresolved）",
+    "abstained": "弃权（unresolved）",
+    "incomplete_evaluator": "评审不完整（unresolved）",
+}
+
+
+def _slot_display_name(slot: str) -> str:
+    return "评审一（primary）" if slot == "primary" else "评审二（second）"
+
+
+def _render_side_lines(side: dict[str, Any] | None, indent: str = "- ") -> list[str]:
+    if side is None:
+        return [f"{indent}该侧缺少已验证评审记录"]
+    lines = []
+    status = side["assessment_status"]
+    if status == JUDGED_STATUS:
+        lines.append(f"{indent}建议 `{side['proposed_verdict']}`：{side['rationale']}")
+    else:
+        lines.append(
+            f"{indent}弃权（{INSUFFICIENT_EVIDENCE_STATUS}）：{side['rationale']}"
+        )
+    for ref in side["evidence_refs"]:
+        stance = "支持" if ref["stance"] == "supports" else "反驳"
+        lines.append(
+            f"{indent}  - 引用 [`{ref['source_id']}`] “{ref['quote']}” — {stance}论点："
+            f"{ref['claim']}（存在性已核验；语义支持未核验）"
+        )
+    if side["missing_information"]:
+        lines.append(f"{indent}  - 缺失信息：" + "；".join(side["missing_information"]))
+    return lines
+
+
+def _render_consensus_card(record: dict[str, Any], version_name: str) -> bytes:
+    lines: list[str] = []
+    lines.append("# AI 评审共识卡（双评审汇总）")
+    lines.append("")
+    lines.append(
+        f"绑定：run_id `{record['run_id']}` · idea_index "
+        f"{record['idea']['idea_index']} · case_id `{record['case_id']}`"
+    )
+    lines.append(
+        f"共识记录：`{version_name}`（schema `{record['schema_version']}`，"
+        f"authoring contract `{record['authoring_contract_version']}`）"
+    )
+    lines.append(f"Prompt 版本：`{record['prompt_version']}`")
+    lines.append(f"覆盖状态：{_COVERAGE_ZH[record['coverage']]}")
+    lines.append(f"质量底线：{_FLOOR_STATE_ZH[record['quality_floor']['state']]}")
+    lines.append("")
+    for slot in EVALUATOR_SLOTS:
+        evaluator = record["evaluators"][slot]
+        if evaluator["state"] == "valid":
+            lines.append(
+                f"- {_slot_display_name(slot)}：`{evaluator['declared_provider']}` / "
+                f"`{evaluator['declared_model_id']}`（model family "
+                f"`{evaluator['model_family']}`，声明值，程序未认证）"
+            )
+        else:
+            note = f"：{evaluator['note']}" if evaluator["note"] else ""
+            lines.append(
+                f"- {_slot_display_name(slot)}：无已验证记录（{evaluator['state']}"
+                f"{note}）"
+            )
+    lines.append("")
+    lines.append(
+        "> **证据限度**：本卡是两位来自不同 model family 的 AI 评审的共识汇总。"
+        "双评审与换位检查降低但不能消除共同错误、语义支持错判与材料范围外的污染；"
+        "一致负面保留为负面，弃权与分歧按原样保留为未决。本卡不构成科研质量证明、"
+        "官方分数或晋升指令。"
+    )
+    lines.append("")
+    lines.append("## 七维共识")
+    for criterion_id in _card_dimension_order(
+        {dim: item for dim, item in record["judgments"].items()}
+    ):
+        item = record["judgments"][criterion_id]
+        lines.append("")
+        if item["state"] == "consensus":
+            lines.append(f"### {criterion_id} — 共识 `{item['consensus_verdict']}`")
+        else:
+            lines.append(f"### {criterion_id} — {_DIMENSION_STATE_ZH[item['state']]}")
+        lines.append("")
+        for slot in EVALUATOR_SLOTS:
+            lines.append(f"- {_slot_display_name(slot)}：")
+            lines.extend(
+                "  " + line for line in _render_side_lines(item["sides"][slot])
+            )
+    lines.append("")
+    lines.append("## 质量底线（pre-registered）")
+    for dimension, verdict in record["quality_floor"]["dimensions"].items():
+        shown = f"共识 `{verdict}`" if verdict is not None else "未决"
+        lines.append(f"- {dimension}：{shown}")
+    lines.append("")
+    lines.append(
+        "未决维度不构成通过或否决；其影响的后续判断必须保持未决状态，"
+        "整体偏好不能覆盖质量底线。"
+    )
+    lines.append("")
+    lines.append("## 引用核验")
+    lines.append(
+        f"- 两侧引用共 {record['citation_verification']['refs_total']} 条，均通过逐字"
+        "存在性核验；引用与论点之间的语义支持关系未由程序核验。"
+    )
+    lines.append("")
+    return ("\n".join(lines)).encode("utf-8")
+
+
+def _render_consensus_card_html(record: dict[str, Any], version_name: str) -> bytes:
+    """Render the light-theme consensus card (self-contained, no scripts)."""
+
+    def esc(value: Any) -> str:
+        return _html_escape_module.escape(str(value), quote=True)
+
+    def refs_html(side: dict[str, Any] | None) -> str:
+        if side is None:
+            return ""
+        items = []
+        for ref in side["evidence_refs"]:
+            stance_cls = "sup" if ref["stance"] == "supports" else "con"
+            stance_label = "支持" if ref["stance"] == "supports" else "反驳"
+            items.append(
+                "<li>"
+                f'<span class="chip">{esc(ref["source_id"])}</span>'
+                f'<blockquote>“{esc(ref["quote"])}”</blockquote>'
+                f'<p class="claim"><span class="stance {stance_cls}">{stance_label}论点</span>'
+                f'{esc(ref["claim"])} <span class="verify">（存在性已核验；语义支持未核验）</span></p>'
+                "</li>"
+            )
+        return f'<ul class="refs">{"".join(items)}</ul>' if items else ""
+
+    dim_sections: list[str] = []
+    for criterion_id in _card_dimension_order(
+        {dim: item for dim, item in record["judgments"].items()}
+    ):
+        item = record["judgments"][criterion_id]
+        state = item["state"]
+        if state == "consensus":
+            verdict = item["consensus_verdict"]
+            tone = VERDICT_TONE.get(verdict, "neu")
+            badge = f'<span class="badge {tone}">{esc(verdict)}</span>'
+            heading = "共识"
+        else:
+            badge = '<span class="badge abst">unresolved</span>'
+            heading = _DIMENSION_STATE_ZH[state]
+        side_blocks: list[str] = []
+        for slot in EVALUATOR_SLOTS:
+            side = item["sides"][slot]
+            if side is None:
+                side_blocks.append(
+                    f'<div class="side"><p class="side-name">{esc(_slot_display_name(slot))}</p>'
+                    '<p class="digest">该侧缺少已验证评审记录</p></div>'
+                )
+                continue
+            if side["assessment_status"] == JUDGED_STATUS:
+                side_verdict = (
+                    f'<span class="badge {VERDICT_TONE.get(side["proposed_verdict"], "neu")}">'
+                    f'{esc(side["proposed_verdict"])}</span>'
+                )
+                side_rationale = esc(side["rationale"])
+            else:
+                side_verdict = '<span class="badge abst">弃权</span>'
+                side_rationale = esc(side["rationale"])
+            missing = ""
+            if side["missing_information"]:
+                missing = (
+                    '<p class="missing-inline">缺少材料：'
+                    + "；".join(esc(item_) for item_ in side["missing_information"])
+                    + "</p>"
+                )
+            side_blocks.append(
+                f'<div class="side"><p class="side-name">{esc(_slot_display_name(slot))} {side_verdict}</p>'
+                f'<p class="rationale">{side_rationale}</p>'
+                + refs_html(side)
+                + missing
+                + "</div>"
+            )
+        dim_sections.append(
+            '<article class="dim">'
+            "<h3>"
+            f'<span class="zh">{esc(DIMENSION_ZH_LABELS.get(criterion_id, criterion_id))}</span>'
+            f'<span class="en">{esc(criterion_id)}</span>'
+            f"{badge}"
+            f'<span class="state-label">{esc(heading)}</span>'
+            "</h3>" + "".join(side_blocks) + "</article>"
+        )
+
+    floor_items = "".join(
+        f"<li>{esc(dimension)}："
+        + (f"共识 <code>{esc(verdict)}</code>" if verdict is not None else "未决")
+        + "</li>"
+        for dimension, verdict in record["quality_floor"]["dimensions"].items()
+    )
+    evaluator_rows = []
+    for slot in EVALUATOR_SLOTS:
+        evaluator = record["evaluators"][slot]
+        if evaluator["state"] == "valid":
+            evaluator_rows.append(
+                (
+                    _slot_display_name(slot),
+                    f"<code>{esc(evaluator['declared_provider'])}</code> / "
+                    f"<code>{esc(evaluator['declared_model_id'])}</code> · family "
+                    f"<code>{esc(evaluator['model_family'])}</code>（声明值，程序未认证）",
+                )
+            )
+        else:
+            note = f"：{esc(evaluator['note'])}" if evaluator["note"] else ""
+            evaluator_rows.append(
+                (
+                    _slot_display_name(slot),
+                    f"无已验证记录（{esc(evaluator['state'])}{note}）",
+                )
+            )
+    meta_rows = [
+        ("run_id", f'<code>{esc(record["run_id"])}</code>'),
+        (
+            "idea_index / case_id",
+            f'{esc(record["idea"]["idea_index"])} · <code>{esc(record["case_id"])}</code>',
+        ),
+        (
+            "共识记录",
+            f'<code>{esc(version_name)}</code>（schema {esc(record["schema_version"])}，'
+            f'authoring contract {esc(record["authoring_contract_version"])}）',
+        ),
+        ("Prompt 版本", f'<code>{esc(record["prompt_version"])}</code>'),
+        ("覆盖状态", esc(_COVERAGE_ZH[record["coverage"]])),
+        ("质量底线", esc(_FLOOR_STATE_ZH[record["quality_floor"]["state"]])),
+        *evaluator_rows,
+        (
+            "程序汇总",
+            f'<code>{esc(record["audit"]["aggregated_by"])}</code> 于 '
+            f'{esc(record["audit"]["aggregated_at"])}',
+        ),
+    ]
+    meta_html = "".join(
+        f"<div><dt>{esc(label)}</dt><dd>{value}</dd></div>"
+        for label, value in meta_rows
+    )
+    document = (
+        "<!DOCTYPE html>\n"
+        '<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>AI 评审共识卡 — idea {esc(record['idea']['idea_index'])} · "
+        f"run {esc(record['run_id'][:8])}…</title>\n"
+        f"<style>{_CARD_CSS}</style>\n"
+        "<style>.side{border-top:1px dashed var(--line);padding-top:10px;margin-top:10px}"
+        ".side-name{margin:0 0 4px;font-weight:700;font-size:13.5px}"
+        ".state-label{font-size:12px;color:var(--muted);font-weight:600}</style>\n"
+        "</head>\n<body>\n<main>\n"
+        '<div class="card">\n'
+        '<header>\n<p class="kind">AI Review Consensus Card · 双评审汇总</p>\n'
+        "<h1>双评审七维共识卡</h1>\n"
+        f'<dl class="meta">{meta_html}</dl>\n'
+        '<p class="limit"><strong>证据限度</strong>：本卡是两位不同 model family 的 '
+        "AI 评审的共识汇总。双评审与换位检查降低但不能消除共同错误、语义支持错判与"
+        "材料范围外的污染；一致负面保留为负面，弃权与分歧按原样保留为未决。"
+        "本卡不构成科研质量证明、官方分数或晋升指令。</p>\n"
+        "</header>\n"
+        "<section>\n<h2>七维共识</h2>\n"
+        '<p class="legend">颜色仅为阅读辅助（绿=支持面、黄=中间、红=触及质量底线、蓝=方向中立），'
+        "判断语义以 rubric 枚举定义为准；unresolved 徽标表示该维度无共识。</p>\n"
+        + "".join(dim_sections)
+        + "</section>\n"
+        "<section>\n<h2>质量底线（pre-registered）</h2>\n"
+        f'<ul class="digest">{floor_items}</ul>'
+        '<p class="digest">未决维度不构成通过或否决；整体偏好不能覆盖质量底线。</p>'
+        "</section>\n"
+        "<section>\n<h2>引用核验</h2>\n"
+        f'<p class="digest">两侧引用共 {record["citation_verification"]["refs_total"]} 条，'
+        "均通过逐字存在性核验；引用与论点之间的语义支持关系未由程序核验。</p>\n"
+        "</section>\n"
+        "<footer>由 ai_scientist.ideation.ai_review.aggregate_review 从已验证记录"
+        f"确定性渲染 · {esc(version_name)} · 本卡不是 Robert 的判断，也不是晋升依据。</footer>\n"
+        "</div>\n</main>\n</body>\n</html>\n"
+    )
+    return document.encode("utf-8")
