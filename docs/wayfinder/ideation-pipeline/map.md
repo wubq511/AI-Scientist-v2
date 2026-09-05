@@ -12,6 +12,8 @@ status: open
 
 ## Notes
 
+- **当前下一步（2026-09-06）**：[Validate max-reasoning canary and completion limits](tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md)。Robert 已直接指定 max，取消 high/max 比较；035 改为新 prompt + max 的 12-case 单配置 Canary 验收。无需等新的 reasoning-effort 选型，036 后置。
+
 - 仅限规划：解决本 map 期间不实现 destination 交付物。
 - 认领 ticket 前先读 `AGENTS.md`、`CONTEXT.md`、相关 work logs 和 `docs/agents/issue-tracker.md`。
 - 人类决策用 `wayfinder`、`grilling`、`domain-modeling`；primary-source 事实用 `research`。

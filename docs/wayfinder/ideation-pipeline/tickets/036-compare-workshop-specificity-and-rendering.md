@@ -14,3 +14,5 @@ blocked_by:
 ## Notes
 
 - 2026-08-30 [Define canaries and scale gates](028-define-canaries-and-scale-gates.md) 已定：本票的变体比较裁剪为 **3 case 子集的变体臂**（baseline 臂复用 035 胜方的既有 run），计入 canary 阶段 ¥30 硬上限，位于执行优先队列队尾、预算紧张时最先被截断（见 `docs/agents/canary-and-scale-gates.md` v1.0）。
+
+- 2026-09-06：Robert 已直接指定 `reasoning_effort=max`，035 不再产生 high/max 胜方。本票若后续执行，基线来自相同新 prompt + max 配置下的 Canary 结果；旧 high 结果不自动视为可比基线。本票仍在执行队尾，本决定不启动 Workshop 变体比较。

@@ -1,9 +1,29 @@
 ---
-title: Compare DeepSeek Reasoning Effort on a Governed Canary
+title: Validate the Cross-Domain Canary with Max Reasoning
 label: ready-for-agent
 ---
 
-# DeepSeek Reasoning Effort Canary 比较规格
+# Max reasoning Canary 执行规格
+
+## 当前执行约定（2026-09-06，覆盖下方历史比较规格）
+
+Robert 明确决定「不要考虑值不值了，直接用 max」。取消原 12 对/24 runs 的 high/max 选型，以及后续提出但未执行的四对筛选；不再用成本收益比较决定 reasoning effort。
+
+- **目标**：用选定配置完成共享 12-case 跨领域 Canary，交付可回链的 idea 与评审结果，为下一批运行和面试展示提供直接依据。
+- **固定配置**：生成 prompt `cross-domain-v1`，`reasoning_effort=max`，`max_tokens=32768`；其余已批准的模型、Workshop、Corpus、retriever 与 generation/reflection budgets 不因本决定改变。32768 是暂用值，观察真实截断，不额外做参数搜索。
+- **工作量**：每个 case 一个新配置 Ideation Run，基础计划 12 runs，无 high 对照臂。run 不等于一次 provider 调用，执行者仍须按实际轮次与可能重试计算费用。历史 high runs 不替代 max coverage；已批准的 selection/Workshop/Corpus 可复用，保留 prior-use/diagnostic 标识。
+- **评审**：复用现有双 AI 单条评审、证据卡与覆盖率；没有两种生成配置需要比较，不运行 high/max pair 评审。只使用已注册的有效评审配置。
+- **先后顺序**：确认当前已批准的 12-case manifests 与新执行配置 → 按现有预算/有效授权生成并评审 → 汇总跨领域质量、失败和截断 → 给出扩量与交付建议。旧批次的授权只有明确覆盖新配置时才有效；本决定不扩大既有预算，也不要求重新批准已经覆盖的操作。
+- **费用和速度**：照常记录，用于安排运行与预算，不再作为选回 high 的理由。不要静默降低 reasoning effort。
+- **验收**：各已执行 case 的 seal、证据验证、export、双 AI 评审可回链；汇总成功、失败、未决、引用支撑、`finish_reason`、截断、延迟与成本。没有测过的高低档优劣不作结论。
+- **截断处理**：若 32768 出现实质截断，记录原因并针对 completion limit 提出具体处理；不改回 high，不因为 max 已被指定就把截断输出当作成功。
+- **票据状态**：035 保持 open，职责改为 max Canary 验收；reasoning-effort 选择不再开放。036 暂在队尾，若以后执行，使用可比的新 prompt + max Canary 结果作基线，不再等待“035 胜方”。
+- **本次交付边界**：本会话仅同步方案与指令，没有更改 runtime 默认、执行脚本或调用模型。执行 agent 在准备运行时显式指定 max。
+
+## 历史比较规格（已撤回，不执行）
+
+以下保留 2026-09-04 的比较方案与批准历程，仅供追溯。其 high 对照、24-run matrix、胜负/性价比阈值、人工独占评审与当时跨会话约束不构成当前执行指令。
+
 
 > **Execution withdrawn (2026-09-04):** 该规格绑定的 Promotion Proposal 001 已在零 paid runs、零实际支出时撤回。当前 production prompt 对跨领域 IdeaBench 存在 ML 目标错配；在 [domain-neutral Prompt Profile 资格验证](cross-domain-ideation-prompt-spec.md)通过 Promotion Gate、开启新 Design Epoch 并取得新的 reasoning-effort Plan Gate 前，不得执行本文的 24-run matrix 或复用其 commands。
 

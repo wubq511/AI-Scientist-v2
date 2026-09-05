@@ -1,13 +1,19 @@
 # Canary 与扩量 Gate 契约
 
-版本 v1.2 · 2026-09-04 · 来源 [跨领域 Ideation Prompt 资格验证规格](cross-domain-ideation-prompt-spec.md)、ticket [Compare DeepSeek reasoning effort and completion limits](../wayfinder/ideation-pipeline/tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md) 与规范 [DeepSeek Reasoning Effort Canary 比较规格](deepseek-reasoning-effort-canary-spec.md)（Robert 于 2026-09-04 批准先资格验证 domain-neutral Prompt Profile、暂停并撤回旧 035 Plan Gate；v1.1 同日批准 Canary 算术修正与选择语义；首版 v1.0 于 2026-08-30 经 ticket 028 批准）。
+历史版本 v1.2 · 2026-09-04 · 来源 [跨领域 Ideation Prompt 资格验证规格](cross-domain-ideation-prompt-spec.md)、ticket [Compare DeepSeek reasoning effort and completion limits](../wayfinder/ideation-pipeline/tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md) 与规范 [DeepSeek Reasoning Effort Canary 比较规格](deepseek-reasoning-effort-canary-spec.md)（Robert 于 2026-09-04 批准先资格验证 domain-neutral Prompt Profile、暂停并撤回旧 035 Plan Gate；v1.1 同日批准 Canary 算术修正与选择语义；首版 v1.0 于 2026-08-30 经 ticket 028 批准）。
 
 本契约定义从「零真实调用」到「终波」的执行阶段、Canary 集的选择规则、成本与质量预算、失败处理，以及打开扩量 gate 的全部条件。修订规则同 027 验证矩阵：任何修订 = 新版本号 + Robert 批准。
+
+## 当前执行修订（v1.3 · 2026-09-06）
+
+Robert 已采用 `cross-domain-v1`（Proposal 002，post-evidence-adoption），并明确指定后续生成使用 `reasoning_effort=max`，无需再比较 high/max 或衡量选型性价比。此修订取代 v1.2 中“先取得新的 reasoning-effort proposal/胜方”的执行前提；selection 规则与既有实际预算不因该决定重置。
+
+当前工作为单配置 12-case Canary，基础 12 runs；历史 high runs 不替代 max coverage。复用已批准输入与现有双 AI 单条评审，无 reasoning-effort pair 评审。completion limit 暂留 32768 并观察真实截断。评审来源、费用口径及合法批内预授权沿用各自后续已批准修订；本段不恢复已废弃的人工独占评审或仅交互式授权限制。
 
 ## 阶段结构（三波）
 
 1. **smoke**：1 个 case、单次 Ideation Run，晃出 adapter、估价偏差、证据链落盘的首跑缺陷。
-2. **canary**：12 个 case；先从中取固定四例资格验证 domain-neutral Prompt Profile，通过 Promotion Gate 后才允许在新 Design Epoch 上承载新的 035/036 比较。
+2. **canary**：12 个 case；Prompt Profile 采用决定已完成，当前用 `cross-domain-v1` + `max` 做单配置运行与质量验收；036 为后置可选比较。
 3. **终波**：规模不在本契约锁死，由扩量 gate 按面试叙事需要与 canary 实测成本决定（预期量级 ~50）。**面试任务不要求全量 237**；系统对 237 的支持与预处理验证义务由 009 独立成立，不以模型跑全量为前提。
 
 ## Canary 集选择规则 (v1.1)
@@ -35,7 +41,7 @@
 
 - canary 阶段（smoke + canary 上的一切真实调用，含 035/036 与失败重跑）**¥30 硬上限**，低谷期执行。
 - 031 的逐 run 估价、逐 run 批准在 smoke 与 canary 阶段不变；smoke 首跑得出实测单 run 成本后，后续每次估价按实测重校准。
-- **执行优先队列**：smoke(已完成 1) → Proposal 002 domain-neutral Prompt Profile qualification（4 对/8 runs）→ Prompt Promotion Gate → 新 Design Epoch 的 reasoning-effort proposal（若另获 Plan Gate）→ 失败重跑 → 036 变体臂。Proposal 001 的旧 035 24-run matrix 已撤回，不得执行或计为新 epoch evidence。
+- **执行优先队列**：smoke 与 Proposal 002 已完成 → 新配置 max 单臂 12-case Canary（035）→ 必要失败处理 → 036（若另行执行）或扩量交付。Proposal 001 的旧 035 24-run matrix 继续撤回，不得执行或计为 max evidence。
 - 接近上限时从队尾截断（036 最先被牺牲）。预算耗尽导致 gate 要求的 case 未完成时，不擅自追加预算，回到 Robert 决定追加或收缩 Canary。
 - 终波预算包络不设死数：在扩量 gate 处按 canary 实测成本估算，由 Robert 连同终波规模一并批准。
 
