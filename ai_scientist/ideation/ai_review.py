@@ -42,6 +42,7 @@ claim of scientific ground truth; pairwise review is delivered by
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import html as _html_escape_module
 import json
 from pathlib import Path
@@ -699,7 +700,9 @@ def _check_review_config(
     return config
 
 
-def register_review_config(workspace_root: Path, config_path: Path) -> dict[str, Any]:
+def register_review_config(
+    workspace_root: Path, config_path: Path, *, supersede: bool = False
+) -> dict[str, Any]:
     """Validate and register the write-once review execution config.
 
     The config binds the two evaluator slots (provider, exact model id, and
@@ -707,6 +710,11 @@ def register_review_config(workspace_root: Path, config_path: Path) -> dict[str,
     is a declared operator input: the program cannot verify the family
     classification, so it enforces only that the declared values differ and
     records them verbatim.
+
+    A second registration fails closed with ``ARTIFACT_EXISTS`` unless
+    ``supersede`` is set: the amendment path archives the existing config
+    bytes next to the new registration (never deleted) so every evaluator
+    binding change stays loud and auditable.
     """
     workspace = workspace_root.resolve(strict=True)
     if config_path.is_symlink() or not config_path.is_file():
@@ -723,8 +731,24 @@ def register_review_config(workspace_root: Path, config_path: Path) -> dict[str,
         detail = exc.strerror or str(exc)
         fail("STORAGE_WRITE_FAILED", f"Cannot create evaluations root: {detail}")
     target = root / CONFIG_NAME
+    archived: dict[str, str] | None = None
+    if target.is_file():
+        if not supersede:
+            fail(
+                "ARTIFACT_EXISTS",
+                f"{CONFIG_NAME} is already registered; pass --supersede to "
+                "archive it and register the amended config",
+            )
+        archive_name = f"ai-review-config-archived-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+        archive_path = root / archive_name
+        target.rename(archive_path)
+        _fsync_directory(root)
+        archived = {
+            "file": EVALUATION_ROOT_RELPATH.joinpath(archive_name).as_posix(),
+            "sha256": sha256_bytes(archive_path.read_bytes()),
+        }
     _write_bytes_once(target, canonical_json_bytes(checked), label=CONFIG_NAME)
-    return {
+    result = {
         "config": EVALUATION_ROOT_RELPATH.joinpath(CONFIG_NAME).as_posix(),
         "config_sha256": sha256_bytes(canonical_json_bytes(checked)),
         "evaluators": {
@@ -737,6 +761,9 @@ def register_review_config(workspace_root: Path, config_path: Path) -> dict[str,
         },
         "status": "registered",
     }
+    if archived is not None:
+        result["archived_config"] = archived
+    return result
 
 
 def _config_registered(workspace: Path) -> bool:

@@ -123,6 +123,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Register the write-once review execution config (two distinct-family evaluators).",
     )
     ev_register_config.add_argument("--config-file", required=True)
+    ev_register_config.add_argument(
+        "--supersede",
+        action="store_true",
+        help="Archive the existing config (never deleted) and register the amended one.",
+    )
     ev_aggregate_review = evaluation_actions.add_parser(
         "aggregate-review",
         help="Merge both evaluator slots' validated records into a dual-review consensus record and card.",
@@ -643,7 +648,9 @@ def _run_evaluation_register_review_config(
 
     root = workspace_root or Path.cwd()
     try:
-        result = register_review_config(root, Path(args.config_file))
+        result = register_review_config(
+            root, Path(args.config_file), supersede=bool(args.supersede)
+        )
     except IdeationInputError as exc:
         error = {
             "code": exc.code,

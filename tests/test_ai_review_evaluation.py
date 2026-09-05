@@ -1375,6 +1375,40 @@ def test_register_review_config_rejects_unapproved_prompt_versions(
     assert exc.value.code == "REVIEW_CONTRACT_MISMATCH"
 
 
+def test_register_review_config_supersede_archives_previous(
+    tmp_path: Path,
+) -> None:
+    """A second registration fails closed, but --supersede archives the
+    existing bytes next to the new registration so every evaluator-binding
+    change stays loud and auditable (never deleted)."""
+    workspace = _setup_review_workspace(tmp_path)
+    _register_config(workspace)
+    config_path = workspace / "artifacts/evaluations" / CONFIG_NAME
+    original_sha = sha256_bytes(config_path.read_bytes())
+
+    amended = json.loads(config_path.read_text(encoding="utf-8"))
+    for entry in amended["evaluators"]:
+        if entry["slot"] == "second":
+            entry["model_id"] = "other-model-10"
+    amended_path = workspace / "amended.json"
+    amended_path.write_bytes(canonical_json_bytes(amended))
+
+    with pytest.raises(IdeationInputError) as exc:
+        register_review_config(workspace, amended_path)
+    assert exc.value.code == "ARTIFACT_EXISTS"
+    assert sha256_bytes(config_path.read_bytes()) == original_sha
+
+    result = register_review_config(workspace, amended_path, supersede=True)
+    assert result["status"] == "registered"
+    assert result["archived_config"]["sha256"] == original_sha
+    archived = workspace / result["archived_config"]["file"]
+    assert archived.is_file()
+    assert sha256_bytes(archived.read_bytes()) == original_sha
+    assert json.loads(
+        config_path.read_text(encoding="utf-8")
+    )["evaluators"][1]["model_id"] == "other-model-10"
+
+
 def test_loaded_config_tolerates_older_prompt_versions(tmp_path: Path) -> None:
     """Registration pins the current prompt versions; loading enforces the
     closed schema only. A mid-session template revision must not brick
