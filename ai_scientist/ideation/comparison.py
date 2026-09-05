@@ -52,6 +52,7 @@ from .retrieval import RETRIEVAL_POLICY_VERSION
 from .run_store import RunStore
 from .schema import case_id as parse_case_id
 from .schema import closed_object, nonempty_string, sha256 as parse_sha256
+from .schema import timestamp
 
 COMPARISON_SCHEMA_VERSION = "prompt-comparison-v1.0.0"
 COMPARISON_SPEC_VERSION = "cross-domain-ideation-prompt-v1"
@@ -132,6 +133,10 @@ QUARANTINE_REASON_ZERO_FINALIZED_IDEA = "ZERO_FINALIZED_IDEA"
 VERDICT_SCHEMA_VERSION = "comparison-pair-verdict-v1.1.0"
 REDUCTION_SCHEMA_VERSION = "comparison-reduction-v1.0.0"
 RUN_RESULT_SCHEMA_VERSION = "comparison-run-result-v1.0.0"
+# Ticket 03: the comparison-facing AI verdict document (authorship=AI, in
+# anonymous content space) recorded in the vault's ai-verdicts/ channel.
+AI_VERDICT_SCHEMA_VERSION = "comparison-ai-verdict-v1.0.0"
+EVALUATION_PROTOCOL_GATE_SCHEMA_VERSION = "comparison-evaluation-protocol-gate-v1.0.0"
 
 DEFAULT_PROMPT_COMPARISON_REAPPROVAL_THRESHOLD_CNY = Decimal("5.00")
 DEFAULT_COMPARISON_PACKAGE_DIR = (
@@ -3047,9 +3052,16 @@ def ingest_comparison_result(
             "The sanitized export belongs to another case",
         )
 
-    # 4. Evaluation Artifact coverage (VM-QUAL-01 semantics).
-    coverage = _evaluation_coverage_for_run(workspace, run_id)
-    if not coverage:
+    # 4. Evaluation coverage. Two explicit version branches (ticket 03): the
+    # v1 human artifact (VM-QUAL-01 semantics, unchanged) or the registered
+    # evaluation protocol's AI dual-review coverage. Missing and invalid AI
+    # coverage never ingest; complete_resolved and complete_unresolved both
+    # ingest (unresolved abstentions/conflicts continue the matrix but never
+    # pass a quality gate — that is enforced by the reducer's verdict-side
+    # floor gates, not here). The channel descriptor itself is enforced here
+    # (fail closed on None) and consumed by the reducer through the verdict
+    # documents' authorship; the per-run ingestion keeps its boolean gate.
+    if _evaluation_coverage_for_run(workspace, run_id) is None:
         fail(
             "EVALUATION_ARTIFACT_MISSING",
             "The comparison run lacks a complete Evaluation Artifact",
@@ -3095,22 +3107,107 @@ def _sealed_idea_count(seal: dict[str, Any]) -> int:
     return count
 
 
-def _evaluation_coverage_for_run(workspace: Path, run_id: str) -> bool:
-    """Deterministic VM-QUAL-01 style check: one covered idea minimum."""
+def _evaluation_coverage_for_run(workspace: Path, run_id: str) -> dict[str, Any] | None:
+    """Deterministic evaluation-coverage decision for one comparison run.
+
+    Returns the evaluation channel descriptor, or None when the run may not
+    ingest. Two explicit version branches:
+
+    - v1 human: the historical VM-QUAL-01 check (one schema-valid finalized
+      Evaluation Artifact heading the supersedes chain) — the
+      ``evaluation_artifact_v1`` channel.
+    - v2 AI dual review (registered protocol): the per-idea AI coverage over
+      the sealed inventory. ``missing`` and ``invalid`` fail closed here;
+      ``complete_resolved`` and ``complete_unresolved`` both ingest, carrying
+      the per-idea quality floor state for the reducer's floor gates — the
+      ``evaluation_artifact_v2_ai`` channel. A run mixing both channels
+      fails closed: one scoring ruler per matrix.
+    """
+    from .ai_review import list_ai_review_coverage
+    from .evaluation import list_evaluation_coverage
+
+    human = _human_coverage_for_run(workspace, run_id)
+    ai = _ai_coverage_for_run(workspace, run_id)
+    if human is not None and ai is not None:
+        fail(
+            "EVALUATION_CHANNEL_CONFLICT",
+            "The run carries both a v1 human Evaluation Artifact and AI "
+            "dual-review coverage; one matrix uses one evaluation protocol",
+            run_id=run_id,
+        )
+    if human is not None:
+        return human
+    if ai is not None:
+        return ai
+    return None
+
+
+def _human_coverage_for_run(workspace: Path, run_id: str) -> dict[str, Any] | None:
+    """The v1 human branch: covered/draft_only/missing over the artifact chain.
+
+    None means "not present on the v1 channel" in the channel-conflict sense:
+    draft_only and missing ideas are reported but do not ingest (kept as the
+    historical boolean behavior).
+    """
     from .evaluation import list_evaluation_coverage
 
     try:
         coverage = list_evaluation_coverage(workspace)
     except IdeationInputError:
-        return False
+        return None
     for run_entry in coverage.get("runs", []):
         if run_entry.get("run_id") != run_id:
             continue
         if run_entry.get("status") != "evaluable":
-            return False
+            return None
         ideas = run_entry.get("ideas", [])
-        return any(idea.get("state") == "covered" for idea in ideas)
-    return False
+        if any(idea.get("state") == "covered" for idea in ideas):
+            return {"channel": "evaluation_artifact_v1", "coverage": "covered"}
+        return None
+    return None
+
+
+def _ai_coverage_for_run(workspace: Path, run_id: str) -> dict[str, Any] | None:
+    """The v2 AI branch: consensus coverage per idea with the quality floor.
+
+    A run participates on this channel only when at least one finalized idea
+    carries complete AI coverage (resolved or unresolved) and none of its
+    ideas is invalid; a merely ``unaggregated`` idea (both slots valid, no
+    consensus record) fails closed as missing — the honest summary step is
+    part of the protocol, not optional bookkeeping.
+    """
+    from .ai_review import list_ai_review_coverage
+
+    try:
+        ai_coverage = list_ai_review_coverage(workspace)
+    except IdeationInputError:
+        return None
+    for run_entry in ai_coverage.get("runs", []):
+        if run_entry.get("run_id") != run_id:
+            continue
+        if run_entry.get("status") != "evaluable":
+            return None
+        ideas = run_entry.get("ideas", [])
+        if any(idea.get("state") == "invalid" for idea in ideas):
+            fail(
+                "EVALUATION_ARTIFACT_INVALID",
+                "The comparison run's AI review coverage is invalid and "
+                "cannot ingest",
+                run_id=run_id,
+            )
+        complete = [
+            idea for idea in ideas if idea.get("state", "").startswith("complete_")
+        ]
+        if complete:
+            floors = {idea.get("quality_floor", {}).get("state") for idea in complete}
+            return {
+                "channel": "evaluation_artifact_v2_ai",
+                "coverage": sorted({idea["state"] for idea in complete})[0],
+                "idea_states": [idea["state"] for idea in ideas],
+                "quality_floor_states": sorted(str(state) for state in floors),
+            }
+        return None
+    return None
 
 
 # ==========================================================================
@@ -3196,6 +3293,282 @@ def verdict_document(verdict: PairVerdict, *, packet_sha256: str) -> dict[str, A
         "unjustified_ml_intrusion": verdict.unjustified_ml_intrusion,
         "verdict": verdict.verdict,
     }
+    return document
+
+
+_AI_VERDICT_KEYS = {
+    "authorship",
+    "case_id",
+    "content_space",
+    "recorded_at",
+    "schema_version",
+}
+_CONTENT_SPACE_KEYS = {
+    "arm_content_1",
+    "arm_content_2",
+    "domain_method_fit",
+    "overall_preference",
+    "quality_floor_content_1",
+    "quality_floor_content_2",
+    "unjustified_ml_intrusion",
+}
+_ARM_KEYS = {"idea_index", "idea_sha256", "run_id"}
+_AUTHORSHIP_KEYS = {
+    "kind",
+    "pair_id",
+    "review_config_sha256",
+    "verdict_idea_index",
+    "verdict_run_id",
+}
+
+
+def validate_ai_verdict_document(document: dict[str, Any]) -> dict[str, Any]:
+    """Closed validation of one vault AI verdict (content-space document).
+
+    `overall_preference` ∈ {content_1, content_2, tie}; `domain_method_fit`
+    ∈ {content_1, content_2, tie}; `unjustified_ml_intrusion` ∈ {content_1,
+    content_2, equal}. The quality-floor states are the consensus-record
+    vocabulary; anything other than `clean` blocks the reducer's floor gate
+    for that arm.
+    """
+    checked = closed_object(document, label="AI verdict", keys=_AI_VERDICT_KEYS)
+    if checked["schema_version"] != AI_VERDICT_SCHEMA_VERSION:
+        fail(
+            "INVALID_VERDICT",
+            "Unsupported AI verdict schema_version",
+            schema_version=checked["schema_version"],
+        )
+    parse_case_id(checked["case_id"])
+    content = closed_object(
+        checked["content_space"],
+        label="AI verdict content_space",
+        keys=_CONTENT_SPACE_KEYS,
+    )
+    preference = content["overall_preference"]
+    if preference not in ("content_1", "content_2", "tie"):
+        fail(
+            "INVALID_VERDICT",
+            "The AI verdict overall_preference is not in the closed content enum",
+            value=preference,
+        )
+    fit = content["domain_method_fit"]
+    if fit not in ("content_1", "content_2", "tie"):
+        fail(
+            "INVALID_VERDICT",
+            "The AI verdict domain_method_fit is not in the closed content enum",
+            value=fit,
+        )
+    intrusion = content["unjustified_ml_intrusion"]
+    if intrusion not in ("content_1", "content_2", "equal"):
+        fail(
+            "INVALID_VERDICT",
+            "The AI verdict unjustified_ml_intrusion is not in the closed content enum",
+            value=intrusion,
+        )
+    for state in (
+        content["quality_floor_content_1"],
+        content["quality_floor_content_2"],
+    ):
+        if state not in ("clean", "unresolved", "violated", "not_evaluated"):
+            fail(
+                "INVALID_VERDICT",
+                "The AI verdict carries an unknown quality-floor state",
+                value=state,
+            )
+    for arm_name in ("arm_content_1", "arm_content_2"):
+        closed_object(content[arm_name], label=f"AI verdict {arm_name}", keys=_ARM_KEYS)
+    authorship = closed_object(
+        checked["authorship"], label="AI verdict authorship", keys=_AUTHORSHIP_KEYS
+    )
+    if authorship["kind"] != "ai_pair_reduction":
+        fail(
+            "INVALID_VERDICT",
+            "The AI verdict authorship must be an AI pair reduction",
+            kind=authorship["kind"],
+        )
+    if not isinstance(authorship["pair_id"], str) or not authorship["pair_id"]:
+        fail("INVALID_VERDICT", "The AI verdict lacks its pair_id binding")
+    if (
+        not isinstance(authorship["review_config_sha256"], str)
+        or len(authorship["review_config_sha256"]) != 64
+    ):
+        fail(
+            "INVALID_VERDICT",
+            "The AI verdict lacks its review-config hash binding",
+        )
+    timestamp(checked["recorded_at"], label="AI verdict recorded_at")
+    return checked
+
+
+def ai_verdict_to_display(
+    ai_verdict: dict[str, Any],
+    *,
+    baseline_run_id: str,
+    challenger_run_id: str,
+    mapping: BlindPairMapping,
+) -> dict[str, Any]:
+    """Project a content-space AI verdict onto the comparison display arms.
+
+    The comparison packet's display side follows the frozen blind mapping:
+    display arm A holds the run whose profile id is `mapping.arm_a_profile_id`
+    (baseline or challenger), and the packet was built from exactly the two
+    sealed runs this pair ingested. The AI verdict carries its anonymous
+    content-space preference (content_1/content_2 plus each arm's run_id
+    binding), so the projection verifies the run bindings against the ingested
+    facts, then emits the same closed display-side enums a human verdict
+    carries — the reducer's pre-registered gates stay byte-identical.
+
+    The quality-floor states move per arm: a floor state is attached to the
+    run the AI consensus bound it to, and the vault document exposes them as
+    `rubric_floor_baseline` / `rubric_floor_challenger` for the floor gate.
+    """
+    content = validate_ai_verdict_document(ai_verdict)["content_space"]
+    arm_run_ids = {
+        "content_1": content["arm_content_1"]["run_id"],
+        "content_2": content["arm_content_2"]["run_id"],
+    }
+    if sorted(arm_run_ids.values()) != sorted([baseline_run_id, challenger_run_id]):
+        fail(
+            "IDENTITY_MISMATCH",
+            "The AI verdict's arm run bindings differ from the ingested pair",
+            content_run_ids=sorted(arm_run_ids.values()),
+        )
+    # Which display arm does each anonymous content occupy? The packet's
+    # arm_a holds the profile that the blind mapping placed there; the run
+    # on that side is known from the ingested facts.
+    arm_a_run_id = (
+        baseline_run_id
+        if mapping.arm_a_profile_id == BASELINE_PROFILE_ID
+        else challenger_run_id
+    )
+    run_on_arm = {
+        "arm_a": arm_a_run_id,
+        "arm_b": (
+            challenger_run_id if arm_a_run_id == baseline_run_id else baseline_run_id
+        ),
+    }
+    content_by_arm = {
+        "arm_a": next(
+            content_name
+            for content_name, run_id in arm_run_ids.items()
+            if run_id == run_on_arm["arm_a"]
+        ),
+        "arm_b": next(
+            content_name
+            for content_name, run_id in arm_run_ids.items()
+            if run_id == run_on_arm["arm_b"]
+        ),
+    }
+
+    def prefer(value: str, *, a_word: str, b_word: str) -> str:
+        if value in ("tie", "equal"):
+            return "tie" if value == "tie" else "unchanged"
+        return a_word if content_by_arm["arm_a"] == value else b_word
+
+    def role_prefer(value: str, *, challenger_word: str, baseline_word: str) -> str:
+        if value in ("tie", "equal"):
+            return "tie" if value == "tie" else "unchanged"
+        # Role-anchored enums resolve by which comparison run the preferred
+        # content belongs to, never by its display position.
+        return challenger_word if value == challenger_content else baseline_word
+
+    baseline_content = next(
+        name for name, run_id in arm_run_ids.items() if run_id == baseline_run_id
+    )
+    challenger_content = next(
+        name for name, run_id in arm_run_ids.items() if run_id == challenger_run_id
+    )
+    intrusion = content["unjustified_ml_intrusion"]
+    if intrusion == "equal":
+        intrusion_display = "unchanged"
+    else:
+        # "content_X more intrusion" projects onto the roles: the challenger
+        # arm's unjustified ML intrusion relative to the baseline arm is
+        # "increased" exactly when the heavier-intrusion content is the
+        # challenger's content.
+        intrusion_display = (
+            "increased" if intrusion == challenger_content else "decreased"
+        )
+    floor_by_content = {
+        "content_1": content["quality_floor_content_1"],
+        "content_2": content["quality_floor_content_2"],
+    }
+    return {
+        "verdict": prefer(
+            content["overall_preference"], a_word="a_better", b_word="b_better"
+        ),
+        "domain_method_fit": role_prefer(
+            content["domain_method_fit"],
+            challenger_word="challenger_better",
+            baseline_word="baseline_better",
+        ),
+        "unjustified_ml_intrusion": intrusion_display,
+        "rubric_floor_baseline": floor_by_content[baseline_content],
+        "rubric_floor_challenger": floor_by_content[challenger_content],
+        "content_space": content,
+    }
+
+
+def ai_verdict_facts(
+    ai_verdict: dict[str, Any],
+    *,
+    baseline_run_id: str,
+    challenger_run_id: str,
+    mapping: BlindPairMapping,
+    packet_sha256: str,
+    recorded_at: str,
+) -> dict[str, Any]:
+    """Assemble the reducer-facing verdict dict for one AI-authored pair.
+
+    The AI verdict is bound to the same packet hash the human channel binds
+    to (the packet bytes were built from these sealed runs before any review
+    ran), so the reducer's VERDICT_PACKET_MISMATCH check applies unchanged.
+    The document keeps the AI authorship explicitly; it is NOT a
+    comparison-pair-verdict-v1.1.0 human verdict and can never be recorded in
+    the vault's human verdicts directory.
+    """
+    projected = ai_verdict_to_display(
+        ai_verdict,
+        baseline_run_id=baseline_run_id,
+        challenger_run_id=challenger_run_id,
+        mapping=mapping,
+    )
+    document = {
+        "ai_authorship": {
+            "pair_id": ai_verdict["authorship"]["pair_id"],
+            "review_config_sha256": ai_verdict["authorship"]["review_config_sha256"],
+            "schema_version": AI_VERDICT_SCHEMA_VERSION,
+        },
+        "case_id": ai_verdict["case_id"],
+        "domain_method_fit": projected["domain_method_fit"],
+        "packet_sha256": packet_sha256,
+        "recorded_at": recorded_at,
+        "rubric_floor": {
+            "baseline": projected["rubric_floor_baseline"],
+            "challenger": projected["rubric_floor_challenger"],
+        },
+        "schema_version": AI_VERDICT_SCHEMA_VERSION,
+        "unjustified_ml_intrusion": projected["unjustified_ml_intrusion"],
+        "verdict": projected["verdict"],
+    }
+    if document["verdict"] not in VERDICT_ENUM:
+        fail(
+            "INVALID_VERDICT",
+            "The projected AI verdict is not in the closed outcome enum",
+            verdict=document["verdict"],
+        )
+    if document["domain_method_fit"] not in DOMAIN_METHOD_FIT_ENUM:
+        fail(
+            "INVALID_VERDICT",
+            "The projected AI domain_method_fit is not in the closed enum",
+            value=document["domain_method_fit"],
+        )
+    if document["unjustified_ml_intrusion"] not in ML_INTRUSION_ENUM:
+        fail(
+            "INVALID_VERDICT",
+            "The projected AI unjustified_ml_intrusion is not in the closed enum",
+            value=document["unjustified_ml_intrusion"],
+        )
     return document
 
 
@@ -3321,6 +3694,78 @@ class ComparisonVault:
                 case_id=case_id,
             )
 
+    # ------------------------------------------------------------------
+    # Ticket 03: the AI verdict channel. AI verdicts live in their own
+    # write-once directory (`ai-verdicts/`), disjoint from Robert's blinded
+    # human verdicts (`verdicts/`). Recording an AI verdict does NOT satisfy
+    # `verdicts_frozen` (the human reveal gate); consuming one in the reducer
+    # requires the caller to pass it explicitly, which is only reachable
+    # under the registered evaluation-protocol revision.
+    # ------------------------------------------------------------------
+
+    AI_VERDICTS_DIR = "ai-verdicts"
+
+    def _ai_verdicts_dir(self) -> Path:
+        path = self._root / self.AI_VERDICTS_DIR
+        if path.is_symlink():
+            fail("SYMLINK_FORBIDDEN", "The ai-verdicts directory is a symlink")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _ai_verdict_path(self, case_id: str) -> Path:
+        parse_case_id(case_id)
+        path = self._ai_verdicts_dir() / f"{case_id}.json"
+        if path.is_symlink():
+            fail("SYMLINK_FORBIDDEN", "The ai verdict path is a symlink")
+        return path
+
+    def record_ai_verdict(self, document: dict[str, Any]) -> str:
+        """Write-once an AI verdict document for one case; duplicates fail."""
+        case_id = document.get("case_id")
+        if not isinstance(case_id, str):
+            fail("INVALID_VERDICT", "The AI verdict lacks its case_id")
+        if self.revealed:
+            fail(
+                "VERDICT_AFTER_REVEAL",
+                "An AI verdict cannot be recorded after the blind mapping is "
+                "revealed",
+                case_id=case_id,
+            )
+        path = self._ai_verdict_path(case_id)
+        return _write_bytes_once(
+            path,
+            canonical_json_bytes(document),
+            label="AI pair verdict",
+            exists_code="ARTIFACT_EXISTS",
+        )
+
+    def load_ai_verdict(self, case_id: str) -> dict[str, Any] | None:
+        """The AI verdict for one case, or None when the channel is empty."""
+        path = self._ai_verdict_path(case_id)
+        if not path.is_file():
+            return None
+        document = parse_json_bytes(path.read_bytes(), label=f"AI verdict {case_id}")
+        if not isinstance(document, dict):
+            fail("INVALID_VERDICT", "The AI verdict document is not a JSON object")
+        if document.get("schema_version") != AI_VERDICT_SCHEMA_VERSION:
+            fail(
+                "INVALID_VERDICT",
+                "Unsupported AI verdict schema_version",
+                schema_version=document.get("schema_version"),
+            )
+        return document
+
+    def ai_verdicts(
+        self, required_case_ids: tuple[str, ...]
+    ) -> dict[str, dict[str, Any]]:
+        """Every recorded AI verdict for the required cases (missing → None)."""
+        verdicts: dict[str, dict[str, Any]] = {}
+        for case_id in required_case_ids:
+            document = self.load_ai_verdict(case_id)
+            if document is not None:
+                verdicts[case_id] = document
+        return verdicts
+
 
 # ==========================================================================
 # Deterministic Promotion reducer
@@ -3352,6 +3797,8 @@ def reduce_prompt_comparison(
     reveal_document: dict[str, Any],
     pair_facts: tuple[PairFacts, ...],
     ledger: dict[str, Any],
+    ai_verdicts: Mapping[str, dict[str, Any]] | None = None,
+    evaluation_protocol: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Reduce the blinded comparison against the pre-registered criteria.
 
@@ -3368,6 +3815,16 @@ def reduce_prompt_comparison(
     is the only sanctioned live builder), and each pair's verdict is
     re-checked here against `PairFacts.packet_sha256` (a verdict bound to
     a different packet fails closed as VERDICT_PACKET_MISMATCH).
+
+    Ticket 03 (revised evaluation protocol): `ai_verdicts` carries the
+    AI-authored verdict documents from the vault's `ai-verdicts/` channel
+    (case_id → document). When supplied, `evaluation_protocol` must be the
+    registered evaluation protocol manifest (post-first-output revision) —
+    the old Gate continues to reject AI records. Mixing an AI verdict with
+    human verdicts inside one reduction fails closed: all eight results of
+    the matrix must use one evaluation protocol. AI verdicts bypass no
+    gate: their quality floors enter the same rubric-floor gate, and the
+    AI channel adds its own floor-state gate for unresolved floors.
     """
     mappings = assert_blind_mapping_document_shape(
         closed_object(
@@ -3376,6 +3833,23 @@ def reduce_prompt_comparison(
             keys={"blind_mapping", "revealed_at", "schema_version"},
         )["blind_mapping"]
     )
+    ai_verdicts = dict(ai_verdicts or {})
+    if ai_verdicts and evaluation_protocol is None:
+        fail(
+            "EVALUATION_PROTOCOL_MISMATCH",
+            "Consuming AI verdicts requires the registered evaluation "
+            "protocol manifest; the pre-revision Promotion Gate keeps "
+            "rejecting AI-authored verdicts",
+        )
+    if ai_verdicts:
+        known_case_ids = {facts.case_id for facts in pair_facts}
+        for case_id in sorted(ai_verdicts):
+            if case_id not in known_case_ids:
+                fail(
+                    "COMPARISON_IDENTITY_MISMATCH",
+                    "An AI verdict belongs to a case outside the reduced matrix",
+                    case_id=case_id,
+                )
     gates: dict[str, Any] = {}
     decision = "promote"
 
@@ -3412,10 +3886,41 @@ def reduce_prompt_comparison(
             completeness_problems.append(
                 {"case_id": facts.case_id, "problem": "unsealed_arm_outcome"}
             )
-    gates["completeness"] = {
-        "pass": not completeness_problems,
-        "problems": completeness_problems,
-    }
+    # One evaluation protocol per reduction: a matrix may not mix AI-authored
+    # verdicts with human verdicts (spec §7). When any AI verdict is present,
+    # every ingested verdict must be on the AI channel; a reduction without
+    # AI verdicts keeps the legacy document byte-identical (no channel book-
+    # keeping, no protocol gate).
+    verdict_channels: dict[str, str] = {}
+    if ai_verdicts:
+        for facts in sorted(pair_facts, key=lambda f: f.pair_index):
+            if facts.case_id in ai_verdicts:
+                if facts.verdict is None:
+                    completeness_problems.append(
+                        {
+                            "case_id": facts.case_id,
+                            "problem": "ai_verdict_without_bound_verdict",
+                        }
+                    )
+                    continue
+                verdict_channels[facts.case_id] = "ai_pair_reduction"
+            elif facts.verdict is not None:
+                fail(
+                    "EVALUATION_PROTOCOL_MISMATCH",
+                    "The reduction mixes AI-authored and human verdicts; all "
+                    "eight results must use one evaluation protocol",
+                    human_case_id=facts.case_id,
+                )
+        gates["completeness"] = {
+            "pass": not completeness_problems,
+            "problems": completeness_problems,
+            "verdict_channels": verdict_channels,
+        }
+    else:
+        gates["completeness"] = {
+            "pass": not completeness_problems,
+            "problems": completeness_problems,
+        }
     if completeness_problems:
         decision = "incomplete"
         return _reduction_document(
@@ -3506,9 +4011,29 @@ def reduce_prompt_comparison(
         decision = "reject"
 
     # Gate 5: the existing rubric floor (any problem value on either arm).
+    # Under the AI channel the per-arm floors come from the AI verdict's
+    # content-space quality-floor states (the dual-review consensus records),
+    # never from the overall preference; a violated floor rejects exactly as
+    # a human floor hit would.
     floor_hits: list[dict[str, Any]] = []
     for facts in pair_facts:
         verdict = facts.verdict or {}
+        if facts.case_id in ai_verdicts:
+            projected = ai_verdict_to_display(
+                ai_verdicts[facts.case_id],
+                baseline_run_id=facts.baseline_metrics.run_id,
+                challenger_run_id=facts.challenger_metrics.run_id,
+                mapping=_mapping_for_case(mappings, facts.case_id),
+            )
+            for arm, state in (
+                ("baseline", projected["rubric_floor_baseline"]),
+                ("challenger", projected["rubric_floor_challenger"]),
+            ):
+                if state == "violated":
+                    floor_hits.append(
+                        {"arm": arm, "case_id": facts.case_id, "value": "violated"}
+                    )
+            continue
         floor = verdict.get("rubric_floor", {})
         for arm, value in sorted(floor.items()):
             if (
@@ -3521,6 +4046,50 @@ def reduce_prompt_comparison(
     gates["rubric_floor"] = {"hits": floor_hits, "pass": not floor_hits}
     if floor_hits:
         decision = "reject"
+
+    # Gate 5b (AI channel): unresolved quality floors stay unresolved. The
+    # consensus floor state `unresolved`/`not_evaluated` means the dual
+    # reviewers did not converge on that floor dimension: the pair may
+    # continue collecting evidence, but it cannot pass this promotion
+    # judgment (spec §5: 未决状态仍阻止受影响的晋升判断).
+    if ai_verdicts:
+        unresolved_floors: list[dict[str, Any]] = []
+        for facts in pair_facts:
+            if facts.case_id not in ai_verdicts:
+                continue
+            projected = ai_verdict_to_display(
+                ai_verdicts[facts.case_id],
+                baseline_run_id=facts.baseline_metrics.run_id,
+                challenger_run_id=facts.challenger_metrics.run_id,
+                mapping=_mapping_for_case(mappings, facts.case_id),
+            )
+            for arm, state in (
+                ("baseline", projected["rubric_floor_baseline"]),
+                ("challenger", projected["rubric_floor_challenger"]),
+            ):
+                if state in ("unresolved", "not_evaluated"):
+                    unresolved_floors.append(
+                        {"arm": arm, "case_id": facts.case_id, "state": state}
+                    )
+        gates["ai_quality_floor_unresolved"] = {
+            "unresolved": unresolved_floors,
+            "pass": not unresolved_floors,
+        }
+        if unresolved_floors:
+            decision = "reject"
+
+    # Gate 5c (AI channel): the protocol amendment is recorded inside the
+    # reduction so the consumed results always disclose the post-first-output
+    # revision; the document is not promotion authority by itself.
+    if ai_verdicts:
+        gates["evaluation_protocol"] = {
+            "schema_version": EVALUATION_PROTOCOL_GATE_SCHEMA_VERSION,
+            "protocol_id": evaluation_protocol["protocol_id"],
+            "revision_disclosure": evaluation_protocol["revision_disclosure"],
+            "aggregation_rules_id": evaluation_protocol["aggregation_rules_id"],
+            "verdict_channels": verdict_channels,
+            "pass": True,
+        }
 
     # Gate 6: deterministic zero-tolerance, recorded honestly. Every arm
     # reaching PairFacts passed all ingestion gates (evidence chain seal,
