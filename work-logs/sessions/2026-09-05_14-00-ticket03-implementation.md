@@ -73,3 +73,31 @@
 - 注意：`validate-pair-review` 重复执行会追加 vNNNN（同响应 supersedes 链，head 判定不变）——操作时 validate 一次即可。
 - 注意：`build_pair_packets_from_ingested` 要求全部 pair 两臂齐备；单 pair 场景用 pair-filtered matrix + case-filtered mappings 构包（packet 字节只依赖该 pair 的行）。
 - 费用：生成端 total 0.45；评审台账 total 0.47（primary single 0.24 + repair 0.00 + pair DeepSeek 0.23 + Kimi 0.00）。
+---
+
+# Session 记录 - 2026-09-06 00:xx（批内预授权规格修订 + 全自动执行启动）
+
+**工作内容：**
+- Robert 批准「规格修订全自动（最快）」：批准 002 spec §26 + canary spec §123（禁止项）修订，将「batch cost approval / automatic typing of yes」改为「write-once 批内预授权」合法通道（禁止项保留自动打 yes 与隐藏授权）。
+- 实现：新建 `ai_scientist/ideation/comparison_preauthorization.py`（schema comparison-preauthorization-v1.0.0；build/write-once/covering 解析；env `COMPARISON_PREAUTHORIZATION`；错误码 PREAUTHORIZATION_UNREADABLE / _CEILING_DRIFT / _SLOT_NOT_COVERED 全 fail closed，env 已设不覆盖绝不回退交互提示）；admission step 8 接入（命中时 approval 换 preauthorization_admission_field，出处逐字入 Run Admission）。测试 12 条（tests/test_comparison_preauthorization.py），import contract 闭包补 `comparison_preauthorization`。commit `4586ea5`，全量 896 passed。
+- Kimi「限流」复核（Robert 要求）：三次非流式调用全部精确 ~300s 被 nginx 504 掐断、唯一成功 291.6s 压线、流式探针 351.8s 完整成功 → **非限流，是网关 300s 硬超时**；流式为后续 Kimi 评审固定方案（send_pair_stream.py / send_single_stream.py）。
+- 执行 pin governed supersede 链（Robert 逐项批准）：2d368976 → 4586ea5（预授权修订）→ 22bbe25（幂等重入）→ 316dbc4（epoch 接受硬ening）→ bdb3156（测试收尾），记录 seq-2…seq-5 归档齐全。
+- 幂等 reservation 重入（Robert 选定方案）：reserve_comparison_slot 对「同 argv sha + authorization + price table + commit ∈ 当前 pin ∪ superseded epochs」的 seq-1 重入复用原 reservation（reused=True）；任何漂移仍 COMPARISON_SLOT_ALREADY_RESERVED；quarantined slot 仍必须走 seq-2 替换链。动机：slot 3 首次启动先写 reservation 后被 MISSING_CREDENTIAL 拒（零花费），重跑被 write-once 挡死且无治理出口。commits `22bbe25`/`316dbc4`/`bdb3156`；88/88 + 全量 896 passed。
+- slot 3 首跑 ef939515 sealed **failed**：generation 0 耗尽预算（INVALID_ARGUMENTS_JSON → GATE_REJECTED×2 → FINAL_ROUND_FINALIZE_REQUIRED），0 idea，RETRIEVAL_BACKSTOP_FAILED，actual 0.23；quarantine（ZERO_FINALIZED_IDEA）→ forfeited 0.33 入账 → 替换 run d65859af（run-003-seq-2）sealed success 1 idea。
+- 全自动通道验证：slot 3 两次 admission 的 cost.approval 均记录 confirmed_with=batch_preauthorization、doc sha 0eee415d、7.08 上界；slot 4 试启动被 PREVIOUS_SLOT_NOT_INGESTED 正确拒绝（slot 3 未 ingest）。
+- slot 3 评审链进行中：export-review-package 完成（request sha be79a5b9）；流式双评审调用后台执行。
+
+**结果：**
+- ledger：entries=[slot1 0.08, slot2 0.13]，forfeited=[0.10, 0.23]，actual 0.21，status ingesting。评审链 slot 3 调用中。
+- .env 恢复单键纪律（ideation 端），评审端四键副本在 /tmp（0600）。
+
+**决策记录：**
+- 幂等重入接受 governed epoch commit（而非仅当前 pin）：reservation 写于 4586ea5、HEAD 已至 22bbe25，硬比较会自锁；与 quarantine 的 admission-commit 规则（接受 superseded epoch）一致。
+- Kimi 评审一律流式（网关 300s 超时，非限流）；DeepSeek 保持非流式 + response_format json_object。
+- ingest 顺序纪律确认：先双评审（EVALUATION_ARTIFACT_MISSING 门）再 ingest，再下一 slot 启动（PREVIOUS_SLOT_NOT_INGESTED 门）——流水线并行仅限「当前 slot 生成 ↔ 前一 slot 评审」。
+
+**相关 Commit：**
+- 4586ea5 add: Robert-approved batch preauthorization for frozen comparison slots
+- 22bbe25 add: idempotent reservation re-entry for identical frozen slot relaunch
+- 316dbc4 fix: idempotent reservation re-entry accepts governed code epochs
+- bdb3156 test: keep CLI duplicate-launch guard ahead of idempotent re-entry
