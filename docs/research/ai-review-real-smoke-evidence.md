@@ -89,7 +89,7 @@ smoke 只证明流程可用与最低检错行为；不证明双模型优于单�
 
 ## 暴露披露（development/diagnostic 标记）
 
-- slot 1（run `1143a894-1230-4ee1-b41a-f801cc50c027`，idea 0）的匿名评审材料包在本轮**出站至 DeepSeek 与 Moonshot**（含 ticket 01 会话中的只读管道演示）。该 run 的材料此后必须标记 development/diagnostic：其响应不得再充当 prompt 优化后的未见测试证据；后续正式评估应使用未暴露的 run。
+- slot 1（run `1143a894-1230-4ee1-b41a-f801cc50c027`，idea 0）的匿名评审材料包在本轮**被用入真实评审实验且结果被开发者观察**（含 ticket 01 会话中的只读管道演示）。降级为 development/diagnostic 的原因是「用入实验 + 观察结果」造成的开发集污染，与数据是否出站无关（本地调用同样触发）；其响应此后不得充当 prompt 优化后的未见测试证据，正式评估应使用未暴露的 run。本轮**出站至 DeepSeek 与 Moonshot** 是独立的数据治理事实：访谈派生内容离开本机进入两家服务商处理范围，与评测有效性无关，仅记录在案。
 - 合成 pair 的两臂为合成的 sealed run（非真实 interview 数据），仅用于流程与检错验收，不进入任何真实评估矩阵。
 - 密钥处理：DeepSeek 与 Kimi key 均存于仓库 `.env`（gitignored，0600），全程未回显、未入日志；本报告与所有入库文档不含任何密钥。
 
