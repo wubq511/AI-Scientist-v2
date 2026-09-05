@@ -2161,6 +2161,33 @@ def _reserve(
     )
 
 
+def _tamper_reservation_argv(pkg_dir: Path, run_index: int) -> None:
+    """Drift a stored reservation's argv hash so any relaunch fails closed.
+
+    The idempotent re-entry reuses an identical launch; the CLI-leg tests
+    want the duplicate-launch guard to fire before exec, so the stored
+    reservation is made non-identical in its command identity.
+    """
+    path = pkg_dir / "vault" / "run-reservations" / f"run-{run_index:03d}.json"
+    document = parse_json_bytes(path.read_bytes(), label="reservation")
+    document["command_argv_sha256"] = "e" * 64
+    path.write_bytes(canonical_json_bytes(document))
+
+
+def _reserve_with_drifted_argv(
+    pkg_dir: Path, run_index: int, commit: str
+) -> dict[str, Any]:
+    reservation = _reserve(
+        cmp_mod.prepare_comparison_slot_launch(
+            REPO_ROOT,
+            **_slot_prepare_kwargs(pkg_dir, run_index),
+        ),
+        commit=commit,
+    )
+    _tamper_reservation_argv(pkg_dir, run_index)
+    return reservation
+
+
 def _slot_runner_argv(pkg_dir: Path, run_index: int) -> list[str]:
     kwargs = _slot_prepare_kwargs(pkg_dir, run_index)
     return [
@@ -2375,6 +2402,7 @@ def test_slot_reservation_is_write_once_and_blocks_duplicate_launches(
         ),
         commit=real_head,
     )
+    _tamper_reservation_argv(cli_pkg, 1)
     completed = subprocess.run(
         _slot_runner_argv(cli_pkg, 1),
         cwd=REPO_ROOT,
@@ -3359,13 +3387,7 @@ def test_cli_slot_runner_preflight_survives_forfeited_spend(
         text=True,
         check=True,
     ).stdout.strip()
-    _reserve(
-        cmp_mod.prepare_comparison_slot_launch(
-            REPO_ROOT,
-            **_slot_prepare_kwargs(pkg_dir, 1),
-        ),
-        commit=real_head,
-    )
+    _reserve_with_drifted_argv(pkg_dir, 1, real_head)
     completed = subprocess.run(
         _slot_runner_argv(pkg_dir, 1),
         cwd=REPO_ROOT,
