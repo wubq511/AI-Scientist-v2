@@ -10,6 +10,7 @@ Evidence Chains rather than hand-built documents.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import importlib.util
 import json
 from pathlib import Path
@@ -362,6 +363,25 @@ def prepare_workspace(tmp_path: Path, helpers) -> tuple[Path, list[tuple[str, st
     return workspace, prepared
 
 
+@contextmanager
+def historical_profile_fixture():
+    """Generate pre-retirement evidence with stub transport in tests only.
+
+    Restore production retirement enforcement before consuming the evidence.
+    This fixture is not evidence that baseline execution remains supported.
+    """
+    from pytest import MonkeyPatch
+    from ai_scientist.ideation import admission, controller, profiles
+
+    with MonkeyPatch.context() as patch:
+        patch.setattr(admission, "_resolve_request_profile", profiles.resolve_profile)
+        patch.setattr(
+            controller, "require_executable_profile", profiles.resolve_profile
+        )
+        yield
+
+
+@historical_profile_fixture()
 def run_one_sealed_run(
     workspace: Path,
     helpers,
@@ -417,6 +437,7 @@ def run_one_sealed_run(
     return run_id
 
 
+@historical_profile_fixture()
 def run_zero_idea_sealed_run(
     workspace: Path,
     helpers,

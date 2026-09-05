@@ -475,7 +475,7 @@ def _cli_args(
         corpus_sha256=corpus_sha,
         max_num_generations=1,
         num_reflections=2,
-        prompt_profile="ml-baseline-v1",
+        prompt_profile="cross-domain-v1",
         entry="new-run",
     )
 
@@ -503,7 +503,7 @@ def test_admission_records_batch_preauthorization_without_interactive_input(
                 {
                     "run_index": 1,
                     "case_id": CASE_ID,
-                    "prompt_profile_id": "ml-baseline-v1",
+                    "prompt_profile_id": "cross-domain-v1",
                     "worst_case_bound_cny": bound,
                 }
             ],
@@ -574,7 +574,7 @@ def test_admission_outside_covered_slots_fails_closed(
                     # A different case than the request below: the run is
                     # outside the covered slots.
                     "case_id": "case-8c6ddd334df3bf058720ac8f14ce3db6",
-                    "prompt_profile_id": "ml-baseline-v1",
+                    "prompt_profile_id": "cross-domain-v1",
                     "worst_case_bound_cny": bound,
                 }
             ],

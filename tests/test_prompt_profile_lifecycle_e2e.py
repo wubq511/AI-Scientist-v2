@@ -1,6 +1,6 @@
 """End-to-end Prompt Profile lifecycle tests (ticket 01).
 
-Exercises the full governed seam for BOTH registered profiles with recorded
+Exercises the full governed seam for the active profile with recorded
 stub transport only: CLI/party admission with pinned profile identity ->
 controller execution (profile-rendered prompt bytes) -> seal -> static
 Evidence Chain validation -> sanitized export -> SIGINT suspension ->
@@ -23,6 +23,7 @@ from typing import Any
 
 import pytest
 
+from tests.comparison_synthetic import historical_profile_fixture
 from tests.prompt_profile_lifecycle import (
     FINALIZE_RESPONSE_ID,
     PROFILE_PARAMS,
@@ -201,12 +202,14 @@ def test_full_lifecycle_seals_validates_and_exports_with_pinned_profile(
         assert needle not in manifest_text
 
 
-def test_cli_new_run_rejects_unknown_profile_before_admission(
+@pytest.mark.parametrize("profile_id", ["cross-domain-v2", "ml-baseline-v1"])
+def test_cli_new_run_rejects_unavailable_profile_before_admission(
     tmp_path: Path,
     monkeypatch: Any,
     helpers: Any,
+    profile_id: str,
 ) -> None:
-    """An unregistered profile id fails closed as a preflight rejection."""
+    """Unavailable profiles cannot allocate a run or request paid approval."""
     workspace, inputs = _prepared_workspace(tmp_path, helpers)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "fixture-present")
     args = argparse.Namespace(
@@ -217,15 +220,16 @@ def test_cli_new_run_rejects_unknown_profile_before_admission(
         corpus_sha256=inputs["corpus_sha256"],
         max_num_generations=1,
         num_reflections=2,
-        prompt_profile="cross-domain-v2",
+        prompt_profile=profile_id,
         entry="new-run",
+    )
+    monkeypatch.setattr(
+        "builtins.input", lambda: pytest.fail("unavailable profile sought approval")
     )
     exit_code = _run_new_run(args, workspace_root=workspace, execute=False)
     assert exit_code == 2
     runs_root = workspace / "artifacts/ideation-runs"
-    if runs_root.exists():
-        for run_dir in runs_root.iterdir():
-            assert not (run_dir / "admission.json").exists()
+    assert not runs_root.exists() or not list(runs_root.iterdir())
 
 
 def test_cli_new_run_rejects_free_text_profile(
@@ -297,7 +301,7 @@ def test_legacy_request_cannot_inject_a_profile_field(
     from ai_scientist.ideation.canonical import canonical_json_bytes as _cjb
 
     workspace, inputs = _prepared_workspace(tmp_path, helpers)
-    run_id = admit(helpers, workspace, inputs, monkeypatch, "ml-baseline-v1")
+    run_id = admit(helpers, workspace, inputs, monkeypatch, "cross-domain-v1")
     result = execute(
         workspace, run_id, StubTransport(_stub_responses(workspace, inputs))
     )
@@ -492,16 +496,16 @@ def test_resume_rejects_attempted_profile_change_via_request_tamper(
     from ai_scientist.ideation.canonical import canonical_json_bytes as _cjb
 
     workspace, inputs = _prepared_workspace(tmp_path, helpers)
-    run_id = admit(helpers, workspace, inputs, monkeypatch, "ml-baseline-v1")
+    run_id = admit(helpers, workspace, inputs, monkeypatch, "cross-domain-v1")
     with pytest.raises(RunInterrupted):
         execute(workspace, run_id, _CapturingStubTransport([_kill_sigint]))
 
     run_root = _run_root(workspace, run_id)
     request_path = run_root / "request.json"
     data = json.loads(request_path.read_text(encoding="utf-8"))
-    data["prompt_profile"]["profile_id"] = "cross-domain-v1"
+    data["prompt_profile"]["profile_id"] = "ml-baseline-v1"
     data["prompt_profile"]["bundle_sha256"] = profiles.profile_bundle_sha256(
-        CROSS_DOMAIN_V1_REF
+        ML_BASELINE_V1_REF
     )
     request_bytes = _cjb(data)
     request_path.write_bytes(request_bytes)
@@ -513,7 +517,7 @@ def test_resume_rejects_attempted_profile_change_via_request_tamper(
     admission_path = run_root / "admission.json"
     admission = json.loads(admission_path.read_text(encoding="utf-8"))
     admission["request_sha256"] = request_sha
-    # The admission keeps its ORIGINAL ml-baseline pin: the swapped request
+    # The admission keeps its ORIGINAL cross-domain pin: the swapped request
     # profile now disagrees with the admission profile pin.
     admission_bytes = _cjb(admission)
     admission_path.write_bytes(admission_bytes)
@@ -551,43 +555,44 @@ def test_resume_rejects_attempted_profile_change_via_request_tamper(
         resume(helpers, workspace, run_id, _CapturingStubTransport([]), monkeypatch)
 
 
-def test_resume_of_legacy_admission_stays_baseline(
-    tmp_path: Path,
-    monkeypatch: Any,
-    helpers: Any,
+@pytest.mark.parametrize("legacy", [False, True])
+def test_retired_run_cannot_resume_or_execute(
+    tmp_path: Path, monkeypatch: Any, helpers: Any, legacy: bool
 ) -> None:
-    """A legacy v1.0.0 admission without profile fields resumes as baseline
-    even when the current default is the challenger."""
     workspace, inputs = _prepared_workspace(tmp_path, helpers)
-    run_id = admit(helpers, workspace, inputs, monkeypatch, "ml-baseline-v1")
-    with pytest.raises(RunInterrupted):
-        execute(workspace, run_id, _CapturingStubTransport([_kill_sigint]))
-
-    # Degrade the run to legacy evidence: strip profile pins and downgrade
-    # schema versions (a historical run never had these fields).
+    with historical_profile_fixture():
+        run_id = admit(helpers, workspace, inputs, monkeypatch, "ml-baseline-v1")
     run_root = _run_root(workspace, run_id)
-    for name in ("request.json", "admission.json"):
-        path = run_root / name
-        data = json.loads(path.read_text(encoding="utf-8"))
-        data.pop("prompt_profile", None)
-        data["schema_version"] = (
-            f"run-{'request' if name.startswith('request') else 'admission'}-v1.0.0"
-        )
-        path.write_bytes(
-            (json.dumps(data, sort_keys=True, separators=(",", ":")) + "\n").encode()
-        )
-    # The admission hash pinned in the chain no longer matches the degraded
-    # document, so a raw resume must fail closed — legacy documents are
-    # interpreted at validation/export level, not rewritten in place.
-    with pytest.raises(IdeationInputError, match="ADMISSION_TAMPERED"):
-        resume(helpers, workspace, run_id, _CapturingStubTransport([]), monkeypatch)
-    monkeypatch.setattr(profiles, "DEFAULT_PROMPT_PROFILE_ID", "cross-domain-v1")
-    assert (
-        profiles.resolve_admission_profile(
-            {"schema_version": "run-admission-v1.0.0"}
-        ).profile_id
-        == "ml-baseline-v1"
+    if legacy:
+        # Reconstruct the historical admission-commit crash window: no admitted
+        # event yet. Retirement must reject before repairing it or asking cost.
+        admission_path = run_root / "admission.json"
+        data = json.loads(admission_path.read_bytes())
+        data.pop("prompt_profile")
+        data["schema_version"] = "run-admission-v1.0.0"
+        admission_path.write_bytes(canonical_json_bytes(data))
+        events = sorted((run_root / "events").glob("*.json"))
+        assert json.loads(events[-1].read_bytes())["event_type"] == "admitted"
+        events[-1].unlink()
+    before = {
+        p.relative_to(run_root): p.read_bytes()
+        for p in run_root.rglob("*")
+        if p.is_file()
+    }
+    capturing = _CapturingStubTransport([])
+    monkeypatch.setattr(
+        "builtins.input", lambda: pytest.fail("retired run sought approval")
     )
+    with pytest.raises(IdeationInputError, match="PROMPT_PROFILE_RETIRED"):
+        resume(helpers, workspace, run_id, capturing, monkeypatch)
+    with pytest.raises(IdeationInputError, match="PROMPT_PROFILE_RETIRED"):
+        execute(workspace, run_id, capturing)
+    assert capturing.sent_requests == []
+    assert before == {
+        p.relative_to(run_root): p.read_bytes()
+        for p in run_root.rglob("*")
+        if p.is_file()
+    }
 
 
 def test_legacy_sealed_run_validates_and_exports_as_baseline(
@@ -598,11 +603,12 @@ def test_legacy_sealed_run_validates_and_exports_as_baseline(
     """A fully legacy (v1.0.0) sealed run keeps validating and exporting;
     its sanitized profile identity is ml-baseline-v1 without profile pins."""
     workspace, inputs = _prepared_workspace(tmp_path, helpers)
-    run_id = admit(helpers, workspace, inputs, monkeypatch, "ml-baseline-v1")
-    result = execute(
-        workspace, run_id, StubTransport(_stub_responses(workspace, inputs))
-    )
-    assert result["status"] == "sealed"
+    with historical_profile_fixture():
+        run_id = admit(helpers, workspace, inputs, monkeypatch, "ml-baseline-v1")
+        result = execute(
+            workspace, run_id, StubTransport(_stub_responses(workspace, inputs))
+        )
+        assert result["status"] == "sealed"
 
     run_root = _run_root(workspace, run_id)
     for name in ("request.json", "admission.json"):
@@ -670,3 +676,83 @@ def test_legacy_sealed_run_validates_and_exports_as_baseline(
     assert manifest["prompt_profile"][
         "bundle_sha256"
     ] == profiles.profile_bundle_sha256(ML_BASELINE_V1_REF)
+
+
+def test_cli_omitted_profile_executes_cross_domain(
+    tmp_path: Path, monkeypatch: Any, helpers: Any
+) -> None:
+    from ai_scientist.perform_ideation_temp_free import _build_parser
+    from ai_scientist.ideation.deepseek import DeepSeekAdapter
+    from ai_scientist.ideation.pricing import load_price_table
+
+    workspace, inputs = _prepared_workspace(tmp_path, helpers)
+    args = _build_parser().parse_args(
+        [
+            "new-run",
+            "--case-id",
+            helpers.CASE_ID,
+            "--workshop",
+            inputs["workshop"],
+            "--workshop-sha256",
+            inputs["workshop_sha256"],
+            "--corpus",
+            inputs["corpus"],
+            "--corpus-sha256",
+            inputs["corpus_sha256"],
+            "--max-num-generations",
+            "1",
+            "--num-reflections",
+            "2",
+        ]
+    )
+    helpers._approve_cost(monkeypatch)
+    transport = _CapturingStubTransport(_stub_responses(workspace, inputs))
+    adapter = DeepSeekAdapter(
+        price_table=load_price_table(workspace), transport=transport
+    )
+    assert _run_new_run(args, workspace_root=workspace, adapter=adapter) == 0
+    assert transport.sent_requests[0]["messages"][0][
+        "content"
+    ] == profiles.render_system_prompt(profiles.CROSS_DOMAIN_V1)
+    roots = list((workspace / "artifacts/ideation-runs").iterdir())
+    assert len(roots) == 1
+    admission = json.loads((roots[0] / "admission.json").read_bytes())
+    assert admission["prompt_profile"]["profile_id"] == "cross-domain-v1"
+    assert (
+        validate_evidence_chain(workspace, roots[0].name, check_sealed=True)["status"]
+        == "valid"
+    )
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_baseline_interrupted_before_admission_cannot_resume(
+    tmp_path: Path, monkeypatch: Any, helpers: Any, legacy: bool
+) -> None:
+    from ai_scientist.ideation.run_store import RunStore
+
+    workspace, inputs = _prepared_workspace(tmp_path, helpers)
+    store = RunStore(workspace)
+    run = store.create_run()
+    with historical_profile_fixture():
+        document = make_request(helpers, inputs, "ml-baseline-v1").document(
+            run.run_id, []
+        )
+    if legacy:
+        document.pop("prompt_profile")
+        document["schema_version"] = "run-request-v1.0.0"
+    store.write_request(run.run_id, document)
+    run_root = _run_root(workspace, run.run_id)
+    before = {
+        p.relative_to(run_root): p.read_bytes()
+        for p in run_root.rglob("*")
+        if p.is_file()
+    }
+    capturing = _CapturingStubTransport([])
+    with pytest.raises(IdeationInputError, match="PROMPT_PROFILE_RETIRED"):
+        resume(helpers, workspace, run.run_id, capturing, monkeypatch)
+    assert capturing.sent_requests == []
+    assert before == {
+        p.relative_to(run_root): p.read_bytes()
+        for p in run_root.rglob("*")
+        if p.is_file()
+    }

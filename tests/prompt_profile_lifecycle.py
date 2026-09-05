@@ -207,11 +207,6 @@ def read_events(run_root: Path) -> list[dict[str, Any]]:
 
 PROFILE_PARAMS = (
     pytest.param(
-        ML_BASELINE_V1,
-        "ml-baseline-v1",
-        id="ml-baseline-v1",
-    ),
-    pytest.param(
         CROSS_DOMAIN_V1,
         "cross-domain-v1",
         id="cross-domain-v1",

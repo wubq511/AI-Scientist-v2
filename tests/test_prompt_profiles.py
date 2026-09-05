@@ -48,43 +48,28 @@ def test_only_two_profile_ids_are_registered() -> None:
         "ml-baseline-v1",
         "cross-domain-v1",
     )
-    assert profiles.DEFAULT_PROMPT_PROFILE_ID == "ml-baseline-v1"
+    assert profiles.DEFAULT_PROMPT_PROFILE_ID == "cross-domain-v1"
 
 
-def test_production_default_template_matches_head_baseline_prompt() -> None:
-    """The default profile is byte-identical to the pre-profile production prompt.
+def test_default_helpers_use_cross_domain_profile() -> None:
+    from ai_scientist.ideation.controller import build_system_prompt, build_tool_catalog
 
-    The in-tree legacy constants (controller.IDEA_GENERATION_PROMPT /
-    controller.IDEA_REFLECTION_PROMPT) are the pinned evidence of the
-    pre-ticket production bytes: this test proves they still carry the
-    original golden hashes, and the profile registry reuses them verbatim.
-    """
-    from ai_scientist.ideation.controller import (
-        IDEA_GENERATION_PROMPT,
-        IDEA_REFLECTION_PROMPT,
+    active = profiles.CROSS_DOMAIN_V1
+    assert build_system_prompt() == profiles.render_system_prompt(active)
+    assert build_tool_catalog() == (
+        active.tool_descriptions_template,
+        active.tool_names_template,
     )
 
-    assert _sha(IDEA_GENERATION_PROMPT) == BASELINE_GENERATION_SHA256
-    assert _sha(IDEA_REFLECTION_PROMPT) == BASELINE_REFLECTION_SHA256
 
-
-def test_retained_legacy_constants_equal_registered_baseline_templates() -> None:
-    """The retained controller constants cannot silently drift from the
-    registered baseline profile: both must stay byte-identical."""
-    from ai_scientist.ideation.controller import (
-        IDEA_GENERATION_PROMPT,
-        IDEA_REFLECTION_PROMPT,
-        build_system_prompt,
-        build_tool_catalog,
+def test_retired_identity_is_readable_but_not_executable() -> None:
+    assert profiles.resolve_profile("ml-baseline-v1") == profiles.ML_BASELINE_V1
+    with pytest.raises(IdeationInputError, match="PROMPT_PROFILE_RETIRED"):
+        profiles.require_executable_profile("ml-baseline-v1")
+    assert (
+        profiles.require_executable_profile("cross-domain-v1")
+        == profiles.CROSS_DOMAIN_V1
     )
-
-    baseline = profiles.resolve_profile("ml-baseline-v1")
-    assert baseline.generation_template == IDEA_GENERATION_PROMPT
-    assert baseline.reflection_template == IDEA_REFLECTION_PROMPT
-    assert build_system_prompt() == profiles.render_system_prompt(baseline)
-    descriptions, names = build_tool_catalog()
-    assert descriptions == baseline.tool_descriptions_template
-    assert names == baseline.tool_names_template
 
 
 def test_baseline_profile_renderings_are_byte_stable_goldens() -> None:

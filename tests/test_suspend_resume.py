@@ -1654,7 +1654,7 @@ def test_cli_new_run_admission_interrupt_reports_run_id(
         case_id=CASE_ID,
         corpus=inputs["corpus"],
         corpus_sha256=inputs["corpus_sha256"],
-        prompt_profile="ml-baseline-v1",
+        prompt_profile="cross-domain-v1",
         entry="new-run",
         max_num_generations=1,
         num_reflections=2,
