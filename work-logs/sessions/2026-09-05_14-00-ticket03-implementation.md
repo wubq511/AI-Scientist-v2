@@ -101,3 +101,24 @@
 - 22bbe25 add: idempotent reservation re-entry for identical frozen slot relaunch
 - 316dbc4 fix: idempotent reservation re-entry accepts governed code epochs
 - bdb3156 test: keep CLI duplicate-launch guard ahead of idempotent re-entry
+
+# Session 记录 - 2026-09-06 00:xx 前后（slot 6/7/8 全自动完成 + pair 3/4 盲评，矩阵 8/8）
+
+**工作内容（全自动批处理，Robert 预授权范围内）：**
+- slot 6（baseline arm pair 3，case-5f3f2126）：run `8e757f49` sealed success（1 idea，3 attempts，actual 0.11）。双评审（Kimi 流式 75s / DeepSeek 161s）complete_resolved、floor clean；ingest 0.11；ledger actual 0.62（6/8）。
+- slot 7（challenger arm pair 4，case-8c6ddd33）：run `055879c7` sealed success（2 attempts，actual 0.08）。双评审 complete_unresolved、floor clean——6/7 维一致，唯一冲突 target_contribution_overlap（primary materially_different vs second partial_overlap）；ingest 0.08；ledger actual 0.70（7/8）。
+- slot 8（baseline arm pair 4）：run `fa0557eb` sealed success（2 attempts，actual 0.09）。双评审 complete_unresolved、floor clean——6/7 维一致，同一 target_contribution_overlap 冲突模式；ingest 0.09；ledger actual 0.79（**8/8 全部 ingest 完成**，forfeited 0.33，status ingesting）。
+- pair 3 盲评（pair-7341153cf8a39b8f）：4 方向全一次 validated，Kimi 流式 37s/62s 零失败。reduce = **全三维度 incomparable**（Kimi slot second 在 ab 给 tie/equal、ba 给 content_2/content_1，position_flip）。`record-comparison-ai-verdict` fail-closed 拒绝（AI_PAIR_NOT_STABLE）——按合同不重跑，诚实入账。评审台账 +0.40（DeepSeek ab 0.2414 + ba 0.1543）。
+- pair 4 盲评（pair-d14e07c3c59c739f）：overall_preference **stable content_1**（=challenger 055879c7），但 domain_method_fit position_flip（两 slot 均 ab content_1 / ba tie）、unjustified_ml_intrusion evaluator_conflict → AI verdict 仍 fail-closed 拒绝（非 stable 判定不能进 reducer）。floor 双 clean。评审台账 +0.26（DeepSeek 0.1482 + 0.1153）。
+- 评审台账现状：22 entries，total 2.15 CNY（Kimi 全部订阅零边际）。
+
+**矩阵 4 对现状（全 AI 评审通道）：**
+- pair 1（case-589dbcb3，Materials）：challenger 8a136ac4 胜（overall+fit content_2，intrusion equal，双 floor clean）→ AI verdict 已入 vault。
+- pair 2（case-2a08725c，Social）：challenger c9bf7255 胜（overall+fit content_1，baseline intrusion 更少，floor content_1 clean/content_2 unresolved）→ AI verdict 已入 vault。
+- pair 3（case-5f3f2126，Genetics）：全维度 incomparable（Kimi 位置翻转）→ 无 AI verdict。
+- pair 4（case-8c6ddd33，Health）：overall challenger 胜但 fit/intrusion 维度翻转 → 无 AI verdict。
+
+**结果：**
+- 生成端矩阵 8/8 完成（actual 0.79 + forfeited 0.33 = 1.12，远低于 5.00 重审批阈值与 30.00 硬上限）；评审端 22 笔 2.15 CNY。
+- 待 Robert 终裁：pair 3/4 的 incomparable 处置（规格语义「ties and incomparable count for neither」→ 2 胜 0 负 2 incomparable 不满足「至少胜 3 对」→ 矩阵结论倾向 non-promote/inconclusive；处置选项：接受现状出 reduction、或 Robert 人工盲评通道补 pair 3/4——需 Robert 决定，不重跑 AI）。
+- 注意：pair 3/4 的 reduction 记录与全部证据链已完整留证（write-once），任何时候可复核。
