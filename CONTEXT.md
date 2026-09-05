@@ -164,6 +164,26 @@ _Avoid_: Evaluation Brief (that is the human artifact's reading material), promp
 The regenerable Chinese rendering of one validated AI Review Record: per-dimension suggested verdicts or abstentions with rationale, verbatim-verified quotes, key assumptions, and open questions, always stating that quote existence is machine-verified while semantic support is not and that a single-review card is not scientific ground truth.
 _Avoid_: Evaluation Artifact, review report, verdict
 
+**Review Execution Config**:
+The workspace-level write-once registration (`artifacts/evaluations/ai-review-config.json`) binding the two evaluator slots — provider, exact model id, and operator-declared model family — to the pinned prompt versions. The program cannot verify family lineage, so it only enforces that the two declared families and exact model ids differ (two personas of one model are not two independent evaluators), records the declared values verbatim as uncertified, and lets every aggregation re-verify records against this binding.
+_Avoid_: API key material, prompt template, budget approval
+
+**Evaluator Slot**:
+One of the two isolated review contexts (`primary`, `second`) created by the Review Execution Config. Each slot stores its own imported responses, validated records, and evidence card under `artifacts/evaluations/<run_id>/ideas/<idx>/ai/<slot>/`; nothing carries one slot's answers into the other, and a consensus record may only merge records whose declared provider/model ids match the slot's binding.
+_Avoid_: Persona, retry slot, model alias
+
+**Dual-Review Consensus Record**:
+The write-once per-dimension merge of the two slots' validated single-review records: only two valid, same-verdict judgments form a consensus (a shared negative stays negative); conflicts, abstentions, invalid, and missing slots stay separately accounted as unresolved and can never masquerade as complete. It carries the pre-registered quality floor independently and has no promotion authority.
+_Avoid_: Vote tally, final grade, promotion input
+
+**Pair Package**:
+The deterministic, anonymous two-arm export built from two different sealed ideas of one case: model-visible direction payloads (A/B and the swapped B/A) present shared case material as `C###` and each arm's content as `A###`/`B###` sources, while the private outer document holds the arms' real bindings, the blind mapping, and the source registry. Direction payloads are scanned fail-closed for arm identity, run/case/pair identity, paper ids, cost, or expected-winner leakage.
+_Avoid_: Comparison pair packet (that is the comparison stage's artifact), blind dataset
+
+**Pair Reduction Record**:
+The write-once restoration of the four pair reviews (two evaluator slots × two directions) from display-side verdicts back to anonymous content: only four valid judgments converging on the same content (or four ties) yield a stable result; position flips, evaluator conflicts, incomparable judgments, and missing/invalid records are incomparable with recorded reasons. Each arm's quality floor state is carried from its Dual-Review Consensus Record and is never overridden by the overall preference.
+_Avoid_: Winner declaration, averaged score, promotion verdict
+
 **Validation Matrix**:
 The versioned contract (`docs/agents/validation-matrix.md`) cataloging every check across nine layers (unit, contract, integration, replay, leakage, isolation, fault-injection, minimal-environment, qualitative), defining what must pass and what evidence proves each gate; it indexes runtime gates decided elsewhere and defines the development-time tests that prove them.
 _Avoid_: Test plan, test suite

@@ -13,6 +13,7 @@
 - 两位评审独立、证据可回链、允许未决；没有第三模型投票或必需的专家平台。小样本 smoke 不被写成跨领域效果证明。
 - 使用仓库已配置的 Local Markdown Issue Tracker；frontmatter 的 open/closed 与 blocked_by 决定 frontier，ready-for-agent 作为 triage 标记，不替换 status 语义。
 - 2026-09-05：[交付单条 idea 的 AI 评审与证据卡](tickets/01-deliver-single-idea-ai-evaluation.md) — 单评审模式离线编码验收完成：pinned `single-review-v1` 模板与 authoring contract v2 版本族、匿名确定性材料包、`user_supplied` 响应导入、引用逐字核验、七维枚举 + `insufficient_evidence` 弃权、write-once 记录与中文证据卡；19 项新测试、全量 806 passed、v1 人工流程零改动；真实 smoke 未执行，需费用/出站授权。
+- 2026-09-05：[交付独立复核与稳定的成对盲评](tickets/02-deliver-independent-and-pairwise-review.md) — 双评审与成对盲评离线编码验收完成：write-once 评审执行配置（两 slot 强制异 model family/异 exact model id，family 为声明值）、per-slot 隔离布局（`ai/primary/`、`ai/second/`）+ `aggregate-review` 逐维共识（一致负面保留、conflict/abstain/invalid/missing 独立记账）、pinned `pair-review-v1` 成对模板、匿名确定性 pair 包（key+文本双向盲泄漏扫描、换位对称）、四上下文独立评审、盲映射还原（仅四有效结果收敛才 stable；position_flip/evaluator_conflict/incomparable/missing_valid_record 逐因记录）、每臂质量底线独立携带、中文共识卡与还原报告；六个新 CLI 子命令；31 项新测试、全量 841 passed、stdlib-only 闭包保持；真实六次 smoke 未执行（无付费授权），执行入口见 ai-review-smoke-runbook。
 
 ## Tickets
 

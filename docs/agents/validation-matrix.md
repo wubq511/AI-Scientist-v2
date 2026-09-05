@@ -148,10 +148,13 @@ deterministic stub model(脚本化 action 序列)驱动完整 run;零网络、�
 |---|---|---|---|---|---|
 | VM-QUAL-01 | canary 阶段每个产生 final idea 的 sealed run 链接 schema 合法的 Evaluation Artifact(机检:链接存在 + schema 合法;schema 归 037) | 定性判断被强制留证 | 032, 037 | post-seal;028 | manifest 链接 + schema 校验 |
 | VM-QUAL-02 | 单条 idea 的 AI 评审(authoring contract v2,单评审模式):sealed run 经 export-review-package → import-review-response → validate-review 产出可回链记录与中文证据卡;匿名性、确定性重导出、user_supplied provenance、引用逐字核验、七维枚举 + insufficient_evidence 弃权、write-once supersedes、v1 人工 artifact 不被改写,全部机检 fail closed | AI 初评的建议被强制留证、可回链、来源角色分离,且不干扰 v1 coverage | ai-assisted-ideation-evaluation ticket 01 | post-seal;dev-time | pytest pass(tests/test_ai_review_evaluation.py) |
+| VM-QUAL-03 | 独立复核与成对盲评(authoring contract v2,双评审 + pair 模式):write-once 评审执行配置强制两 slot 异 model family/异 exact model id 并绑定 pinned prompt 版本;两 slot 隔离上下文;aggregate 逐维只有两方有效同 verdict 成共识,一致负面保留为负面,conflict/abstained/invalid/missing 分别记账且 invalid/missing 永不伪装 complete;pair 包匿名性(key+文本双向扫描)、双方向换位对称、四次 (slot,direction) 独立评审、盲映射还原后仅四有效结果收敛才 stable,position_flip/evaluator_conflict/incomparable_judgment/missing_valid_record 逐因记录;还原时记录↔响应哈希链与重推导逐字比对 fail closed;每臂质量底线独立携带;协议版本错配阻止合并,全部机检 fail closed | 双评审共识与成对还原结论被强制留证、可回链、不可被无效/缺失/翻转发白,且不授予晋升效力 | ai-assisted-ideation-evaluation ticket 02 | post-seal;dev-time | pytest pass(tests/test_ai_pair_review.py, tests/test_ai_review_evaluation.py) |
 
 判分本身是 Robert 的定性行为,永不机检;LLM judge 属独立决策,另票批准(032)。
 
 **2026-09-05 修订说明（versioned addendum）**：新增 VM-QUAL-02,覆盖 [AI 辅助 Ideation 评审](ai-assisted-ideation-evaluation-spec.md) 的单评审模式机检面（authoring contract v2,见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)）。VM-QUAL-01 语义不变：AI 评审记录不参与 v1 coverage 核算,也不能满足 VM-QUAL-01 的 covered 门槛;两位独立评审、成对换位与 comparison ingestion 的机检面由后续 ticket 追加新行,不修改本行。离线 fixtures 只证明软件契约,模型判断质量属真实 smoke 的验收对象。
+
+**2026-09-05 修订说明二（versioned addendum）**：新增 VM-QUAL-03,覆盖同规格的双评审共识与成对盲评机检面（ticket 02;布局迁移为 per-slot `ai/<slot>/` 目录 + `ai/consensus/`,单评审行为语义不变,VM-QUAL-02 证据路径相应更新为 slot 布局）。VM-QUAL-03 只证明软件契约:真实六次 smoke（单条 ×2 + 合成 pair ×4）未执行,执行入口见 [ai-review-smoke-runbook.md](ai-review-smoke-runbook.md),离线证据见 [ai-pair-review-offline-validation-evidence.md](../research/ai-pair-review-offline-validation-evidence.md)。comparison ingestion 消费 AI 记录的机检面仍归 ticket 03,本行不覆盖。
 
 ## 证据留存纪律
 
