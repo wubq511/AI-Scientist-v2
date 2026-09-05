@@ -4010,12 +4010,15 @@ def reduce_prompt_comparison(
     if intrusion_increased:
         decision = "reject"
 
-    # Gate 5: the existing rubric floor (any problem value on either arm).
-    # Under the AI channel the per-arm floors come from the AI verdict's
-    # content-space quality-floor states (the dual-review consensus records),
-    # never from the overall preference; a violated floor rejects exactly as
-    # a human floor hit would.
+    # Gates 5/5b: the quality floors. Under the AI channel the per-arm floors
+    # come from the AI verdict's content-space quality-floor states (the
+    # dual-review consensus records), never from the overall preference; a
+    # violated floor rejects exactly as a human floor hit would, and an
+    # unresolved/not_evaluated floor cannot pass this promotion judgment
+    # either (spec §5: 未决状态仍阻止受影响的晋升判断 — the pair may keep
+    # collecting evidence, but not be promoted on it).
     floor_hits: list[dict[str, Any]] = []
+    unresolved_floors: list[dict[str, Any]] = []
     for facts in pair_facts:
         verdict = facts.verdict or {}
         if facts.case_id in ai_verdicts:
@@ -4025,13 +4028,18 @@ def reduce_prompt_comparison(
                 challenger_run_id=facts.challenger_metrics.run_id,
                 mapping=_mapping_for_case(mappings, facts.case_id),
             )
-            for arm, state in (
-                ("baseline", projected["rubric_floor_baseline"]),
-                ("challenger", projected["rubric_floor_challenger"]),
-            ):
+            arm_states = {
+                "baseline": projected["rubric_floor_baseline"],
+                "challenger": projected["rubric_floor_challenger"],
+            }
+            for arm, state in sorted(arm_states.items()):
                 if state == "violated":
                     floor_hits.append(
                         {"arm": arm, "case_id": facts.case_id, "value": "violated"}
+                    )
+                elif state in ("unresolved", "not_evaluated"):
+                    unresolved_floors.append(
+                        {"arm": arm, "case_id": facts.case_id, "state": state}
                     )
             continue
         floor = verdict.get("rubric_floor", {})
@@ -4047,30 +4055,9 @@ def reduce_prompt_comparison(
     if floor_hits:
         decision = "reject"
 
-    # Gate 5b (AI channel): unresolved quality floors stay unresolved. The
-    # consensus floor state `unresolved`/`not_evaluated` means the dual
-    # reviewers did not converge on that floor dimension: the pair may
-    # continue collecting evidence, but it cannot pass this promotion
-    # judgment (spec §5: 未决状态仍阻止受影响的晋升判断).
+    # Gate 5b (AI channel): record the unresolved floors explicitly so the
+    # reduction shows why a complete-unresolved matrix stays unpromotable.
     if ai_verdicts:
-        unresolved_floors: list[dict[str, Any]] = []
-        for facts in pair_facts:
-            if facts.case_id not in ai_verdicts:
-                continue
-            projected = ai_verdict_to_display(
-                ai_verdicts[facts.case_id],
-                baseline_run_id=facts.baseline_metrics.run_id,
-                challenger_run_id=facts.challenger_metrics.run_id,
-                mapping=_mapping_for_case(mappings, facts.case_id),
-            )
-            for arm, state in (
-                ("baseline", projected["rubric_floor_baseline"]),
-                ("challenger", projected["rubric_floor_challenger"]),
-            ):
-                if state in ("unresolved", "not_evaluated"):
-                    unresolved_floors.append(
-                        {"arm": arm, "case_id": facts.case_id, "state": state}
-                    )
         gates["ai_quality_floor_unresolved"] = {
             "unresolved": unresolved_floors,
             "pass": not unresolved_floors,

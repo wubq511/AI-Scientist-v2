@@ -39,6 +39,7 @@ from .ai_review import (
     _load_review_config,
 )
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
+from .comparison import AI_VERDICT_SCHEMA_VERSION
 from .contract import (
     EVALUATION_AI_PAIR_REDUCTION_SCHEMA_VERSION,
     EVALUATION_ROOT_RELPATH,
@@ -46,13 +47,6 @@ from .contract import (
 from .errors import fail
 from .evaluation_protocol import load_evaluation_protocol
 from .schema import closed_object
-
-AI_VERDICT_SCHEMA_VERSION = "comparison-ai-verdict-v1.0.0"
-AI_VERDICTS_DIRNAME = "ai-verdicts"
-
-# Per-arm quality floor states that block the pair's promotion judgment
-# regardless of the stable preference (the shared negative stays negative).
-QUALITY_FLOOR_BLOCKING_STATES = frozenset({"violated"})
 
 _PAIR_REDUCTION_KEYS = frozenset(
     {

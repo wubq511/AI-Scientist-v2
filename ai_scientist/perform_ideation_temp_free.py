@@ -195,7 +195,6 @@ def _build_parser() -> argparse.ArgumentParser:
     ev_record_ai_verdict.add_argument("--case-id", required=True)
     ev_record_ai_verdict.add_argument("--baseline-run-id", required=True)
     ev_record_ai_verdict.add_argument("--challenger-run-id", required=True)
-    ev_record_ai_verdict.add_argument("--pair-index", type=int, required=True)
     ev_record_ai_verdict.add_argument("--packet-sha256", required=True)
     ev_record_ai_verdict.add_argument("--recorded-by", required=True)
     ev_cost_init = evaluation_actions.add_parser(

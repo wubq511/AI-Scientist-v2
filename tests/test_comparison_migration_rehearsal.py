@@ -704,9 +704,10 @@ def _ingest_env(helpers, tmp_path_factory, synthetic_workspace):
         )
         admission_commits.add(admission["code"]["commit"])
     assert len(admission_commits) == 1
+    pinned_commit = admission_commits.pop()
     package_dir = tmp_path_factory.mktemp("rehearsal-pkg") / "pkg"
     package_dir.mkdir()
-    cmp_mod.create_execution_code_pin(package_dir, commit=admission_commits.pop())
+    cmp_mod.create_execution_code_pin(package_dir, commit=pinned_commit)
     metrics_by_run: dict[str, Any] = {}
     for run in runs:
         key = (run.case_id, run.profile_id)
@@ -757,7 +758,7 @@ def _ingest_env(helpers, tmp_path_factory, synthetic_workspace):
         "run_ids": run_ids,
         "packets": packets,
         "package_dir": package_dir,
-        "admission_commit": next(iter(admission_commits), None),
+        "admission_commit": pinned_commit,
     }
 
 
@@ -1070,3 +1071,37 @@ def test_human_verdict_path_stays_reachable_without_ai_arguments(
     assert reduction["decision"] == "incomplete"
     assert "evaluation_protocol" not in reduction["gates"]
     assert "verdict_channels" not in reduction["gates"]["completeness"]
+
+
+def test_drifted_workspace_refused_by_old_runner(rehearsal_env) -> None:
+    """A clean worktree whose HEAD sits on the post-ticket-03 commit is
+    refused by the frozen slot runner exactly as the live drifted workspace:
+    the pin check runs before any reservation, so the drifted tree can
+    neither create a reservation nor exec, and the stale pin is preserved."""
+    env = rehearsal_env
+    workspace = env["workspace"]
+    launch = {
+        "authorization": {
+            "run_index": 2,
+            "schema_version": "comparison-run-authorization-v1.0.0",
+        },
+        "command_argv": ("echo", "frozen-command"),
+        "package_dir": str(env["package_dir"]),
+        "workspace_root": str(workspace),
+    }
+    drifted_head = "f" * 40  # the newer HEAD the live workspace sits at
+    pin_bytes = (env["package_dir"] / "execution-code-pin.json").read_bytes()
+    with pytest.raises(IdeationInputError) as exc_info:
+        cmp_mod.reserve_comparison_slot(
+            launch, execution_head_resolver=lambda _root: drifted_head
+        )
+    assert exc_info.value.code == "EXECUTION_CODE_PIN_MISMATCH"
+    # The stale pin is preserved as evidence; nothing was written.
+    assert (
+        env["package_dir"] / "execution-code-pin.json"
+    ).read_bytes() == pin_bytes
+    assert not (env["package_dir"] / "vault" / "run-reservations").exists() or not (
+        env["package_dir"] / "vault" / "run-reservations" / "run-002.json"
+    ).exists()
+    pin = cmp_mod.load_execution_code_pin(env["package_dir"])
+    assert pin["commit"] == env["admission_commit"]

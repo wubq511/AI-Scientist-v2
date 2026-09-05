@@ -29,6 +29,7 @@ Fail-closed rules:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from pathlib import Path
 from typing import Any
 
@@ -153,12 +154,32 @@ def register_evaluation_protocol(
     target = root / PROTOCOL_MANIFEST_NAME
     archived: dict[str, str] | None = None
     if target.is_file():
-        archive_name = (
-            "evaluation-protocol-manifest-archived-"
-            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
-        )
-        archive_path = root / archive_name
-        target.rename(archive_path)
+        # The archive name collides if two amendments land in the same
+        # second; exclusive-create keeps every archived generation on disk.
+        sequence = 0
+        while True:
+            suffix = "" if sequence == 0 else f"-{sequence:02d}"
+            archive_name = (
+                "evaluation-protocol-manifest-archived-"
+                f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+                f"{suffix}.json"
+            )
+            archive_path = root / archive_name
+            try:
+                descriptor = os.open(
+                    archive_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+                )
+                break
+            except FileExistsError:
+                sequence += 1
+            except OSError as exc:
+                detail = exc.strerror or str(exc)
+                fail(
+                    "STORAGE_WRITE_FAILED",
+                    f"Cannot archive {PROTOCOL_MANIFEST_NAME}: {detail}",
+                )
+        os.close(descriptor)
+        os.replace(target, archive_path)
         _fsync_directory(root)
         archived = {
             "file": EVALUATION_ROOT_RELPATH.joinpath(archive_name).as_posix(),

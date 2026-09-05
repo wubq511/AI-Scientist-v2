@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
+from .contract import _now
 from .errors import fail
 from .schema import closed_object, nonempty_string, timestamp
 
@@ -133,7 +134,7 @@ def migration_handoff_manifest(
     if not files:
         fail("INVALID_INPUT", "A hand-off must carry at least one file")
     return {
-        "created_at": _migration_now(),
+        "created_at": _now(),
         "created_by": created_by,
         "direction": direction,
         "direction_state": direction_state,
@@ -150,12 +151,13 @@ def verify_handoff_manifest(
 ) -> dict[str, Any]:
     """Verify one hand-off manifest against this workspace's files.
 
-    `verify_present=True` (receiving end): every carried file must exist here
-    with exactly the recorded hash. `verify_present=False` (sending end):
-    every carried file must exist with exactly the recorded hash too — the
-    sender proves its own copy before travel. A missing/drifted file fails
-    closed; nothing is written.
+    Every carried file must exist here with exactly the recorded hash: the
+    receiving end proves it received the recorded bytes, and the sending end
+    proves its own copy before travel — both checks are the same file
+    comparison, so the caller's `verify_present` flag records the intent
+    only. A missing/drifted file fails closed; nothing is written.
     """
+    del verify_present  # both ends perform the identical hash comparison
     workspace = workspace_root.resolve(strict=True)
     checked = closed_object(
         manifest,
@@ -263,13 +265,3 @@ def ledger_recency_comparison(
         "remote": {"entries": remote_ingested, "forfeited_entries": remote_forfeited},
         "verdict": verdict,
     }
-
-
-def _migration_now() -> str:
-    from datetime import datetime, timezone
-
-    return (
-        datetime.now(timezone.utc)
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
-    )

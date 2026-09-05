@@ -1,6 +1,6 @@
 # 真实迁移执行手册（ticket 03 — comparison 接入 AI 评估）
 
-日期：2026-09-05。状态：**未执行**（离线编码验收已完成，真实迁移需 Robert 批准评估协议修订后按本手册执行）。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)「Comparison 接入（ticket 03）」一节；规格见 [ai-assisted-ideation-evaluation-spec.md](ai-assisted-ideation-evaluation-spec.md) 第 7 节；迁移 rehearsal 证据见 `tests/test_comparison_migration_rehearsal.py`（13 项）与 `tests/test_evaluation_costs.py`（23 项）。
+日期：2026-09-05。状态：**未执行**（离线编码验收已完成，真实迁移需 Robert 批准评估协议修订后按本手册执行）。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)「Comparison 接入（ticket 03）」一节；规格见 [ai-assisted-ideation-evaluation-spec.md](ai-assisted-ideation-evaluation-spec.md) 第 7 节；迁移 rehearsal 证据见 `tests/test_comparison_migration_rehearsal.py`（14 项）与 `tests/test_evaluation_costs.py`（23 项）。
 
 本手册是**可执行操作手册**：所有命令、哈希、目录都是当前真实状态；每一步都有机器检查，任何检查不过都 fail closed 并停在原地（见「失败保留」）。
 
