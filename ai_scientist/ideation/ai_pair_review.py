@@ -299,6 +299,15 @@ def _scan_payload_keys(payload: dict[str, Any]) -> None:
 
 
 def _scan_payload_identity(payload: dict[str, Any], secrets: list[str]) -> None:
+    """Scan the model-visible payload for arm/case/expectation identity leaks.
+
+    `paper_id` hashes are deliberately absent from the secret list: a
+    finalized idea may cite corpus references as `Paper ID <hash>` inside
+    its own payload text (that is the model's declared-grounding style), the
+    hash names a reference paper rather than an arm, and both arms of a pair
+    share the same corpus — so its presence cannot reveal which arm is the
+    challenger. Run/case/profile/pair identities stay fail closed.
+    """
     payload_text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     for secret in secrets:
         if secret and secret in payload_text:
@@ -523,14 +532,6 @@ def _derive_pair_document(
         "content_2",
         "ml-baseline-v1",
         "cross-domain-v1",
-        *sorted(
-            {
-                entry["paper_id"]
-                for single_document in doc_by_content.values()
-                for entry in single_document["source_registry"]
-                if "paper_id" in entry
-            }
-        ),
     ]
     for direction in DIRECTIONS:
         _scan_payload_identity(direction_payloads[direction], secrets)

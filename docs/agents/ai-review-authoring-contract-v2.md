@@ -146,7 +146,7 @@ exit 0 = 成功；exit 1 = 被拒（stderr 为 canonical JSON 错误，含 code�
 
 - `evaluation export-pair-package --run-id-a <a> --idea-index-a <i> --run-id-b <b> --idea-index-b <j>` 推导确定性 pair 包（`pair-package.json`）+ 两个方向的待发送请求（`pair-request-ab.txt` / `pair-request-ba.txt`）。重复导出逐字节一致；`pair_id = "pair-" + sha256(canonical{arms, case_id})[:16]`。
 - 匿名内容 `content_1` / `content_2` 按 (run_id, idea_index) 排序固定；盲映射 `ab: {arm_a: content_1, arm_b: content_2}`、`ba: {arm_a: content_2, arm_b: content_1}`。两位评审各自在**独立上下文**完成 A/B 与 B/A，共四次；没有任何机制在同上下文提醒其保持前次答案。
-- 方向 payload 把共享 case 材料（Workshop、target abstract_summary、abstract，逐字节核验相同 `PAIR_MATERIAL_MISMATCH`）编为 `C###` source，两臂各自的 idea 字段、审计声明、检索节选编为 `A###` / `B###` source。model-visible payload 禁止携带 arm 身份、`content_1`/`content_2`、run/case/pair 身份、paper_id、profile 标识、成本或期望 winner——JSON key 与序列化文本双向扫描（`PAIR_PACKET_BLIND_LEAK`）。私有 `source_registry` 与 `blind_mapping` 留在外层文档供程序还原。
+- 方向 payload 把共享 case 材料（Workshop、target abstract_summary、abstract，逐字节核验相同 `PAIR_MATERIAL_MISMATCH`）编为 `C###` source，两臂各自的 idea 字段、审计声明、检索节选编为 `A###` / `B###` source。model-visible payload 禁止携带 arm 身份、`content_1`/`content_2`、run/case/pair 身份、profile 标识、成本或期望 winner——JSON key 与序列化文本双向扫描（`PAIR_PACKET_BLIND_LEAK`）。**合同级修正（2026-09-05，Robert 批准）**：`paper_id` 从泄漏扫描的 secret 清单移除——finalized idea 正文可能以 `Paper ID <哈希>` 引用语料参考文献（模型 declared-grounding 风格），该哈希指向参考文献论文而非臂身份，且两臂共享同一语料，出现与否无法帮助评审推断 challenger；run/case/profile/pair 身份仍 fail closed（回归测试 `test_export_pair_package_allows_paper_ids_inside_idea_text`）。私有 `source_registry` 与 `blind_mapping` 留在外层文档供程序还原。
 - 同 run 同 idea、或两臂 idea 载荷逐字节相同 → `PAIR_ARMS_IDENTICAL`；防御性的 case/target 不匹配 → `PAIR_CASE_MISMATCH` / `PAIR_TARGET_MISMATCH`。
 
 ### 四次独立评审与还原
