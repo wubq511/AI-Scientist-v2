@@ -73,17 +73,24 @@ from .contract import (
 )
 from .errors import fail
 from .evaluation import (
+    IDEA_INVENTORY_PATTERN,
     _check_supersedes,
     _collect_release_record,
+    _derive_target_comparator,
     _evaluation_idea_dir,
     _existing_versions,
+    _inventory_index,
     _load_context_and_comparator,
     _load_idea_evidence,
+    _load_run_context,
+    _load_rubric_policy,
+    _load_workshop_manifest,
     _validate_idea_index,
     _write_bytes_once,
     _write_bytes_overwrite,
 )
-from .run_store import _fsync_directory
+from .errors import IdeationInputError
+from .run_store import RUNS_ROOT_RELPATH, SEAL_NAME, _fsync_directory, _validate_run_id
 from .schema import (
     closed_object,
     nonempty_string,
@@ -117,6 +124,19 @@ ASSESSMENT_STATUSES = frozenset({JUDGED_STATUS, INSUFFICIENT_EVIDENCE_STATUS})
 REF_STANCES = frozenset({"supports", "contradicts"})
 VALIDATED_BY_TOOL = "ai_scientist.ideation.ai_review.validate_ai_review"
 AGGREGATED_BY_TOOL = "ai_scientist.ideation.ai_review.aggregate_review"
+
+# Ticket 03: read-only AI review coverage over the seal inventory. The four
+# states mirror the consensus record's coverage vocabulary; `missing` and
+# `invalid` stay non-ingestable, `complete_resolved` and `complete_unresolved`
+# both mean two valid evaluator records exist (unresolved abstentions or
+# conflicts may still continue the matrix without passing any quality gate).
+AI_REVIEW_COVERAGE_SCHEMA_VERSION = "evaluation-ai-review-coverage-v1.0.0"
+AI_REVIEW_COVERAGE_STATES = (
+    "complete_resolved",
+    "complete_unresolved",
+    "invalid",
+    "missing",
+)
 # Dimensions whose judged claims are scope statements about the audit facts:
 # the template requires citing the audit_statement source so the claimed
 # scope is anchored to the checks the package actually carries.
@@ -1742,6 +1762,32 @@ _RESPONSE_IMPORT_KEYS = frozenset(
     }
 )
 
+# Closed key set of the dual-review consensus record (used by the coverage
+# re-verification in list_ai_review_coverage).
+_CONSENSUS_RECORD_KEYS = frozenset(
+    {
+        "schema_version",
+        "authoring_contract_version",
+        "record_kind",
+        "run_id",
+        "case_id",
+        "seal_sha256",
+        "idea",
+        "target_paper",
+        "rubric_version",
+        "prompt_version",
+        "review_package_sha256",
+        "review_config_sha256",
+        "coverage",
+        "evaluators",
+        "judgments",
+        "citation_verification",
+        "quality_floor",
+        "audit",
+        "supersedes",
+    }
+)
+
 
 def _config_sha256(workspace: Path) -> str:
     path = workspace / EVALUATION_ROOT_RELPATH / CONFIG_NAME
@@ -2221,6 +2267,214 @@ def aggregate_review(
         "status": "aggregated",
         "supersedes": expected_supersedes,
         "version": version_name,
+    }
+
+
+def _idea_ai_coverage(
+    workspace: Path,
+    context: Any,
+    target: Any,
+    rubric: Any,
+    run_id: str,
+    idea_index: int,
+    idea_entry: dict[str, Any],
+) -> dict[str, Any]:
+    """Read-only coverage of one idea's dual AI review, full re-verification.
+
+    The slot states are derived exactly as ``aggregate_review`` derives them
+    (same ``_slot_record_state`` integrity re-verification); the coverage
+    derivation mirrors the consensus rule without writing any record. When
+    both slots hold valid records but no consensus record has been produced
+    yet, the state is ``unaggregated`` — the evaluation work exists and is
+    verifiable, but the honest summary step has not run. A missing or
+    drifting review package keeps the idea at ``missing``/``invalid`` like a
+    never-exported idea; tampered chains fail closed instead of returning a
+    state.
+    """
+    idea_dir = _evaluation_idea_dir(workspace, run_id, idea_index)
+    ai_path = _ai_dir(idea_dir)
+    package_path = ai_path / PACKAGE_NAME
+    if not package_path.is_file() or package_path.is_symlink():
+        return {"idea_index": idea_index, "state": "missing", "quality_floor": None}
+    package_bytes = package_path.read_bytes()
+    try:
+        document, _prompt = _rederive_package(
+            workspace=workspace,
+            run_id=run_id,
+            idea_index=idea_index,
+            context=context,
+            target=target,
+            rubric=rubric,
+            package_bytes=package_bytes,
+        )
+        request_path = ai_path / REQUEST_NAME
+        if not request_path.is_file() or request_path.is_symlink():
+            fail("REVIEW_REQUEST_NOT_FOUND", f"No {REQUEST_NAME} on disk")
+        if request_path.read_bytes() != _render_review_request(
+            _load_review_prompt(workspace).text, document["model_payload"]
+        ):
+            fail("REVIEW_REQUEST_DRIFT", f"{REQUEST_NAME} on disk drifted")
+        config = _load_review_config(workspace)
+    except IdeationInputError as exc:
+        return {
+            "idea_index": idea_index,
+            "state": "invalid",
+            "quality_floor": None,
+            "note": {"code": exc.code, "message": exc.message},
+        }
+    slot_results = {
+        slot: _slot_record_state(
+            ai_path=ai_path,
+            slot=slot,
+            package_bytes=package_bytes,
+            document=document,
+            rubric=rubric,
+            run_id=run_id,
+            idea_index=idea_index,
+            idea_entry=idea_entry,
+            context=context,
+        )
+        for slot in EVALUATOR_SLOTS
+    }
+    for slot in EVALUATOR_SLOTS:
+        result = slot_results[slot]
+        if result["record"] is not None:
+            _check_config_binding(config, slot, result["record"]["evaluator"])
+    if any(slot_results[slot]["state"] == "invalid" for slot in EVALUATOR_SLOTS):
+        state = "invalid"
+    elif any(slot_results[slot]["state"] != "valid" for slot in EVALUATOR_SLOTS):
+        state = "missing"
+    else:
+        consensus_versions = _existing_versions(ai_path / CONSENSUS_DIRNAME)
+        if not consensus_versions:
+            state = "unaggregated"
+        else:
+            consensus_path = ai_path / CONSENSUS_DIRNAME / consensus_versions[-1][1]
+            consensus = parse_json_bytes(
+                consensus_path.read_bytes(), label="consensus record"
+            )
+            consensus = closed_object(
+                consensus, label="consensus record", keys=_CONSENSUS_RECORD_KEYS
+            )
+            if (
+                consensus["run_id"] != run_id
+                or consensus["case_id"] != context.case_id
+                or consensus["seal_sha256"] != context.seal_sha256
+                or closed_object(
+                    consensus["idea"],
+                    label="consensus.idea",
+                    keys={"idea_index", "relative_path", "sha256"},
+                )["sha256"]
+                != idea_entry["sha256"]
+                or consensus["review_package_sha256"] != sha256_bytes(package_bytes)
+                or consensus["review_config_sha256"] != _config_sha256(workspace)
+            ):
+                fail(
+                    "IDENTITY_MISMATCH",
+                    "The consensus record does not bind this run/idea/config",
+                )
+            state = consensus["coverage"]
+            if state not in AI_REVIEW_COVERAGE_STATES:
+                fail(
+                    "INVALID_SCHEMA",
+                    f"The consensus record carries an unknown coverage: {state}",
+                )
+            return {
+                "consensus_record": consensus_path.name,
+                "consensus_record_sha256": sha256_bytes(consensus_path.read_bytes()),
+                "idea_index": idea_index,
+                "quality_floor": consensus["quality_floor"],
+                "state": state,
+            }
+    return {"idea_index": idea_index, "state": state, "quality_floor": None}
+
+
+def list_ai_review_coverage(workspace_root: Path) -> dict[str, Any]:
+    """Read-only AI dual-review coverage over the seal inventory.
+
+    For every sealed run x every finalized idea, derive the consensus-record
+    coverage state from the two evaluator slots with full integrity
+    re-verification (never trusting disk bytes blindly): ``missing`` (no
+    valid evaluator records), ``invalid`` (a slot's latest response is
+    unparseable), ``unaggregated`` (both valid, no consensus record yet),
+    ``complete_resolved`` / ``complete_unresolved`` (head consensus record).
+    The v1 human coverage is untouched; runs whose comparator inputs are
+    unavailable are reported as ``unevaluable``. Nothing is written.
+    """
+    workspace = workspace_root.resolve(strict=True)
+    runs_root = workspace / RUNS_ROOT_RELPATH
+    if runs_root.is_symlink():
+        fail("SYMLINK_FORBIDDEN", "The ideation-runs root is a symlink")
+    rubric = _load_rubric_policy(workspace)
+
+    runs: list[dict[str, Any]] = []
+    summary = {
+        "ai_ideas_complete_resolved": 0,
+        "ai_ideas_complete_unresolved": 0,
+        "ai_ideas_invalid": 0,
+        "ai_ideas_missing": 0,
+        "ai_ideas_unaggregated": 0,
+        "sealed_runs": 0,
+    }
+    run_ids: list[str] = []
+    if runs_root.is_dir():
+        run_ids = sorted(
+            child.name
+            for child in runs_root.iterdir()
+            if child.is_dir() and not child.is_symlink()
+        )
+    for candidate in run_ids:
+        try:
+            _validate_run_id(candidate)
+        except IdeationInputError:
+            continue
+        run_root = runs_root / candidate
+        if not (run_root / SEAL_NAME).is_file():
+            continue  # unsealed runs are not part of the seal inventory
+        try:
+            context = _load_run_context(workspace, candidate)
+            manifest = _load_workshop_manifest(workspace, context)
+            target = _derive_target_comparator(workspace, manifest)
+        except IdeationInputError as exc:
+            runs.append(
+                {
+                    "error_code": exc.code,
+                    "ideas": [],
+                    "run_id": candidate,
+                    "status": "unevaluable",
+                }
+            )
+            continue
+        summary["sealed_runs"] += 1
+        inventory = _inventory_index(context.seal_document)
+        idea_entries = []
+        for relative_path, item in inventory.items():
+            match = IDEA_INVENTORY_PATTERN.fullmatch(relative_path)
+            if match:
+                idea_entries.append((int(match.group(1)), item))
+        idea_entries.sort(key=lambda pair: pair[0])
+        ideas = [
+            _idea_ai_coverage(
+                workspace, context, target, rubric, candidate, index, item
+            )
+            for index, item in idea_entries
+        ]
+        for idea in ideas:
+            summary[f"ai_ideas_{idea['state']}"] += 1
+        runs.append(
+            {
+                "case_id": context.case_id,
+                "ideas": ideas,
+                "run_id": candidate,
+                "status": "evaluable",
+                "terminal_outcome": context.terminal_outcome,
+            }
+        )
+    return {
+        "runs": runs,
+        "schema_version": AI_REVIEW_COVERAGE_SCHEMA_VERSION,
+        "status": "ok",
+        "summary": summary,
     }
 
 
