@@ -50,36 +50,63 @@ def verify_generation_package_compatibility(
     *,
     expected_sha256s: dict[str, str],
 ) -> dict[str, Any]:
-    """Verify the frozen package files exist at the standard relative layout.
+    """Verify the frozen package files inside ONE package directory.
 
     The evaluation workspace keeps the generation package at its original
     relative path (`artifacts/ideation-inputs/comparisons/<slug>/`) with
     byte-identical frozen files, so `prepare_comparison_slot_launch` in the
     generation worktree and the evaluation-side tooling read the same pins.
-    A missing, drifted, or symlinked file fails closed; nothing is written.
+    All six files must come from the same package slug: a workspace holds
+    several historical packages and mixing files across slugs would silently
+    verify a chimera. The slug is the unique subdirectory containing
+    `run-matrix.json` matching `expected_sha256s` — ambiguity or absence
+    fails closed. A missing, drifted, or symlinked file fails closed;
+    nothing is written.
     """
     workspace = workspace_root.resolve(strict=True)
-    package_dir = workspace / "artifacts" / "ideation-inputs" / "comparisons"
-    if not package_dir.is_dir():
+    package_root = workspace / "artifacts" / "ideation-inputs" / "comparisons"
+    if not package_root.is_dir():
         fail(
             "MIGRATION_PACKAGE_MISSING",
             "The comparison package root is missing from this workspace",
-            path=str(package_dir),
+            path=str(package_root),
         )
+    matrix_digest = expected_sha256s.get("run-matrix.json")
+    candidates: list[Path] = []
+    for child in sorted(package_root.iterdir()):
+        if not child.is_dir() or child.is_symlink():
+            continue
+        matrix_file = child / "run-matrix.json"
+        if not matrix_file.is_file() or matrix_file.is_symlink():
+            continue
+        if (
+            matrix_digest is None
+            or sha256_bytes(matrix_file.read_bytes()) == matrix_digest
+        ):
+            candidates.append(child)
+    if not candidates:
+        fail(
+            "MIGRATION_PACKAGE_MISSING",
+            "No comparison package in this workspace matches the pinned "
+            "run-matrix bytes",
+            expected_run_matrix_sha256=matrix_digest,
+        )
+    if len(candidates) > 1:
+        fail(
+            "MIGRATION_PACKAGE_AMBIGUOUS",
+            "More than one comparison package matches the pinned run-matrix "
+            "bytes; name the package explicitly before migrating",
+            slugs=sorted(candidate.name for candidate in candidates),
+        )
+    package_dir = candidates[0]
     verified: dict[str, str] = {}
     for name in FROZEN_PACKAGE_FILES:
-        found: Path | None = None
-        for child in sorted(package_dir.iterdir()):
-            if not child.is_dir() or child.is_symlink():
-                continue
-            candidate = child / name
-            if candidate.is_file() and not candidate.is_symlink():
-                found = candidate
-                break
-        if found is None:
+        found = package_dir / name
+        if found.is_symlink() or not found.is_file():
             fail(
                 "MIGRATION_PACKAGE_MISSING",
                 f"The frozen package file is missing: {name}",
+                package=package_dir.name,
             )
         digest = sha256_bytes(found.read_bytes())
         expected = expected_sha256s.get(name)
@@ -93,6 +120,7 @@ def verify_generation_package_compatibility(
             )
         verified[name] = digest
     return {
+        "package": package_dir.name,
         "package_files": verified,
         "status": "verified",
     }

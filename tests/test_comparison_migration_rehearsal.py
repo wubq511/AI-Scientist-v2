@@ -471,7 +471,7 @@ def test_migration_package_verification_round_trip(tmp_path: Path) -> None:
     assert set(result["package_files"]) == set(hashes)
 
 
-def test_migration_package_verification_fails_on_drift(tmp_path: Path) -> None:
+def test_migration_package_verification_fails_on_matrix_drift(tmp_path: Path) -> None:
     from ai_scientist.ideation.migration import verify_generation_package_compatibility
 
     _package_dir, hashes = _make_frozen_package_files(tmp_path / "gen")
@@ -483,7 +483,47 @@ def test_migration_package_verification_fails_on_drift(tmp_path: Path) -> None:
     (target / "run-matrix.json").write_bytes(b'{"schema":"tampered"}')
     with pytest.raises(IdeationInputError) as exc_info:
         verify_generation_package_compatibility(eval_root, expected_sha256s=hashes)
+    # The tampered matrix identifies no package, so the lookup itself fails
+    # closed before any per-file comparison could cherry-pick across slugs.
+    assert exc_info.value.code == "MIGRATION_PACKAGE_MISSING"
+
+
+def test_migration_package_verification_fails_on_frozen_file_drift(
+    tmp_path: Path,
+) -> None:
+    from ai_scientist.ideation.migration import verify_generation_package_compatibility
+
+    _package_dir, hashes = _make_frozen_package_files(tmp_path / "gen")
+    eval_root = tmp_path / "eval"
+    target = eval_root / "artifacts" / "ideation-inputs" / "comparisons" / "002-x"
+    target.mkdir(parents=True)
+    for name, digest in hashes.items():
+        (target / name).write_bytes((tmp_path / "gen" / "package" / name).read_bytes())
+    (target / "commands.txt").write_bytes(b"tampered-command\n")
+    with pytest.raises(IdeationInputError) as exc_info:
+        verify_generation_package_compatibility(eval_root, expected_sha256s=hashes)
     assert exc_info.value.code == "MIGRATION_PACKAGE_DRIFT"
+
+
+def test_migration_package_verification_rejects_ambiguous_slugs(
+    tmp_path: Path,
+) -> None:
+    """Two package slugs carrying the same pinned matrix bytes fail closed:
+    the six frozen files must come from one package, never a chimera."""
+    from ai_scientist.ideation.migration import verify_generation_package_compatibility
+
+    _package_dir, hashes = _make_frozen_package_files(tmp_path / "gen")
+    eval_root = tmp_path / "eval"
+    for slug in ("002-a", "002-b"):
+        target = eval_root / "artifacts" / "ideation-inputs" / "comparisons" / slug
+        target.mkdir(parents=True)
+        for name, digest in hashes.items():
+            (target / name).write_bytes(
+                (tmp_path / "gen" / "package" / name).read_bytes()
+            )
+    with pytest.raises(IdeationInputError) as exc_info:
+        verify_generation_package_compatibility(eval_root, expected_sha256s=hashes)
+    assert exc_info.value.code == "MIGRATION_PACKAGE_AMBIGUOUS"
 
 
 def test_handoff_manifest_round_trip(tmp_path: Path) -> None:
@@ -1069,8 +1109,25 @@ def test_human_verdict_path_stays_reachable_without_ai_arguments(
         ledger=env["ledger"],
     )
     assert reduction["decision"] == "incomplete"
-    assert "evaluation_protocol" not in reduction["gates"]
-    assert "verdict_channels" not in reduction["gates"]["completeness"]
+    # Byte-stability against the pre-revision reducer: the incomplete early
+    # return carries exactly the legacy completeness gate (no AI-channel
+    # keys, no protocol gate) and the document keeps its pre-revision shape.
+    # Any future drift in the no-AI path breaks this contract.
+    assert set(reduction["gates"]) == {"completeness"}
+    assert set(reduction["gates"]["completeness"]) == {"pass", "problems"}
+    assert set(reduction) == {
+        "decision",
+        "gates",
+        "matrix_sha256",
+        "revealed_pair_profiles",
+        "schema_version",
+        "selection_manifest_sha256",
+    }
+    assert reduction["gates"]["completeness"]["problems"] == [
+        {"case_id": p.case_id, "problem": "missing_verdict"}
+        for p in sorted(env["pairs"], key=lambda pair: pair.pair_index)
+        if p.case_id != pair.case_id
+    ]
 
 
 def test_drifted_workspace_refused_by_old_runner(rehearsal_env) -> None:
@@ -1097,11 +1154,160 @@ def test_drifted_workspace_refused_by_old_runner(rehearsal_env) -> None:
         )
     assert exc_info.value.code == "EXECUTION_CODE_PIN_MISMATCH"
     # The stale pin is preserved as evidence; nothing was written.
+    assert (env["package_dir"] / "execution-code-pin.json").read_bytes() == pin_bytes
     assert (
-        env["package_dir"] / "execution-code-pin.json"
-    ).read_bytes() == pin_bytes
-    assert not (env["package_dir"] / "vault" / "run-reservations").exists() or not (
-        env["package_dir"] / "vault" / "run-reservations" / "run-002.json"
-    ).exists()
+        not (env["package_dir"] / "vault" / "run-reservations").exists()
+        or not (
+            env["package_dir"] / "vault" / "run-reservations" / "run-002.json"
+        ).exists()
+    )
     pin = cmp_mod.load_execution_code_pin(env["package_dir"])
     assert pin["commit"] == env["admission_commit"]
+
+
+def test_full_ai_matrix_reduces_to_promote(rehearsal_env) -> None:
+    """A complete four-pair AI matrix under the registered protocol reduces
+    through every pre-registered gate to a decision: gates 2-4 consume the
+    projected AI verdicts exactly as they would a human sweep, and the
+    reduction document carries the protocol gate."""
+    from ai_scientist.ideation.comparison import (
+        ComparisonVault,
+        reduce_prompt_comparison,
+    )
+    from ai_scientist.ideation.comparison_ai import record_comparison_ai_verdict
+
+    env = rehearsal_env
+    workspace = env["workspace"]
+    _register_review_config(workspace)
+    _register_evaluation_protocol(workspace)
+    config_sha = sha256_bytes(
+        (workspace / "artifacts/evaluations/ai-review-config.json").read_bytes()
+    )
+    package_dir = env["package_dir"]
+    _write_protocol_pin(package_dir, config_sha)
+    (package_dir / "blind-mapping.json").write_bytes(
+        canonical_json_bytes(
+            cmp_mod.blind_mapping_document(
+                env["mappings"], selection_manifest=env["manifest"]
+            )
+        )
+    )
+    vault = ComparisonVault(package_dir / "vault")
+    from ai_scientist.ideation.evaluation_protocol import load_evaluation_protocol
+
+    protocol = load_evaluation_protocol(workspace)
+
+    # Build the reducer-facing AI verdicts for all four pairs from one
+    # challenger-preferred content-space document per pair. Each pair's
+    # packet binding is its own; the arm bindings come from the ingested
+    # runs (the AI side would produce these through the real dual-review +
+    # pair-review chain proven by the E2E test above).
+    ai_verdicts: dict[str, dict[str, Any]] = {}
+    facts: list[cmp_mod.PairFacts] = []
+    for pair in env["pairs"]:
+        baseline_run_id = env["run_ids"][(pair.case_id, BASELINE_PROFILE_ID)]
+        challenger_run_id = env["run_ids"][(pair.case_id, CHALLENGER_PROFILE_ID)]
+        challenger_idea = cmp_mod.load_sealed_final_idea(workspace, challenger_run_id)
+        baseline_idea = cmp_mod.load_sealed_final_idea(workspace, baseline_run_id)
+        challenger_sha = cmp_mod.final_idea_sha256(challenger_idea)
+        baseline_sha = cmp_mod.final_idea_sha256(baseline_idea)
+        document = {
+            "schema_version": "comparison-ai-verdict-v1.0.0",
+            "case_id": pair.case_id,
+            "recorded_at": "2026-09-05T08:00:00.000000Z",
+            "authorship": {
+                "kind": "ai_pair_reduction",
+                "pair_id": f"pair-{sha256_bytes(pair.case_id.encode())[:16]}",
+                "review_config_sha256": config_sha,
+                "verdict_run_id": challenger_run_id,
+                "verdict_idea_index": 0,
+            },
+            "content_space": {
+                "overall_preference": "content_1",
+                "domain_method_fit": "content_1",
+                "unjustified_ml_intrusion": "content_2",
+                "quality_floor_content_1": "clean",
+                "quality_floor_content_2": "clean",
+                "arm_content_1": {
+                    "run_id": challenger_run_id,
+                    "idea_index": 0,
+                    "idea_sha256": challenger_sha,
+                },
+                "arm_content_2": {
+                    "run_id": baseline_run_id,
+                    "idea_index": 0,
+                    "idea_sha256": baseline_sha,
+                },
+            },
+        }
+        ai_verdicts[pair.case_id] = document
+        facts.append(
+            cmp_mod.PairFacts(
+                pair_index=pair.pair_index,
+                case_id=pair.case_id,
+                cluster=pair.cluster,
+                baseline_metrics=env["metrics_by_run"][baseline_run_id],
+                challenger_metrics=env["metrics_by_run"][challenger_run_id],
+                verdict=cmp_mod.ai_verdict_facts(
+                    document,
+                    baseline_run_id=baseline_run_id,
+                    challenger_run_id=challenger_run_id,
+                    mapping=cmp_mod._mapping_for_case(env["mappings"], pair.case_id),
+                    packet_sha256=cmp_mod.pair_packet_sha256(
+                        env["packets"][pair.pair_index]
+                    ),
+                    recorded_at=document["recorded_at"],
+                ),
+                packet_sha256=cmp_mod.pair_packet_sha256(
+                    env["packets"][pair.pair_index]
+                ),
+            )
+        )
+    reveal_document = {
+        "blind_mapping": cmp_mod.blind_mapping_document(
+            env["mappings"], selection_manifest=env["manifest"]
+        ),
+        "revealed_at": "2026-09-05T08:00:00.000000Z",
+        "schema_version": "comparison-reveal-v1.0.0",
+    }
+    reduction = reduce_prompt_comparison(
+        selection_manifest=env["manifest"],
+        matrix_document=env["document"],
+        reveal_document=reveal_document,
+        pair_facts=tuple(facts),
+        ledger=env["ledger"],
+        ai_verdicts=ai_verdicts,
+        evaluation_protocol=protocol,
+    )
+    # The challenger sweep passes every pre-registered gate: 4-0 wins, fit
+    # 4 improved / 0 regressed, no intrusion increase, floors clean, and
+    # the deterministic-regression structural gate holds. Cost/latency and
+    # budget depend on the synthetic metrics; assert the structural gates
+    # and the decision explicitly.
+    assert reduction["gates"]["quality_3_0"]["challenger_wins"] == 4
+    assert reduction["gates"]["quality_3_0"]["baseline_wins"] == 0
+    assert reduction["gates"]["domain_method_fit"]["pass"] is True
+    assert reduction["gates"]["ml_intrusion"]["pass"] is True
+    assert reduction["gates"]["rubric_floor"]["pass"] is True
+    assert reduction["gates"]["ai_quality_floor_unresolved"]["pass"] is True
+    assert reduction["gates"]["completeness"]["pass"] is True
+    assert set(reduction["gates"]["completeness"]["verdict_channels"].values()) == {
+        "ai_pair_reduction"
+    }
+    assert (
+        reduction["gates"]["evaluation_protocol"]["revision_disclosure"]
+        == protocol["revision_disclosure"]
+    )
+    assert reduction["decision"] in ("promote", "reject")
+    # Determinism: the same inputs reduce to byte-identical output.
+    again = reduce_prompt_comparison(
+        selection_manifest=env["manifest"],
+        matrix_document=env["document"],
+        reveal_document=reveal_document,
+        pair_facts=tuple(facts),
+        ledger=env["ledger"],
+        ai_verdicts=ai_verdicts,
+        evaluation_protocol=protocol,
+    )
+    assert canonical_json_bytes(reduction) == canonical_json_bytes(again)
+    del vault, record_comparison_ai_verdict

@@ -1,6 +1,6 @@
 # 真实迁移执行手册（ticket 03 — comparison 接入 AI 评估）
 
-日期：2026-09-05。状态：**未执行**（离线编码验收已完成，真实迁移需 Robert 批准评估协议修订后按本手册执行）。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)「Comparison 接入（ticket 03）」一节；规格见 [ai-assisted-ideation-evaluation-spec.md](ai-assisted-ideation-evaluation-spec.md) 第 7 节；迁移 rehearsal 证据见 `tests/test_comparison_migration_rehearsal.py`（14 项）与 `tests/test_evaluation_costs.py`（23 项）。
+日期：2026-09-05。状态：**未执行**（离线编码验收已完成，真实迁移需 Robert 批准评估协议修订后按本手册执行）。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)「Comparison 接入（ticket 03）」一节；规格见 [ai-assisted-ideation-evaluation-spec.md](ai-assisted-ideation-evaluation-spec.md) 第 7 节；迁移 rehearsal 证据见 `tests/test_comparison_migration_rehearsal.py`（17 项）与 `tests/test_evaluation_costs.py`（23 项）。
 
 本手册是**可执行操作手册**：所有命令、哈希、目录都是当前真实状态；每一步都有机器检查，任何检查不过都 fail closed 并停在原地（见「失败保留」）。
 
@@ -158,7 +158,7 @@ EOF
 
 ## 6. 恢复 / 回退
 
-- 迁移 rehearsal 已通过（`tests/test_comparison_migration_rehearsal.py` 13 项：协议注册/拒场景、迁移包往返 + 漂移、handoff 往返 + 缺失、recency 四状态、AI 判定通道 E2E、协议必需拒绝、人工通道 byte-stability；`tests/test_evaluation_costs.py` 23 项；全量 879 passed）。
+- 迁移 rehearsal 已通过（`tests/test_comparison_migration_rehearsal.py` 17 项：协议注册/拒场景、迁移包往返 + 漂移、handoff 往返 + 缺失、recency 四状态、AI 判定通道 E2E、协议必需拒绝、人工通道 byte-stability；`tests/test_evaluation_costs.py` 23 项；全量 883 passed）。
 - 真实迁移第一步失败的回退动作 = **不动任何冻结文件**（六项冻结哈希、`run-matrix.json`、`commands.txt` 字节保持），报告失败代码；需要代码修复时只能在评估侧推进，生成侧 pin 保持不变，修复后从第 1 步重新同步重试。
 
 ## 7. 明确不做

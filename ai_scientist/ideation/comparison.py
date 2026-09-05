@@ -3181,7 +3181,10 @@ def _ai_coverage_for_run(workspace: Path, run_id: str) -> dict[str, Any] | None:
     try:
         ai_coverage = list_ai_review_coverage(workspace)
     except IdeationInputError:
-        return None
+        # A workspace-global integrity failure (missing pinned rubric,
+        # tampered chain) must not masquerade as "no AI evaluation exists":
+        # fail closed instead of treating the run as unevaluated.
+        raise
     for run_entry in ai_coverage.get("runs", []):
         if run_entry.get("run_id") != run_id:
             continue

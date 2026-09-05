@@ -236,4 +236,4 @@ exit 约定与单评审一致（exit 0 成功 / exit 1 canonical JSON 错误；p
 
 ### 证据限度
 
-本节的全部行为处于**离线编码验收**状态（全量 pytest 879 passed，迁移 rehearsal 见 `tests/test_comparison_migration_rehearsal.py` 与 `tests/test_evaluation_costs.py`）。真实六次基础 smoke 已于 2026-09-05 执行并通过（4/4，证据 [ai-review-real-smoke-evidence.md](../research/ai-review-real-smoke-evidence.md)）；但真实迁移未执行、评估协议修订未获 Robert 显式批准，因此旧 Gate 在批准前继续拒绝 AI 记录，本合同的 comparison 消费语义不构成任何晋升效力或付费授权。
+本节的全部行为处于**离线编码验收**状态（全量 pytest 883 passed，迁移 rehearsal 见 `tests/test_comparison_migration_rehearsal.py` 与 `tests/test_evaluation_costs.py`）。真实六次基础 smoke 已于 2026-09-05 执行并通过（4/4，证据 [ai-review-real-smoke-evidence.md](../research/ai-review-real-smoke-evidence.md)）；但真实迁移未执行、评估协议修订未获 Robert 显式批准，因此旧 Gate 在批准前继续拒绝 AI 记录，本合同的 comparison 消费语义不构成任何晋升效力或付费授权。

@@ -11,11 +11,11 @@
 - 新模块 `migration.py`：冻结 package 文件核验（六文件相对布局 + 哈希）、handoff manifest 双向校验、ledger recency 比较（same/local_newer/remote_newer/ambiguous fail closed）。
 - 新模块 `evaluation_costs.py`（subagent 实现，已验收）：独立评审费用台账 `evaluation-cost-ledger-v1.0.0`（hash-chain、单/双评审/修复三类条目、物理调用数、CNY 费用）+ `merged_cost_report` 合并口径（含未授权支出披露）。
 - CLI 新增 8 个 evaluation 子命令（build/register-evaluation-protocol、list-ai-coverage、record-comparison-ai-verdict、init/record-evaluation-cost、evaluation-cost-report、verify-migration-package）；import 闭包 pin 更新。
-- 测试：`tests/test_comparison_migration_rehearsal.py` 13 项（协议注册拒绝场景、迁移 package 核验、handoff round-trip、ledger recency、双工作区 E2E：双评审→pair 还原→AI verdict→reducer 消费、协议强制、人工路径字节稳定）+ `tests/test_evaluation_costs.py` 23 项（subagent）。
+- 测试：`tests/test_comparison_migration_rehearsal.py` 17 项（协议注册拒绝场景、迁移 package 核验、handoff round-trip、ledger recency、双工作区 E2E：双评审→pair 还原→AI verdict→reducer 消费、协议强制、人工路径字节稳定）+ `tests/test_evaluation_costs.py` 23 项（subagent）。
 - 投影语义专项验证：三种映射方向 + role-anchored 枚举断言通过（domain_method_fit `challenger_better` 不随显示臂翻转）。
 
 **结果：**
-- ✅ 全量 pytest **879 passed**（基线 843 + 36）；compileall 通过；改动文件 black 通过；CLI smoke（cost ledger 两次记账、协议注册链、list-ai-coverage）通过。
+- ✅ 全量 pytest **883 passed**（基线 843 + 40）；compileall 通过；改动文件 black 通过；CLI smoke（cost ledger 两次记账、协议注册链、list-ai-coverage）通过。
 - ✅ 真实迁移/真实 smoke 未执行（无授权）；rehearsal 为离线双工作区证明。
 
 **问题与状态：**
