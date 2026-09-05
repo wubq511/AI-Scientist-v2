@@ -536,6 +536,41 @@ def test_export_pair_package_rejects_identical_arms(tmp_path: Path) -> None:
     assert exc2.value.code == "PAIR_ARMS_IDENTICAL"
 
 
+def test_export_pair_package_allows_paper_ids_inside_idea_text(
+    tmp_path: Path,
+) -> None:
+    """Corpus-reference hashes inside a finalized idea's own text export fine.
+
+    A finalized idea may cite references as `Paper ID <hash>` (the model's
+    declared-grounding style). That hash names a reference paper, not an
+    arm; both arms share one corpus, so it cannot reveal the challenger.
+    Run/case/profile/pair identities stay fail closed (regression for the
+    real-slot-1 baseline idea whose Related Work cited three paper ids).
+    """
+    workspace = _setup_review_workspace(tmp_path)
+    _approved_inputs(workspace)
+    payload = _idea_payload()
+    paper_id = _APPROVED_INPUTS[workspace][4]
+    payload["Related Work"] = (
+        f"Prior forecasting work predicted seasonal peaks (Paper ID {paper_id}) "
+        "but relied exclusively on static clinical records. Our proposal "
+        "introduces adaptive temporal cueing based on passive sensing streams."
+    )
+    run_a = _seal_run(workspace, payload)
+    run_b = _seal_run(workspace, _second_idea_payload())
+
+    exported = export_pair_package(workspace, run_a, 0, run_b, 0)
+    package_doc = json.loads(
+        (_pair_root(workspace, exported["pair_id"]) / PAIR_PACKAGE_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    payload_text = json.dumps(package_doc["direction_payloads"], ensure_ascii=False)
+    assert paper_id in payload_text  # the idea text carries the citation
+    # Non-idea identity secrets stay fail closed.
+    assert run_a not in payload_text and CASE_ID not in payload_text
+
+
 # ==============================================================================
 # Import + validate: four independent contexts, fail closed
 # ==============================================================================
