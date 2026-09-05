@@ -1,6 +1,6 @@
 # AI 评审真实 smoke 执行手册（六次基础调用）
 
-日期：2026-09-05。状态：**未执行**——本手册是 ticket [02-deliver-independent-and-pairwise-review](../wayfinder/ai-assisted-ideation-evaluation/tickets/02-deliver-independent-and-pairwise-review.md) 交付的可执行入口文档；当前没有付费授权，未发生任何真实模型调用。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)，离线验收证据见 [ai-pair-review-offline-validation-evidence.md](../research/ai-pair-review-offline-validation-evidence.md)。
+日期：2026-09-05。状态：**已执行**（2026-09-05，基础六次 + 修复/重跑共 14 次物理调用；执行证据与结果见 [ai-review-real-smoke-evidence.md](../research/ai-review-real-smoke-evidence.md)）。合同行为见 [ai-review-authoring-contract-v2.md](ai-review-authoring-contract-v2.md)，离线验收证据见 [ai-pair-review-offline-validation-evidence.md](../research/ai-pair-review-offline-validation-evidence.md)。
 
 ## 0. 授权门槛（执行前必须全部成立）
 

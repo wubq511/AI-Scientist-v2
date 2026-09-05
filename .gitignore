@@ -215,3 +215,4 @@ final_papers/
 # HF
 cache/
 huggingface/
+artifacts/evaluations-smoke-pair-archive/
