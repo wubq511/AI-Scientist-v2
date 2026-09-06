@@ -1,0 +1,2 @@
+paperId,title,abstract,externalIds,abstract_summary
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,Adaptive Cueing for Chronic Migraine Forecasting,"People with chronic migraine experience fluctuating symptoms that complicate timely care. This study introduces PulseMap, a personalized cueing system that combines wearable signals with daily diaries, and reports earlier warnings with fewer false alarms.","{'DOI': '10.1234/example.migraine', 'PubMed': '24680'}","PulseMap combines wearable sensing and symptom diaries to improve individualized early-warning accuracy."

@@ -19,6 +19,8 @@ We are excited to introduce The AI Scientist-v2, a generalized end-to-end agenti
 
 This system autonomously generates hypotheses, runs experiments, analyzes data, and writes scientific manuscripts. Unlike [its predecessor (AI Scientist-v1)](https://github.com/SakanaAI/AI-Scientist), the AI Scientist-v2 removes reliance on human-authored templates, generalizes across Machine Learning (ML) domains, and employs a progressive agentic tree search, guided by an experiment manager agent.
 
+> **Fork scope:** The instructions below document the upstream end-to-end pipeline. This fork's active scope is ideation-only; `AGENTS.md` and the local Wayfinder decisions are authoritative. Do not use the CUDA/BFTS/experiment instructions for ideation work.
+
 > **Note:**
 > The AI Scientist-v2 doesn’t necessarily produce better papers than v1, especially when a strong starting template is available. v1 follows well-defined templates, leading to high success rates, while v2 takes a broader, more exploratory approach with lower success rates. v1 works best for tasks with clear objectives and a solid foundation, whereas v2 is designed for open-ended scientific exploration.
 
@@ -93,6 +95,21 @@ export S2_API_KEY="YOUR_S2_KEY_HERE"
 # export AWS_SECRET_ACCESS_KEY="YOUR_AWS_SECRET_KEY"
 # export AWS_REGION_NAME="your-aws-region"
 ```
+
+For this fork's governed DeepSeek ideation path on macOS, keep the credential in
+the ignored project-root `.env` file. Run `scripts/setup-project-env` once to
+enter it without terminal echo; the wizard writes only `DEEPSEEK_API_KEY` and
+sets the file mode to `600`. Prefix later ideation commands with
+`scripts/with-project-env`, for example:
+
+```bash
+scripts/with-project-env python ai_scientist/perform_ideation_temp_free.py --help
+```
+
+The launcher parses `.env` as data rather than shell code, rejects other keys or
+unsafe permissions, and passes the credential only through the child process
+environment. Do not commit `.env` or paste its value into commands, logs, or
+chat.
 
 ## Generate Research Ideas
 

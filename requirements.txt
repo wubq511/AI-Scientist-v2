@@ -1,29 +1,4 @@
-# LLM APIs
-anthropic
-backoff
-openai
-# Viz
-matplotlib
-pypdf
-pymupdf4llm
-seaborn
-# Common Requirements
-numpy
-transformers
-datasets
-tiktoken
-wandb
-tqdm
-rich
-humanize
-dataclasses-json
-funcy
-black
-genson
-shutup
-python-igraph
-coolname
-jsonschema
-omegaconf
-botocore
-boto3
+# Canonical ideation-only runtime dependencies.
+# httpx is the sole production HTTP transport dependency for DeepSeek execution (ticket 01).
+# Retained legacy/downstream dependencies live in requirements-upstream.txt.
+httpx==0.28.1

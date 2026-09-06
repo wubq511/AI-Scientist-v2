@@ -168,7 +168,9 @@ cython_debug/
 .vscode/
 
 # Misc folders
+.DS_Store
 data/
+docs/task/
 *ckpt.pt
 *.zip
 templates/*/run_0/
@@ -188,9 +190,29 @@ aisci_outputs/
 slurm_logs/
 .out
 
+# Throwaway local-ranking comparison raw evidence
+artifacts/local-ranking-prototype/
+
+# Private ideation input preparation and approval evidence
+artifacts/ideation-inputs/
+
+# Private Ideation Run evidence (raw Evidence Chains)
+artifacts/ideation-runs/
+
+# Private post-seal Evaluation Artifacts (briefs, drafts, finalized versions)
+artifacts/evaluations/
+
+# Session-local review execution config source for the real smoke run
+artifacts/evaluations-smoke-config.json
+
+# Sanitized Evidence Chain exports (untracked so between-slot exports do not
+# dirty the worktree pinned by the comparison execution-code pin)
+evidence/ideation-runs/
+
 # final papers
 final_papers/
 
 # HF
 cache/
 huggingface/
+artifacts/evaluations-smoke-pair-archive/

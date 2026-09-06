@@ -1,0 +1,54 @@
+{
+  "issues": [],
+  "paper_judgments": [
+    {
+      "grade": 2,
+      "paper_id": "p-bm25",
+      "query_id": "fixture-broad"
+    },
+    {
+      "grade": 0,
+      "paper_id": "p-citation",
+      "query_id": "fixture-broad"
+    },
+    {
+      "grade": 3,
+      "paper_id": "p-dense",
+      "query_id": "fixture-broad"
+    },
+    {
+      "grade": 3,
+      "paper_id": "p-bm25",
+      "query_id": "fixture-focused"
+    },
+    {
+      "grade": 0,
+      "paper_id": "p-citation",
+      "query_id": "fixture-focused"
+    },
+    {
+      "grade": 1,
+      "paper_id": "p-dense",
+      "query_id": "fixture-focused"
+    }
+  ],
+  "schema_version": "local-ranking-qrels-v1",
+  "segment_judgments": [
+    {
+      "grade": 2,
+      "query_id": "fixture-broad",
+      "segment_id": "seg-bm25"
+    },
+    {
+      "grade": 2,
+      "query_id": "fixture-broad",
+      "segment_id": "seg-dense"
+    },
+    {
+      "grade": 2,
+      "query_id": "fixture-focused",
+      "segment_id": "seg-bm25"
+    }
+  ],
+  "split": "fixture"
+}

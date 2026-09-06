@@ -1,0 +1,34 @@
+{
+  "policy_version": "reference-authority-v1.0",
+  "records": {
+    "0bbeaef2fa56c0cbc4a08f7295498e44614202f8": {
+      "abstract_status": "published",
+      "content_type": "publisher_abstract",
+      "exact_identifier": "PMID:21668448",
+      "request_url": "https://www.ebi.ac.uk/europepmc/webservices/rest/article/MED/21668448?resultType=core&format=json",
+      "source": "europe_pmc",
+      "status": "validated",
+      "text": "Cyclin dependent kinase-5 (Cdk5) activity is deregulated in Alzheimer's disease (AD) and contributes to all three hallmarks: neurotoxic β-amyloid formation, neurofibrillary tangles, and neuronal death. However, the mechanism leading to Cdk5 deregulation remains controversial. Cdk5 deregulation in AD is usually linked to the formation of p25, a proteolysis product of Cdk5 activator p35, which leads to Cdk5 mislocalization and hyperactivation. A few studies have indeed shown increased p25 levels in AD brains; however, others have refuted this observation. These contradictory findings suggest that additional factors contribute to Cdk5 deregulation. This study identified glutathione-S-transferase pi 1 (GSTP1) as a novel Cdk5 regulatory protein. We demonstrate that it is a critical determinant of Cdk5 activity in human AD brains and various cancer and neuronal cells. Increased GSTP1 levels were consistently associated with reduced Cdk5 activity. GSTP1 directly inhibits Cdk5 by dislodging p25/p35, and indirectly by eliminating oxidative stress. Cdk5 promotes and is activated by oxidative stress, thereby engaging a feedback loop which ultimately leads to cell death. Not surprisingly, GSTP1 transduction conferred a high degree of neuroprotection under neurotoxic conditions. Given the critical role of oxidative stress in AD pathogenesis, an increase in GSTP1 level may be an alternative way to modulate Cdk5 signaling, eliminate oxidative stress, and prevent neurodegeneration."
+    },
+    "2ec2352d4009f3953d3322c8b7aaa9f6c8777043": {
+      "abstract_status": "published",
+      "content_type": "publisher_abstract",
+      "exact_identifier": "DBLP:journals/jmlr/PerlichPS03",
+      "request_url": "https://www.jmlr.org/papers/v4/perlich03a.html",
+      "source": "jmlr_official",
+      "status": "validated",
+      "text": "Tree induction and logistic regression are two standard, off-the-shelf methods for building models for classification. We present a large-scale experimental comparison of logistic regression and tree induction, assessing classification accuracy and the quality of rankings based on class-membership probabilities. We use a learning-curve analysis to examine the relationship of these measures to the size of the training set. The results of the study show several things. (1) Contrary to some prior observations, logistic regression does not generally outperform tree induction. (2) More specifically, and not surprisingly, logistic regression is better for smaller training sets and tree induction for larger data sets. Importantly, this often holds for training sets drawn from the same domain (that is, the learning curves cross), so conclusions about induction-algorithm superiority on a given domain must be based on an analysis of the learning curves. (3) Contrary to conventional wisdom, tree induction is effective at producing probability-based rankings, although apparently comparatively less so for a given training-set size than at making classifications. Finally, (4) the domains on which tree induction and logistic regression are ultimately preferable can be characterized surprisingly well by a simple measure of the separability of signal from noise."
+    },
+    "ddd7c556a8eb08cdb08010cc3fbc90b3f13b7f77": {
+      "abstract_status": "not_published",
+      "article_type": "Invited Commentary",
+      "content_type": "official_full_text",
+      "exact_identifier": "DOI:10.1001/jamanetworkopen.2019.8438",
+      "request_url": "https://jamanetwork.com/journals/jamanetworkopen/fullarticle/2740775",
+      "source": "jama_official",
+      "status": "validated",
+      "text": "In this issue of JAMA Network Open, Ofori-Asenso and colleagues provide a comprehensive systematic review and meta-analysis of the global incidence of frailty and prefrailty among community-dwelling older adults. As life expectancy increases globally, understanding the onset and dynamic transitions of frailty has become essential for public health and clinical management of aging populations. Frailty is not a static state; rather, it represents a dynamic vulnerability where individuals can transition between robust, prefrail, and frail states. Interventions targeted at prefrail stages offer significant potential to delay or mitigate functional decline and associated adverse outcomes."
+    }
+  },
+  "schema_version": "reference-authority-policy-v1.0"
+}

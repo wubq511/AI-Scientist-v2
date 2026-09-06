@@ -1,0 +1,113 @@
+{
+  "artifact_root": "artifacts/local-ranking-prototype",
+  "attempt_id": "fixture-001",
+  "candidates": [
+    {
+      "aggregation": "max",
+      "candidate_id": "idf-v1",
+      "output_budget": {
+        "paper_cap": 3,
+        "segments_per_paper": 1,
+        "total_segment_cap": 3
+      },
+      "parameters": {},
+      "phrase_bonus": false,
+      "rrf_k": null,
+      "rrf_sources": [],
+      "scorer": "idf_coverage",
+      "title_weight": 0
+    },
+    {
+      "aggregation": "max",
+      "candidate_id": "tfidf-v1",
+      "output_budget": {
+        "paper_cap": 3,
+        "segments_per_paper": 1,
+        "total_segment_cap": 3
+      },
+      "parameters": {},
+      "phrase_bonus": false,
+      "rrf_k": null,
+      "rrf_sources": [],
+      "scorer": "tfidf_cosine",
+      "title_weight": 0
+    },
+    {
+      "aggregation": "max",
+      "candidate_id": "bm25-v1",
+      "output_budget": {
+        "paper_cap": 3,
+        "segments_per_paper": 1,
+        "total_segment_cap": 3
+      },
+      "parameters": {
+        "b": 0.75,
+        "k1": 1.2
+      },
+      "phrase_bonus": false,
+      "rrf_k": null,
+      "rrf_sources": [],
+      "scorer": "bm25",
+      "title_weight": 0
+    },
+    {
+      "aggregation": "max",
+      "candidate_id": "dph-v1",
+      "output_budget": {
+        "paper_cap": 3,
+        "segments_per_paper": 1,
+        "total_segment_cap": 3
+      },
+      "parameters": {},
+      "phrase_bonus": false,
+      "rrf_k": null,
+      "rrf_sources": [],
+      "scorer": "dph",
+      "title_weight": 0
+    },
+    {
+      "aggregation": "max",
+      "candidate_id": "rrf-v1",
+      "output_budget": {
+        "paper_cap": 3,
+        "segments_per_paper": 1,
+        "total_segment_cap": 3
+      },
+      "parameters": {},
+      "phrase_bonus": false,
+      "rrf_k": 10,
+      "rrf_sources": [
+        "bm25-v1",
+        "tfidf-v1"
+      ],
+      "scorer": "rrf",
+      "title_weight": 0
+    }
+  ],
+  "comparison_id": "diagnostic-v1",
+  "dense_model": null,
+  "environment_lock": null,
+  "evaluation_mode": "with_qrels",
+  "input": {
+    "path": "prototypes/local_ranking/fixtures/input.json",
+    "sha256": "8ab14782871db2ec736b886e6165a0792996448effe263649d5cb1dccc75c856"
+  },
+  "normalization_version": "lexical_normalization_v1",
+  "protocol_version": "1.0.0",
+  "qrels": {
+    "path": "prototypes/local_ranking/fixtures/qrels.json",
+    "sha256": "03104327881b2fbb0cf0b3d2afeb9fbcc4d68a3a95e9a9669c33ef57f2f892e8"
+  },
+  "runtime": {
+    "cold_repetitions": 5,
+    "device": "cpu",
+    "dtype": "float32",
+    "enforce_reference_runtime": false,
+    "measure_resources": false,
+    "required_python": "3.13.7",
+    "thread_count": 1,
+    "warm_repetitions": 30
+  },
+  "schema_version": "local-ranking-protocol-v1",
+  "split": "fixture"
+}
