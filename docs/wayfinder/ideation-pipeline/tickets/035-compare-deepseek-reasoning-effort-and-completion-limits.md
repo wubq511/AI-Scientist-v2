@@ -1,8 +1,8 @@
 ---
 title: Validate max-reasoning canary and completion limits
 type: prototype
-status: open
-assignee: null
+status: resolved
+assignee: agent
 blocked_by:
   - 029-define-the-optimization-promotion-gate.md
 ---
@@ -23,11 +23,15 @@ blocked_by:
 
 ## Acceptance criteria
 
-- [ ] 固定 `cross-domain-v1` + `reasoning_effort=max` 的新运行清单，不使用旧 24-run commands。
-- [ ] 核对已批准 12-case selection/input manifests，按新配置统计覆盖；记录已有材料的使用/暴露情况，不把复用输入包装为全新独立测试。
-- [ ] 各已执行 case 的 Run Seal、验证、sanitized export、双 AI 单条评审与费用可回链；失败与未决如实保留。
-- [ ] 记录 `finish_reason`、有效输出、截断、延迟与实际成本，给出 32768 的实测观察，不报告未经进行的 high/max 胜负。
-- [ ] 汇总 12-case 跨领域结果及扩量建议；费用按现有有效预算与授权范围执行，准备时重估 max 的调用成本。
+- [x] 固定 `cross-domain-v1` + `reasoning_effort=max` 的新运行清单，不使用旧 24-run commands。（`035-max-canary` package run-matrix，12 slots，执行 pin `1b84128`）
+- [x] 核对已批准 12-case selection/input manifests，按新配置统计覆盖；记录已有材料的使用/暴露情况，不把复用输入包装为全新独立测试。（selection sha256 `aae9d766…` 全 12 case Workshop/Corpus approved 复用；4 case 与 002 共享输入已在报告中披露）
+- [x] 各已执行 case 的 Run Seal、验证、sanitized export、双 AI 单条评审与费用可回链；失败与未决如实保留。（12/12 sealed success、validate valid、exported、评审聚合完成；无失败、无 forfeited）
+- [x] 记录 `finish_reason`、有效输出、截断、延迟与实际成本，给出 32768 的实测观察，不报告未经进行的 high/max 胜负。（34/34 attempts finish=stop，零截断；总成本 1.34 CNY）
+- [x] 汇总 12-case 跨领域结果及扩量建议；费用按现有有效预算与授权范围执行，准备时重估 max 的调用成本。（[Max Reasoning Canary 结果报告](../../../agents/max-canary-035-results.md)）
+
+## Resolution（2026-09-06）
+
+**已完成并关闭。** Robert 批准全自动化执行（「我现在批准你直接跑大模型调用……我批准」），12 个 max Canary run 于 2026-09-06 凌晨全部完成：8 cluster 全覆盖、全部 sealed success、无截断（`max_tokens=32768` 保留有直接证据）、双 AI 评审 12/12 聚合（8 个维度弃权如实保留）。Canary 阶段累计成本 1.34 CNY（上限 30 CNY）。证据、质量汇总、限制与扩量建议见 [结果报告](../../../agents/max-canary-035-results.md)。reasoning effort 恒定 `max` 已作为执行默认 pin 入 runtime（commit `1b84128`）。036 若执行，以本 Canary 结果为基线臂。
 
 ## Notes
 

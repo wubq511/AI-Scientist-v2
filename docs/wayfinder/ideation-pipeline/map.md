@@ -12,7 +12,7 @@ status: open
 
 ## Notes
 
-- **当前下一步（2026-09-06）**：[Validate max-reasoning canary and completion limits](tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md)。Robert 已直接指定 max，取消 high/max 比较；035 改为新 prompt + max 的 12-case 单配置 Canary 验收。无需等新的 reasoning-effort 选型，036 后置。
+- **当前下一步（2026-09-06 更新）**：[035 已完成并关闭](tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md)。max 单配置 12-case Canary 全部成功，零截断，总成本 1.34 CNY，结果见 [Max Reasoning Canary 结果报告](../../agents/max-canary-035-results.md)。下一决策点为扩量 gate（终波规模与预算，待 Robert 批准）；036 后置可选，若执行以 max Canary 结果为基线臂。
 
 - 仅限规划：解决本 map 期间不实现 destination 交付物。
 - 认领 ticket 前先读 `AGENTS.md`、`CONTEXT.md`、相关 work logs 和 `docs/agents/issue-tracker.md`。
