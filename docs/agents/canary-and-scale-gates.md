@@ -4,6 +4,15 @@
 
 本契约定义从「零真实调用」到「终波」的执行阶段、Canary 集的选择规则、成本与质量预算、失败处理，以及打开扩量 gate 的全部条件。修订规则同 027 验证矩阵：任何修订 = 新版本号 + Robert 批准。
 
+## 交付收尾修订（v1.4 · 2026-09-06 · Robert 授权，终波不执行）
+
+Robert 于 2026-09-06 授权交付收尾并明示「扩量你自行判断有没有意义。如果不是必要的话就不做」。据此裁决并落账：
+
+- **扩量 gate 满足但终波不执行**。gate 六项条件实测状态：①硬阻断清零（12 runs 全生命周期零 VM-LEAKAGE-02 hygiene 命中、零 Run Isolation 违规、零 preflight 绕过；VM-QUAL-01 Evaluation Artifact 100% 覆盖）；②12/12 已执行 canary case 的 sealed run Terminal Outcome = `success`；③028 消费者矩阵行全部通过（12-case 执行期内 validate/export/评审链无一行失败，离线 pytest 899 passed）；④实际成本 1.34 CNY（含 0.14 历史 smoke）在 ¥30 包络内，单 run 实测 0.07–0.13 CNY 已校准；⑤Robert 于 2026-09-06 授权收尾并明示扩量按必要性自判；⑥`cross-domain-v1` 已按 Robert 的 post-evidence-adoption 决定成为唯一 production prompt（`ml-baseline-v1` 已退役）。
+- **必要性裁决**：终波（预期 ~50 runs）只增加样本量、不增加叙事维度。max Canary 已达成 8 cluster 全覆盖、12/12 success、双 AI 评审七维全部达标共识（relative_novelty 12/12 beyond_target、feasibility 12/12 sound、contamination 12/12 none_found）、34/34 attempt `finish_reason=stop` 零截断；Evidence Feedback Loop 叙事所需的中途修正与失败发现（002 评审协议位置翻转、035 admission 参数统一修正、run 8 引文滑误三次修复）已在 canary 期全部发生并留证。执行终波与交付截止时间直接冲突。**终波正式裁定不执行，扩量 gate 关闭（gate-passed, final-wave-waived）。**
+- 036（Workshop 变体比较）同日以 `no-comparison-executed` 关闭，理由同上；详见 ticket 036 Resolution 与 [wayfinder map 全闭记录](../wayfinder/ideation-pipeline/map.md)。
+- 本契约完成历史使命：三波结构执行至 canary 波，后续任何付费 ideation 执行属新契约范畴，不受本契约约束。
+
 ## 当前执行修订（v1.3 · 2026-09-06）
 
 Robert 已采用 `cross-domain-v1`（Proposal 002，post-evidence-adoption），并明确指定后续生成使用 `reasoning_effort=max`，无需再比较 high/max 或衡量选型性价比。此修订取代 v1.2 中“先取得新的 reasoning-effort proposal/胜方”的执行前提；selection 规则与既有实际预算不因该决定重置。

@@ -1,7 +1,7 @@
 ---
 title: Design an Auditable Ideation-Only Pipeline
 label: wayfinder:map
-status: open
+status: closed
 ---
 
 # Design an Auditable Ideation-Only Pipeline
@@ -13,6 +13,7 @@ status: open
 ## Notes
 
 - **当前下一步（2026-09-06 更新）**：[035 已完成并关闭](tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md)。max 单配置 12-case Canary 全部成功，零截断，总成本 1.34 CNY，结果见 [Max Reasoning Canary 结果报告](../../agents/max-canary-035-results.md)。下一决策点为扩量 gate（终波规模与预算，待 Robert 批准）；036 后置可选，若执行以 max Canary 结果为基线臂。
+- **MAP 全闭（2026-09-06）**：Robert 授权交付收尾并明示扩量由 agent 自行判断必要性。裁决：**终波不执行**——12-case Canary 已 8 cluster 全覆盖、12/12 success、双 AI 评审质量全部达标、零硬阻断，终波只增加样本量不增加叙事维度；[036 以 no-comparison-executed 关闭](tickets/036-compare-workshop-specificity-and-rendering.md)。035/036 均关闭，本 map 全部决策票关闭，map 状态置 closed。交付收尾（扩量 gate 记录、experiment report、interview narrative、一致性扫尾）见 [delivery-and-handoff](../../agents/delivery-and-handoff.md) 与 [Experiment report](../../research/ideation-delivery-experiment-report.md)。
 
 - 仅限规划：解决本 map 期间不实现 destination 交付物。
 - 认领 ticket 前先读 `AGENTS.md`、`CONTEXT.md`、相关 work logs 和 `docs/agents/issue-tracker.md`。
@@ -60,10 +61,12 @@ status: open
 - [Define the optimization promotion gate](tickets/029-define-the-optimization-promotion-gate.md): 确立 Optimization Promotion 机制——证据驱动的设计变更过双 gate（Plan/Promotion）+ pre-registered 判据与 Regression Budget，bugfix 与未定设计豁免；Design Epoch 证据可比性规则供 028 引用；契约落 `docs/agents/promotion-gate.md` v1.0。
 - [Define canaries and scale gates](tickets/028-define-canaries-and-scale-gates.md): 三波结构（smoke 1 → canary 12 → 终波）+ 分层 Canary（035/036 共享、含边缘案例、名单私有）；¥30 硬上限优先队列；Scale Gate = 硬阻断清零 + 逐 case success + 矩阵 028 行 + Robert 批准；终波规模由 gate 按面试需要定（预期 ~50，不要求全量 237），031 修订为终波按批批准；契约落 `docs/agents/canary-and-scale-gates.md`（v1.1 经 035 算术修正已获批）。
 - [Define final delivery and commit sequence](tickets/030-define-final-delivery-and-commit-sequence.md): 单一 spec 与 13 张 VM-anchored tracer-bullet implementation tickets 已批准并发布；第一票为无行为变化地基，最后一票 contract legacy path，035/036 保留到 Canary 期。
+- [Compare DeepSeek reasoning effort and completion limits](tickets/035-compare-deepseek-reasoning-effort-and-completion-limits.md): Robert 直接指定 `reasoning_effort=max` 终止比较语义；max 单配置 12-case Canary（cross-domain-v1, max_tokens=32768）12/12 sealed success、零截断、生成 1.14 CNY，票以 max Canary 运行验收关闭。
+- [Compare Workshop specificity and rendering](tickets/036-compare-workshop-specificity-and-rendering.md): Robert 授权交付收尾并明示扩量按必要性自判；裁决终波与 036 变体比较均非必要（12/12 success + 评审质量达标 + 零硬阻断，比较只增样本量不增叙事维度），票以 `no-comparison-executed` 关闭，wayfinder map 全闭。
 
 ## Not yet specified
 
-<!-- 当前无未决项；035/036 已有明确问题，只等待 Canary evidence。 -->
+<!-- 2026-09-06：无未决项。035/036 均已关闭（035 = max Canary 运行验收；036 = no-comparison-executed）；终波经 Robert 授权的必要性裁决后不执行。map 全闭。 -->
 
 ## Out of scope
 

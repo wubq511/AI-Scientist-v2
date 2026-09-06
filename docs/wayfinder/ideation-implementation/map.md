@@ -1,7 +1,7 @@
 ---
 title: Implement the Auditable Ideation-Only Pipeline
 label: wayfinder:map
-status: open
+status: closed
 ---
 
 # Implement the Auditable Ideation-Only Pipeline
@@ -41,3 +41,7 @@ Ticket frontmatter is authoritative for status and blocking edges. Each ticket i
 - [Validate and export a trustworthy Evidence Chain](tickets/11-validate-and-export-a-trustworthy-evidence-chain.md)：以静态校验器对事件链、seal 与产物做单调哈希及完整性核验，确定性判定 `RUN_CORRUPT` 且不可修复/恢复/封印/导出/重放；以正向白名单导出器（空对象构造、发布门禁全面扫描、原子重命名提交、字节级幂等）导出脱敏证据；以跨 run/路径/符号链接强隔离（拦截私有历史证据作为运行时输入、拦截跨 run 读写与全攻击集）和 write-once attempt 语义杜绝覆盖篡改，并以离线重放验证器证明执行决定论。
 - [Evaluate every finalized idea after seal](tickets/12-evaluate-every-finalized-idea-after-seal.md)：以 pinned 版本化七项 rubric 策略（SHA-256 锁定、漂移即 `POLICY_DRIFT`）、sealed + non-corrupt 硬前提、沿事件链逐字节核验的 retrieval 摘录（各层形状 fail-closed）与 Workshop Manifest 绑定的私有 Target comparator 组装可重建 Evaluation Brief；以全确定性 fail-closed validate（封闭 schema、全 hash linkage、封闭 enums、非空 rationale、authoring audit、linear supersedes）提交 write-once 定稿；以只读三态 coverage（corrupt/unevaluable run 单列不计入）交付 VM-QUAL-01；每个 finalized idea 独立计一份 artifact（含 terminal `failed` run 已 committed ideas），全程无 numeric/overall score、无 LLM judgment。
 - [Contract the legacy path and prove handoff readiness](tickets/13-contract-the-legacy-path-and-prove-handoff-readiness.md)：删除入口 `legacy` 子命令与全部 legacy 机器，新 ideation entry 传递 import closure 收紧为纯标准库（import guard 双层清单锁定，BFTS/downstream/global Semantic Scholar 不可达）；`requirements.txt` 成为空 runtime 合同，四个 legacy 包移入 `requirements-upstream.txt` 服务 retained 代码；修复入口在 Python ≤3.13 的 `Path` 注解 import 缺陷；Python 3.13.7 clean venv 628 项 pytest 全绿 + 裸 venv CLI 通过，3.12/3.14 候选按矩阵记录；全量 diff 双轴 review 关闭全部阻塞发现（含移除未登记的 `IDEATION_EXECUTE` 隐藏执行开关、DeepSeek 常量单源化）。
+
+## Closure（2026-09-06）
+
+全部 13 张实现票关闭（各票矩阵行 pytest 全绿 + Robert 逐票验收），总终验完成：VM-ENV-01 干净环境全量 899 passed、`compileall`/black 通过、baseline 以来整段 diff 已经双轴 code-review。运行期收尾（canary 执行、扩量裁决、终波豁免）见 [ideation-pipeline map](../ideation-pipeline/map.md)（同日全闭）与 [experiment report](../../research/ideation-delivery-experiment-report.md)。本 map 使命完成，置 closed。

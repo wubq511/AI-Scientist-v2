@@ -6,6 +6,8 @@
 
 The interview scope ends at workshop/topic preparation, target-scoped reference retrieval, idea generation, and validation. Never invoke `launch_scientist_bfts.py` or enter BFTS, experiments, plotting, write-up, or review workflows.
 
+Delivery status (2026-09-06): the wayfinder maps are closed (pipeline decisions 001–038, implementation tickets 01–13, execution tickets 01–02); canary execution completed 12/12 `success` under the production prompt `cross-domain-v1` + `reasoning_effort=max` (pinned in `ideation/deepseek.py` contract as the sole default); the final wave and ticket 036 were waived as unnecessary by Robert's authorization. The committed experiment report lives at `docs/research/ideation-delivery-experiment-report.md`. No further paid model calls are authorized without a new Robert decision.
+
 ## Human-in-the-Loop Workflow
 
 Before modifying code or starting a run, tell Robert the intended behavior, files, rationale, validation, and risks. Architecture, dataset semantics, model/API, retrieval, evaluation, and scope require his explicit approval before implementation.
