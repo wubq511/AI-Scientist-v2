@@ -35,7 +35,7 @@ from .admission import (
     _require_clean_worktree,
 )
 from .canonical import canonical_json_bytes, parse_json_bytes, sha256_bytes
-from .contract import DEEPSEEK_MODEL_ID, _now
+from .contract import DEEPSEEK_MODEL_ID, DEFAULT_REASONING_EFFORT, _now
 from .errors import IdeationInputError, fail
 from .evaluation import EVALUATION_RUBRIC_SCHEMA_VERSION
 from .profiles import (
@@ -94,11 +94,13 @@ BASELINE_PROFILE_ID = ML_BASELINE_V1.profile_id
 CHALLENGER_PROFILE_ID = CROSS_DOMAIN_V1.profile_id
 
 # Pinned one-major-variable execution parameters (Proposal 002): the pair
-# arms may differ only in Prompt Profile.
+# arms may differ only in Prompt Profile. The reasoning effort follows the
+# pinned production default so matrix build and ingest stay consistent with
+# what admission writes (the sealed 002 matrix keeps its historical high).
 COMPARISON_MAX_NUM_GENERATIONS = 1
 COMPARISON_NUM_REFLECTIONS = 3
 COMPARISON_MAX_TOKENS = DEFAULT_MAX_TOKENS
-COMPARISON_REASONING_EFFORT = "high"
+COMPARISON_REASONING_EFFORT = DEFAULT_REASONING_EFFORT
 
 # Canary aggregate budget and the Plan Gate machinery.
 CANARY_HARD_CAP_CNY = Decimal("30.00")

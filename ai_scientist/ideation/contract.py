@@ -146,10 +146,11 @@ PAPER_ID_PATTERN = re.compile(r"\b[0-9a-f]{40}\b", re.IGNORECASE)
 # DeepSeek provider identity and pinned execution defaults (tickets 022/031).
 # Single source of truth for both the admission Run Specification pin and the
 # adapter enforcement; the Canary-open parameters (035/036) ship as pinned
-# defaults so an admitted run stays immutable.
+# defaults so an admitted run stays immutable. Robert pinned reasoning
+# effort to max on 2026-09-06 (user-specified configuration, ticket 035).
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL_ID = "deepseek-v4-pro"
-DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_REASONING_EFFORT = "max"
 MAX_ATTEMPTS_PER_OPERATION = 2
 
 

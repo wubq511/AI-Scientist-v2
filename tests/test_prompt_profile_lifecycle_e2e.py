@@ -139,7 +139,7 @@ def test_full_lifecycle_seals_validates_and_exports_with_pinned_profile(
     assert request_doc["prompt_profile"] == expected_field
     assert admission_doc["prompt_profile"] == expected_field
     assert admission_doc["model"]["max_tokens"] == 32768
-    assert admission_doc["model"]["reasoning_effort"] == "high"
+    assert admission_doc["model"]["reasoning_effort"] == "max"
 
     transport = _CapturingStubTransport(_stub_responses(workspace, inputs))
     result = execute(workspace, run_id, transport)
